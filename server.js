@@ -205,7 +205,28 @@ io.on('connection', (socket) => {
           const data = doc.data();
           if (data.members.includes(members[1])) {
             return callback({ convId: doc.id, existing: true });
-  // ── Berichtenstatus: gelezen ──
+          }
+        }
+      }
+
+      const convRef = await db.collection('conversations').add({
+        members,
+        memberNames,
+        isGroup: isGroup || false,
+        groupName: groupName || null,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastMessage: null,
+      });
+
+      callback({ convId: convRef.id, existing: false });
+    } catch (err) {
+      console.error(err);
+      callback({ error: 'Gesprek kon niet worden aangemaakt' });
+    }
+  });
+
+    // ── Berichtenstatus: gelezen ──
   socket.on('messages:read', ({ convId, uid }) => {
     socket.to(convId).emit('message:status', { convId, readerId: uid, status: 'read' });
   });
@@ -233,28 +254,7 @@ io.on('connection', (socket) => {
     } catch (e) { cb?.({ error: e.message }); }
   });
 
-            
-          }
-        }
-      }
-
-      const convRef = await db.collection('conversations').add({
-        members,
-        memberNames,
-        isGroup: isGroup || false,
-        groupName: groupName || null,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        lastMessage: null,
-      });
-
-      callback({ convId: convRef.id, existing: false });
-    } catch (err) {
-      console.error(err);
-      callback({ error: 'Gesprek kon niet worden aangemaakt' });
-    }
-  });
-
+  
   // ── Verbreken ──
   socket.on('disconnect', async () => {
     const uid = socket.data.uid;
