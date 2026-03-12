@@ -77,7 +77,9 @@ app.get('/api/conversations/:uid', async (req, res) => {
       .limit(50)
       .get();
 
-    const convs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const convs = snap.docs
+      .filter(d => !(d.data().deletedFor || []).includes(uid))
+      .map(d => ({ id: d.id, ...d.data() }));
     res.json(convs);
   } catch (err) {
     console.error(err);
@@ -89,13 +91,21 @@ app.get('/api/conversations/:uid', async (req, res) => {
 app.get('/api/messages/:convId', async (req, res) => {
   try {
     const { convId } = req.params;
+    const { uid } = req.query;
     const limit = parseInt(req.query.limit) || 50;
-    const snap = await db.collection('conversations').doc(convId)
+
+    let query = db.collection('conversations').doc(convId)
       .collection('messages')
       .orderBy('createdAt', 'desc')
-      .limit(limit)
-      .get();
+      .limit(limit);
 
+    if (uid) {
+      const convDoc = await db.collection('conversations').doc(convId).get();
+      const clearedAt = convDoc.exists ? convDoc.data().clearedAt?.[uid] : null;
+      if (clearedAt) query = query.where('createdAt', '>', clearedAt);
+    }
+
+    const snap = await query.get();
     const msgs = snap.docs.map(d => ({ id: d.id, ...d.data() })).reverse();
     res.json(msgs);
   } catch (err) {
@@ -104,20 +114,34 @@ app.get('/api/messages/:convId', async (req, res) => {
   }
 });
 
-// ─── REST: Gesprek verwijderen (inclusief alle berichten) ─────────────────────
+// ─── REST: Gesprek verwijderen (soft delete per gebruiker) ───────────────────
 app.delete('/api/conversations/:convId', async (req, res) => {
   try {
     const { convId } = req.params;
+    const { uid } = req.query;
+    if (!uid) return res.status(400).json({ error: 'uid is verplicht' });
+
     const convRef = db.collection('conversations').doc(convId);
+    const convDoc = await convRef.get();
+    if (!convDoc.exists) return res.status(404).json({ error: 'Niet gevonden' });
 
-    // Verwijder alle berichten in de subcollectie
-    const msgsSnap = await convRef.collection('messages').get();
-    const batch = db.batch();
-    msgsSnap.docs.forEach(doc => batch.delete(doc.ref));
-    await batch.commit();
+    const { members = [], deletedFor = [] } = convDoc.data();
+    const newDeletedFor = [...new Set([...deletedFor, uid])];
 
-    // Verwijder het gesprek zelf
-    await convRef.delete();
+    if (members.every(m => newDeletedFor.includes(m))) {
+      // Iedereen heeft verwijderd → echt verwijderen uit database
+      const msgsSnap = await convRef.collection('messages').get();
+      const batch = db.batch();
+      msgsSnap.docs.forEach(doc => batch.delete(doc.ref));
+      batch.delete(convRef);
+      await batch.commit();
+    } else {
+      // Alleen voor deze gebruiker verbergen
+      await convRef.update({
+        deletedFor: admin.firestore.FieldValue.arrayUnion(uid),
+        [`clearedAt.${uid}`]: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
 
     res.json({ success: true });
   } catch (err) {
@@ -227,6 +251,14 @@ io.on('connection', (socket) => {
         for (const doc of existing.docs) {
           const data = doc.data();
           if (data.members.includes(members[1])) {
+            const deletedFor = data.deletedFor || [];
+            const requestingUid = members[0];
+            if (deletedFor.includes(requestingUid)) {
+              await doc.ref.update({
+                deletedFor: admin.firestore.FieldValue.arrayRemove(requestingUid),
+                [`clearedAt.${requestingUid}`]: admin.firestore.FieldValue.serverTimestamp(),
+              });
+            }
             return callback({ convId: doc.id, existing: true });
           }
         }
