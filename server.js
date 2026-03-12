@@ -80,6 +80,32 @@ app.get('/api/conversations/:uid', async (req, res) => {
     const convs = snap.docs
       .filter(d => !(d.data().deletedFor || []).includes(uid))
       .map(d => ({ id: d.id, ...d.data() }));
+
+    // Vul memberEmails aan voor gesprekken die het nog niet hebben
+    const uidsNeeded = new Set();
+    convs.forEach(c => {
+      if (!c.isGroup && c.members) {
+        c.members.forEach(m => {
+          if (!c.memberEmails?.[m]) uidsNeeded.add(m);
+        });
+      }
+    });
+    const emailMap = {};
+    if (uidsNeeded.size > 0) {
+      try {
+        const results = await admin.auth().getUsers([...uidsNeeded].map(u => ({ uid: u })));
+        results.users.forEach(u => { emailMap[u.uid] = u.email; });
+      } catch {}
+    }
+    convs.forEach(c => {
+      if (!c.isGroup && c.members) {
+        c.memberEmails = c.memberEmails || {};
+        c.members.forEach(m => {
+          if (!c.memberEmails[m] && emailMap[m]) c.memberEmails[m] = emailMap[m];
+        });
+      }
+    });
+
     res.json(convs);
   } catch (err) {
     console.error(err);
@@ -239,7 +265,7 @@ io.on('connection', (socket) => {
   });
 
   // ── Gesprek aanmaken ──
-  socket.on('conversation:create', async ({ members, memberNames, isGroup, groupName }, callback) => {
+  socket.on('conversation:create', async ({ members, memberNames, memberEmails, isGroup, groupName }, callback) => {
     try {
       // Check of 1-op-1 gesprek al bestaat
       if (!isGroup && members.length === 2) {
@@ -267,6 +293,7 @@ io.on('connection', (socket) => {
       const convRef = await db.collection('conversations').add({
         members,
         memberNames,
+        memberEmails: memberEmails || {},
         isGroup: isGroup || false,
         groupName: groupName || null,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
