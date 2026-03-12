@@ -6,7 +6,7 @@ const admin = require('firebase-admin');
 
 // ─── Firebase Admin initialiseren ───────────────────────────────────────────
 // Vervang dit met jouw eigen serviceAccountKey.json bestand van Firebase
-const serviceAccount = require('./serviceAccountKey.json');
+const serviceAccount = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
