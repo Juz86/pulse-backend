@@ -117,6 +117,7 @@ io.on('connection', (socket) => {
     socket.data.uid = uid;
     await db.collection('users').doc(uid).update({ online: true, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(() => {});
     io.emit('user:status', { uid, online: true });
+    socket.emit('users:online', Object.keys(onlineUsers));
     console.log(`👤 Online: ${uid}`);
   });
 
