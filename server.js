@@ -104,6 +104,29 @@ app.get('/api/messages/:convId', async (req, res) => {
   }
 });
 
+// ─── REST: Gesprek verwijderen (inclusief alle berichten) ─────────────────────
+app.delete('/api/conversations/:convId', async (req, res) => {
+  try {
+    const { convId } = req.params;
+    const convRef = db.collection('conversations').doc(convId);
+
+    // Verwijder alle berichten in de subcollectie
+    const msgsSnap = await convRef.collection('messages').get();
+    const batch = db.batch();
+    msgsSnap.docs.forEach(doc => batch.delete(doc.ref));
+    await batch.commit();
+
+    // Verwijder het gesprek zelf
+    await convRef.delete();
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Serverfout bij verwijderen' });
+  }
+});
+
+
 // ─── Socket.IO: Realtime events ──────────────────────────────────────────────
 // Bijhouden welke users online zijn: uid → socket.id
 const onlineUsers = {};
