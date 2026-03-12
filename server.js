@@ -135,9 +135,7 @@ io.on('connection', (socket) => {
           ...message,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-socket.on('messages:read', ({ convId, uid }) => {
-  socket.to(convId).emit('message:status', { convId, readerId: uid, status: 'read' });
-});
+
 
       // Gesprek updaten met laatste bericht
       await db.collection('conversations').doc(convId).update({
@@ -207,6 +205,35 @@ socket.on('messages:read', ({ convId, uid }) => {
           const data = doc.data();
           if (data.members.includes(members[1])) {
             return callback({ convId: doc.id, existing: true });
+  // ── Berichtenstatus: gelezen ──
+  socket.on('messages:read', ({ convId, uid }) => {
+    socket.to(convId).emit('message:status', { convId, readerId: uid, status: 'read' });
+  });
+
+  // ── Groepslid toevoegen ──
+  socket.on('conversation:addMember', async ({ convId, uid, displayName }, cb) => {
+    try {
+      await db.collection('conversations').doc(convId).update({
+        members: admin.firestore.FieldValue.arrayUnion(uid),
+        [`memberNames.${uid}`]: displayName,
+      });
+      io.to(convId).emit('conversation:memberAdded', { convId, uid, displayName });
+      cb?.({});
+    } catch (e) { cb?.({ error: e.message }); }
+  });
+
+  // ── Groepslid verwijderen ──
+  socket.on('conversation:removeMember', async ({ convId, uid }, cb) => {
+    try {
+      const update = { members: admin.firestore.FieldValue.arrayRemove(uid) };
+      update[`memberNames.${uid}`] = admin.firestore.FieldValue.delete();
+      await db.collection('conversations').doc(convId).update(update);
+      io.to(convId).emit('conversation:memberRemoved', { convId, uid });
+      cb?.({});
+    } catch (e) { cb?.({ error: e.message }); }
+  });
+
+            
           }
         }
       }
