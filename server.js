@@ -135,6 +135,9 @@ io.on('connection', (socket) => {
           ...message,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
+socket.on('messages:read', ({ convId, uid }) => {
+  socket.to(convId).emit('message:status', { convId, readerId: uid, status: 'read' });
+});
 
       // Gesprek updaten met laatste bericht
       await db.collection('conversations').doc(convId).update({
