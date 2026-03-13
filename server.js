@@ -349,6 +349,118 @@ io.on('connection', (socket) => {
   });
 });
 
+// ─── REST: Vriendschapsverzoek sturen ────────────────────────────────────────
+app.post('/api/friend-requests', async (req, res) => {
+  try {
+    const { fromUid, fromName, fromEmail, fromPhoto, toEmail } = req.body;
+    if (!fromUid || !toEmail) return res.status(400).json({ error: 'fromUid en toEmail zijn verplicht' });
+
+    // Zoek de ontvanger op email
+    const snap = await db.collection('users').where('email', '==', toEmail).limit(1).get();
+    if (snap.empty) return res.status(404).json({ error: 'Gebruiker niet gevonden' });
+    const toUser = snap.docs[0].data();
+
+    if (toUser.uid === fromUid) return res.status(400).json({ error: 'Je kunt jezelf niet toevoegen' });
+
+    // Check of ze al contacten zijn
+    const alreadyContact = await db.collection('users').doc(toUser.uid).collection('contacts').doc(fromUid).get();
+    if (alreadyContact.exists) return res.status(400).json({ error: 'Al in contactenlijst' });
+
+    // Check of er al een pending verzoek bestaat
+    const existing = await db.collection('friendRequests')
+      .where('fromUid', '==', fromUid)
+      .where('toUid', '==', toUser.uid)
+      .where('status', '==', 'pending')
+      .limit(1).get();
+    if (!existing.empty) return res.status(400).json({ error: 'Verzoek al verzonden' });
+
+    // Maak het verzoek aan
+    const reqRef = await db.collection('friendRequests').add({
+      fromUid, fromName, fromEmail, fromPhoto: fromPhoto || null,
+      toUid: toUser.uid, toName: toUser.displayName, toEmail: toUser.email,
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Stuur realtime notificatie naar ontvanger
+    const targetSocket = onlineUsers[toUser.uid];
+    if (targetSocket) {
+      io.to(targetSocket).emit('friend:request', {
+        id: reqRef.id, fromUid, fromName, fromEmail, fromPhoto: fromPhoto || null,
+      });
+    }
+
+    res.json({ success: true, requestId: reqRef.id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Serverfout' });
+  }
+});
+
+// ─── REST: Vriendschapsverzoeken ophalen voor een gebruiker ──────────────────
+app.get('/api/friend-requests/:uid', async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const snap = await db.collection('friendRequests')
+      .where('toUid', '==', uid)
+      .where('status', '==', 'pending')
+      .get();
+    const requests = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    requests.sort((a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0));
+    res.json(requests);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Serverfout' });
+  }
+});
+
+// ─── REST: Vriendschapsverzoek accepteren ─────────────────────────────────────
+app.post('/api/friend-requests/:requestId/accept', async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const reqDoc = await db.collection('friendRequests').doc(requestId).get();
+    if (!reqDoc.exists) return res.status(404).json({ error: 'Verzoek niet gevonden' });
+    const { fromUid, fromName, fromEmail, fromPhoto, toUid, toName, toEmail } = reqDoc.data();
+
+    const batch = db.batch();
+    // Voeg toe aan beiden contactenlijst
+    batch.set(db.collection('users').doc(toUid).collection('contacts').doc(fromUid), {
+      uid: fromUid, displayName: fromName, email: fromEmail, photoURL: fromPhoto || null,
+      addedAt: new Date().toISOString(),
+    });
+    batch.set(db.collection('users').doc(fromUid).collection('contacts').doc(toUid), {
+      uid: toUid, displayName: toName, email: toEmail, photoURL: null,
+      addedAt: new Date().toISOString(),
+    });
+    // Verzoek als geaccepteerd markeren
+    batch.update(db.collection('friendRequests').doc(requestId), { status: 'accepted' });
+    await batch.commit();
+
+    // Notificeer de verzender realtime
+    const senderSocket = onlineUsers[fromUid];
+    if (senderSocket) {
+      io.to(senderSocket).emit('friend:accepted', { byUid: toUid, byName: toName, byEmail: toEmail });
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Serverfout' });
+  }
+});
+
+// ─── REST: Vriendschapsverzoek weigeren ──────────────────────────────────────
+app.post('/api/friend-requests/:requestId/decline', async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    await db.collection('friendRequests').doc(requestId).update({ status: 'declined' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Serverfout' });
+  }
+});
+
 // ─── Server starten ───────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
