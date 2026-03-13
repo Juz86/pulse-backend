@@ -201,7 +201,7 @@ io.on('connection', (socket) => {
   });
 
   // ── Bericht sturen ──
-  socket.on('message:send', async ({ convId, message }) => {
+  socket.on('message:send', async ({ convId, message }, callback) => {
     try {
       const msgRef = await db.collection('conversations').doc(convId)
         .collection('messages').add({
@@ -209,16 +209,20 @@ io.on('connection', (socket) => {
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
 
+      const savedMsg = { id: msgRef.id, ...message };
 
       // Gesprek updaten met laatste bericht
-      await db.collection('conversations').doc(convId).update({
+      db.collection('conversations').doc(convId).update({
         lastMessage: message.text,
         lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
       // Stuur bericht naar iedereen in de kamer (inclusief afzender)
-      io.to(convId).emit('message:received', { id: msgRef.id, ...message });
+      io.to(convId).emit('message:received', savedMsg);
+
+      // Bevestig aan afzender zodat optimistic bericht vervangen kan worden
+      if (typeof callback === 'function') callback(savedMsg);
     } catch (err) {
       console.error('Fout bij opslaan bericht:', err);
       socket.emit('error', { message: 'Bericht kon niet worden opgeslagen' });
