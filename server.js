@@ -223,6 +223,12 @@ io.on('connection', (socket) => {
 
       // Bevestig aan afzender zodat optimistic bericht vervangen kan worden
       if (typeof callback === 'function') callback(savedMsg);
+
+      // Stuur "delivered" als ontvanger online is in de kamer
+      const room = io.sockets.adapter.rooms.get(convId);
+      if (room && room.size > 1) {
+        socket.emit('message:status', { convId, msgId: savedMsg.id, status: 'delivered' });
+      }
     } catch (err) {
       console.error('Fout bij opslaan bericht:', err);
       socket.emit('error', { message: 'Bericht kon niet worden opgeslagen' });
