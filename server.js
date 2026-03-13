@@ -229,6 +229,29 @@ io.on('connection', (socket) => {
       if (room && room.size > 1) {
         socket.emit('message:status', { convId, msgId: savedMsg.id, status: 'delivered' });
       }
+
+      // Push notificatie naar leden die offline zijn
+      try {
+        const convDoc = await db.collection('conversations').doc(convId).get();
+        const members = convDoc.data()?.members || [];
+        const senderName = message.senderName || 'Iemand';
+        for (const memberUid of members) {
+          if (memberUid === message.senderId) continue;
+          if (onlineUsers[memberUid]) continue; // online, geen push nodig
+          const userDoc = await db.collection('users').doc(memberUid).get();
+          const fcmToken = userDoc.data()?.fcmToken;
+          if (!fcmToken) continue;
+          await admin.messaging().send({
+            token: fcmToken,
+            notification: {
+              title: senderName,
+              body: message.text?.substring(0, 100) || 'Nieuw bericht',
+            },
+            data: { convId },
+            webpush: { fcmOptions: { link: 'https://pulse-message.netlify.app' } },
+          }).catch(() => {});
+        }
+      } catch {}
     } catch (err) {
       console.error('Fout bij opslaan bericht:', err);
       socket.emit('error', { message: 'Bericht kon niet worden opgeslagen' });
@@ -357,6 +380,18 @@ io.on('connection', (socket) => {
       console.log(`👋 Offline: ${uid}`);
     }
   });
+});
+
+// ─── REST: FCM token opslaan ─────────────────────────────────────────────────
+app.post('/api/fcm-token', async (req, res) => {
+  try {
+    const { uid, token } = req.body;
+    if (!uid || !token) return res.status(400).json({ error: 'uid en token verplicht' });
+    await db.collection('users').doc(uid).update({ fcmToken: token });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Serverfout' });
+  }
 });
 
 // ─── REST: Vriendschapsverzoek sturen ────────────────────────────────────────
