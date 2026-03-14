@@ -364,6 +364,35 @@ io.on('connection', (socket) => {
     if (targetSocket) io.to(targetSocket).emit('call:video-upgrade');
   });
 
+  // ── Oproep opslaan als bericht in gesprek ──
+  socket.on('call:log', async ({ convId, isVideo, direction, duration, senderId, senderName }) => {
+    try {
+      const msgRef = await db.collection('conversations').doc(convId)
+        .collection('messages').add({
+          type: 'call', isVideo: !!isVideo, direction, duration: duration || 0,
+          senderId, senderName,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      const dur = duration > 0
+        ? (duration >= 60 ? `${Math.floor(duration / 60)} min` : `${duration} sec`)
+        : '';
+      const label = direction === 'completed'
+        ? (isVideo ? 'Video-oproep' : 'Spraakoproep') + (dur ? ` · ${dur}` : '')
+        : direction === 'declined'
+          ? (isVideo ? 'Video-oproep geweigerd' : 'Oproep geweigerd')
+          : (isVideo ? 'Gemiste video-oproep' : 'Gemiste spraakoproep');
+      await db.collection('conversations').doc(convId).update({
+        lastMessage:    label,
+        lastMessageAt:  admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+      });
+      const savedMsg = { id: msgRef.id, convId, type: 'call', isVideo: !!isVideo, direction, duration: duration || 0, senderId, senderName };
+      io.to(convId).emit('message:received', savedMsg);
+    } catch (e) {
+      console.error('call:log fout:', e);
+    }
+  });
+
   // ── Gesprek / kamer joinen ──
   socket.on('conversation:join', ({ convId }) => {
     socket.join(convId);
