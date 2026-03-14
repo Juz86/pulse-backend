@@ -435,7 +435,7 @@ app.post('/api/friend-requests', async (req, res) => {
       });
     }
 
-    res.json({ success: true, requestId: reqRef.id });
+    res.json({ success: true, requestId: reqRef.id, toUid: toUser.uid });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Serverfout' });
