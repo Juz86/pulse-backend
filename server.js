@@ -411,8 +411,12 @@ io.on('connection', (socket) => {
       const savedMsg = { id: msgRef.id, ...message };
 
       // Gesprek updaten met laatste bericht
+      const lastMessage = message.type === 'contact'
+        ? `Contactpersoon: ${message.sharedContact?.name || ''}`
+        : message.type === 'call' ? (message.isVideo ? 'Video-oproep' : 'Spraakoproep')
+        : message.text;
       await db.collection('conversations').doc(convId).update({
-        lastMessage: message.text,
+        lastMessage,
         lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
