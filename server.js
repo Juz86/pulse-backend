@@ -271,6 +271,51 @@ app.delete('/api/conversations/:convId', async (req, res) => {
 });
 
 
+// ─── REST: Account verwijderen ───────────────────────────────────────────────
+app.delete('/api/account/:uid', async (req, res) => {
+  try {
+    const { uid } = req.params;
+    if (!uid) return res.status(400).json({ error: 'uid is verplicht' });
+
+    // 1. Verwijder alle gesprekken waarbij de gebruiker lid is
+    const convsSnap = await db.collection('conversations')
+      .where('members', 'array-contains', uid).get();
+
+    for (const convDoc of convsSnap.docs) {
+      const convRef = convDoc.ref;
+      const { members = [] } = convDoc.data();
+      const msgsSnap = await convRef.collection('messages').get();
+      const batch = db.batch();
+      msgsSnap.docs.forEach(d => batch.delete(d.ref));
+      if (members.length <= 2) {
+        // 1-op-1 gesprek → volledig verwijderen
+        batch.delete(convRef);
+      } else {
+        // Groepsgesprek → gebruiker verwijderen uit members
+        batch.update(convRef, { members: members.filter(m => m !== uid) });
+      }
+      await batch.commit();
+    }
+
+    // 2. Verwijder contacten-subcollectie
+    const contactsSnap = await db.collection('users').doc(uid).collection('contacts').get();
+    const contactBatch = db.batch();
+    contactsSnap.docs.forEach(d => contactBatch.delete(d.ref));
+    await contactBatch.commit();
+
+    // 3. Verwijder gebruikersdocument
+    await db.collection('users').doc(uid).delete();
+
+    // 4. Verwijder Firebase Auth account
+    await admin.auth().deleteUser(uid);
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Account verwijderen mislukt:', err);
+    res.status(500).json({ error: 'Serverfout bij verwijderen account' });
+  }
+});
+
 // ─── Socket.IO: Realtime events ──────────────────────────────────────────────
 // Bijhouden welke users online zijn: uid → socket.id
 const onlineUsers = {};
