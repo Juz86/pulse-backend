@@ -482,6 +482,11 @@ io.on('connection', (socket) => {
     delete pendingCalls[socket.data.uid];
   });
 
+  socket.on('call:renegotiate', ({ to, signal }) => {
+    const targetSocket = onlineUsers[to];
+    if (targetSocket) io.to(targetSocket).emit('call:renegotiate', { signal });
+  });
+
   // ── Gesprek aanmaken ──
   socket.on('conversation:create', async ({ members, memberNames, memberEmails, isGroup, groupName }, callback) => {
     try {
