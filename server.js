@@ -462,9 +462,10 @@ app.post('/api/friend-requests', async (req, res) => {
 
     if (toUser.uid === fromUid) return res.status(400).json({ error: 'Je kunt jezelf niet toevoegen' });
 
-    // Check of ze al contacten zijn
-    const alreadyContact = await db.collection('users').doc(toUser.uid).collection('contacts').doc(fromUid).get();
-    if (alreadyContact.exists) return res.status(400).json({ error: 'Al in contactenlijst' });
+    // Check of ze al contacten zijn (beide kanten)
+    const alreadyA = await db.collection('users').doc(fromUid).collection('contacts').doc(toUser.uid).get();
+    const alreadyB = await db.collection('users').doc(toUser.uid).collection('contacts').doc(fromUid).get();
+    if (alreadyA.exists || alreadyB.exists) return res.status(400).json({ error: 'Al in contactenlijst' });
 
     // Check of er al een pending verzoek bestaat
     const existing = await db.collection('friendRequests')
