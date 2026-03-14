@@ -344,6 +344,12 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('user:updated', { uid, displayName, photoURL });
   });
 
+  // ── Video upgrade doorsturen naar de andere kant ──
+  socket.on('call:video-upgrade', ({ to }) => {
+    const targetSocket = onlineUsers[to];
+    if (targetSocket) io.to(targetSocket).emit('call:video-upgrade');
+  });
+
   // ── Gesprek / kamer joinen ──
   socket.on('conversation:join', ({ convId }) => {
     socket.join(convId);
