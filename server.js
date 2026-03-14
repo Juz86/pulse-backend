@@ -27,6 +27,12 @@ const transporter = nodemailer.createTransport({
 // ─── OTP opslag in geheugen { email: { code, expiresAt } } ───────────────────
 const otpStore = new Map();
 
+// ─── App URL ──────────────────────────────────────────────────────────────────
+const APP_URL = process.env.APP_URL || 'https://pulse-message.netlify.app';
+
+// ─── Bijhouden actieve inkomende oproepen { calleeUid: { callerUid, callerName, isVideo } } ─
+const pendingCalls = {};
+
 // ─── Express + HTTP + Socket.IO ──────────────────────────────────────────────
 const app = express();
 const server = http.createServer(app);
@@ -387,7 +393,7 @@ io.on('connection', (socket) => {
               body: message.text?.substring(0, 100) || 'Nieuw bericht',
             },
             data: { convId },
-            webpush: { fcmOptions: { link: 'https://pulse-message.netlify.app' } },
+            webpush: { fcmOptions: { link: APP_URL } },
           }).catch(() => {});
         }
       } catch {}
@@ -407,18 +413,37 @@ io.on('connection', (socket) => {
   });
 
   // ── WebRTC Signaling: Bellen ──
-  socket.on('call:offer', ({ to, from, offer, isVideo, callerName }) => {
+  socket.on('call:offer', async ({ to, from, offer, isVideo, callerName }) => {
     const targetSocket = onlineUsers[to];
     if (targetSocket) {
       io.to(targetSocket).emit('call:incoming', { from, offer, isVideo, callerName });
+      // Bijhouden dat deze oproep uitstaat (nog niet beantwoord)
+      pendingCalls[to] = { from, callerName, isVideo };
     } else {
       socket.emit('call:unavailable', { to });
+      // Gebruiker is offline → stuur gemiste oproep pushnotificatie
+      try {
+        const userDoc = await db.collection('users').doc(to).get();
+        const fcmToken = userDoc.data()?.fcmToken;
+        if (fcmToken) {
+          await admin.messaging().send({
+            token: fcmToken,
+            notification: {
+              title: '📞 Gemiste oproep',
+              body: `${callerName} heeft je ${isVideo ? 'geprobeerd te videobellen' : 'gebeld'}.`,
+            },
+            webpush: { fcmOptions: { link: APP_URL } },
+          }).catch(() => {});
+        }
+      } catch {}
     }
   });
 
   socket.on('call:answer', ({ to, answer }) => {
     const targetSocket = onlineUsers[to];
     if (targetSocket) io.to(targetSocket).emit('call:answer', { answer });
+    // Oproep beantwoord → niet meer als gemist beschouwen
+    delete pendingCalls[socket.data.uid];
   });
 
   socket.on('call:ice-candidate', ({ to, candidate }) => {
@@ -426,14 +451,35 @@ io.on('connection', (socket) => {
     if (targetSocket) io.to(targetSocket).emit('call:ice-candidate', { candidate });
   });
 
-  socket.on('call:end', ({ to }) => {
+  socket.on('call:end', async ({ to }) => {
     const targetSocket = onlineUsers[to];
     if (targetSocket) io.to(targetSocket).emit('call:ended');
+    // Als oproep nog uitstond (niet beantwoord) → gemiste oproep notificatie
+    if (pendingCalls[to]) {
+      const { callerName, isVideo } = pendingCalls[to];
+      delete pendingCalls[to];
+      try {
+        const userDoc = await db.collection('users').doc(to).get();
+        const fcmToken = userDoc.data()?.fcmToken;
+        if (fcmToken) {
+          await admin.messaging().send({
+            token: fcmToken,
+            notification: {
+              title: '📞 Gemiste oproep',
+              body: `${callerName} heeft je ${isVideo ? 'geprobeerd te videobellen' : 'gebeld'}.`,
+            },
+            webpush: { fcmOptions: { link: APP_URL } },
+          }).catch(() => {});
+        }
+      } catch {}
+    }
   });
 
   socket.on('call:decline', ({ to }) => {
     const targetSocket = onlineUsers[to];
     if (targetSocket) io.to(targetSocket).emit('call:declined');
+    // Bewust geweigerd → geen gemiste oproep
+    delete pendingCalls[socket.data.uid];
   });
 
   // ── Gesprek aanmaken ──
