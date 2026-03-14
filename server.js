@@ -339,6 +339,11 @@ io.on('connection', (socket) => {
     console.log(`👤 Online: ${uid}`);
   });
 
+  // ── Profielupdate broadcasten naar alle verbonden clients ──
+  socket.on('user:updated', ({ uid, displayName, photoURL }) => {
+    socket.broadcast.emit('user:updated', { uid, displayName, photoURL });
+  });
+
   // ── Gesprek / kamer joinen ──
   socket.on('conversation:join', ({ convId }) => {
     socket.join(convId);
