@@ -138,10 +138,19 @@ app.post('/api/users', async (req, res) => {
     const { uid, displayName, email, photoURL } = req.body;
     if (!uid || !email) return res.status(400).json({ error: 'uid en email zijn verplicht' });
 
+    const name = displayName || email.split('@')[0];
     await db.collection('users').doc(uid).set(
-      { uid, displayName: displayName || email.split('@')[0], email, photoURL: photoURL || '', updatedAt: admin.firestore.FieldValue.serverTimestamp(), online: true },
+      { uid, displayName: name, email, photoURL: photoURL || '', updatedAt: admin.firestore.FieldValue.serverTimestamp(), online: true },
       { merge: true }
     );
+
+    // memberNames bijwerken in alle gesprekken van deze gebruiker
+    const convs = await db.collection('conversations').where('members', 'array-contains', uid).get();
+    if (!convs.empty) {
+      const batch = db.batch();
+      convs.docs.forEach(d => batch.update(d.ref, { [`memberNames.${uid}`]: name }));
+      await batch.commit();
+    }
 
     res.json({ success: true });
   } catch (err) {
