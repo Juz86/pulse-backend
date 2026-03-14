@@ -3,6 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const admin = require('firebase-admin');
+const nodemailer = require('nodemailer');
 
 // ─── Firebase Admin initialiseren ───────────────────────────────────────────
 // Vervang dit met jouw eigen serviceAccountKey.json bestand van Firebase
@@ -13,6 +14,18 @@ admin.initializeApp({
 });
 
 const db = admin.firestore();
+
+// ─── E-mail transporter (Nodemailer via Gmail) ────────────────────────────────
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+// ─── OTP opslag in geheugen { email: { code, expiresAt } } ───────────────────
+const otpStore = new Map();
 
 // ─── Express + HTTP + Socket.IO ──────────────────────────────────────────────
 const app = express();
@@ -30,6 +43,48 @@ app.use(express.json());
 // ─── Gezondheidscheck ────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({ status: 'Pulse server draait ✅', time: new Date().toISOString() });
+});
+
+// ─── OTP: Stuur verificatiecode ──────────────────────────────────────────────
+app.post('/api/send-code', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'E-mail ontbreekt.' });
+
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  otpStore.set(email, { code, expiresAt: Date.now() + 15 * 60 * 1000 });
+
+  try {
+    await transporter.sendMail({
+      from: `"Pulse" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: 'Jouw verificatiecode voor Pulse',
+      html: `
+        <div style="font-family:sans-serif;max-width:400px;margin:auto">
+          <h2 style="color:#7c4dff">Pulse verificatiecode</h2>
+          <p>Gebruik de onderstaande code om je account te bevestigen:</p>
+          <div style="font-size:36px;font-weight:bold;letter-spacing:8px;text-align:center;padding:20px;background:#f3f0ff;border-radius:8px;color:#7c4dff">
+            ${code}
+          </div>
+          <p style="color:#888;font-size:13px">Deze code is 15 minuten geldig en kan slechts één keer gebruikt worden.</p>
+        </div>
+      `,
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('E-mail fout:', err);
+    res.status(500).json({ error: 'E-mail versturen mislukt.' });
+  }
+});
+
+// ─── OTP: Verifieer code ─────────────────────────────────────────────────────
+app.post('/api/verify-code', (req, res) => {
+  const { email, code } = req.body;
+  const entry = otpStore.get(email);
+  if (!entry)                    return res.status(400).json({ error: 'Geen code gevonden. Vraag een nieuwe aan.' });
+  if (Date.now() > entry.expiresAt) { otpStore.delete(email); return res.status(400).json({ error: 'Code verlopen.' }); }
+  if (entry.code !== code)       return res.status(400).json({ error: 'Verkeerde code.' });
+  otpStore.delete(email);
+  res.json({ ok: true });
 });
 
 // ─── REST: Gebruikersprofiel opslaan ─────────────────────────────────────────
