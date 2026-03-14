@@ -462,10 +462,23 @@ app.post('/api/friend-requests', async (req, res) => {
 
     if (toUser.uid === fromUid) return res.status(400).json({ error: 'Je kunt jezelf niet toevoegen' });
 
-    // Check of ze al contacten zijn (beide kanten)
+    // Check of ze al contacten zijn
     const alreadyA = await db.collection('users').doc(fromUid).collection('contacts').doc(toUser.uid).get();
+    if (alreadyA.exists) return res.status(400).json({ error: 'Al in contactenlijst' });
+
+    // Als de ander jou nog heeft → direct herstellen zonder nieuw verzoek
     const alreadyB = await db.collection('users').doc(toUser.uid).collection('contacts').doc(fromUid).get();
-    if (alreadyA.exists || alreadyB.exists) return res.status(400).json({ error: 'Al in contactenlijst' });
+    if (alreadyB.exists) {
+      const nickname = req.body.nickname || '';
+      const batch = db.batch();
+      batch.set(db.collection('users').doc(fromUid).collection('contacts').doc(toUser.uid), {
+        uid: toUser.uid, displayName: toUser.displayName, email: toUser.email,
+        photoURL: toUser.photoURL || null, nickname,
+        addedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      await batch.commit();
+      return res.json({ success: true, restored: true, toUid: toUser.uid });
+    }
 
     // Check of er al een pending verzoek bestaat
     const existing = await db.collection('friendRequests')
