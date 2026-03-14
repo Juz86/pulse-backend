@@ -323,15 +323,20 @@ app.delete('/api/account/:uid', async (req, res) => {
 });
 
 // ─── Socket.IO: Realtime events ──────────────────────────────────────────────
-// Bijhouden welke users online zijn: uid → socket.id
+// Bijhouden welke users online zijn: uid → Set van socket IDs
 const onlineUsers = {};
+function getSocketId(uid) {
+  const sockets = onlineUsers[uid];
+  return sockets?.size ? sockets.values().next().value : null;
+}
 
 io.on('connection', (socket) => {
   console.log('🔌 Verbonden:', socket.id);
 
   // ── User registreren als online ──
   socket.on('user:online', async ({ uid }) => {
-    onlineUsers[uid] = socket.id;
+    if (!onlineUsers[uid]) onlineUsers[uid] = new Set();
+    onlineUsers[uid].add(socket.id);
     socket.data.uid = uid;
     await db.collection('users').doc(uid).update({ online: true, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(() => {});
     io.emit('user:status', { uid, online: true });
@@ -346,7 +351,7 @@ io.on('connection', (socket) => {
 
   // ── Video upgrade doorsturen naar de andere kant ──
   socket.on('call:video-upgrade', ({ to }) => {
-    const targetSocket = onlineUsers[to];
+    const targetSocket = getSocketId(to);
     if (targetSocket) io.to(targetSocket).emit('call:video-upgrade');
   });
 
@@ -368,7 +373,7 @@ io.on('connection', (socket) => {
       const savedMsg = { id: msgRef.id, ...message };
 
       // Gesprek updaten met laatste bericht
-      db.collection('conversations').doc(convId).update({
+      await db.collection('conversations').doc(convId).update({
         lastMessage: message.text,
         lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -393,7 +398,7 @@ io.on('connection', (socket) => {
         const senderName = message.senderName || 'Iemand';
         for (const memberUid of members) {
           if (memberUid === message.senderId) continue;
-          if (onlineUsers[memberUid]) continue; // online, geen push nodig
+          if (onlineUsers[memberUid]?.size) continue; // online, geen push nodig
           const userDoc = await db.collection('users').doc(memberUid).get();
           const fcmToken = userDoc.data()?.fcmToken;
           if (!fcmToken) continue;
@@ -425,7 +430,7 @@ io.on('connection', (socket) => {
 
   // ── WebRTC Signaling: Bellen ──
   socket.on('call:offer', async ({ to, from, offer, isVideo, callerName }) => {
-    const targetSocket = onlineUsers[to];
+    const targetSocket = getSocketId(to);
     if (targetSocket) {
       io.to(targetSocket).emit('call:incoming', { from, offer, isVideo, callerName });
       // Bijhouden dat deze oproep uitstaat (nog niet beantwoord)
@@ -451,19 +456,21 @@ io.on('connection', (socket) => {
   });
 
   socket.on('call:answer', ({ to, answer }) => {
-    const targetSocket = onlineUsers[to];
+    const targetSocket = getSocketId(to);
     if (targetSocket) io.to(targetSocket).emit('call:answer', { answer });
-    // Oproep beantwoord → niet meer als gemist beschouwen
-    delete pendingCalls[socket.data.uid];
+    // Oproep beantwoord → niet meer als gemist beschouwen (to = de beller)
+    delete pendingCalls[socket.data.uid]; // ontvanger uid = de 'to' van het original offer
+    // Ook op uid van de beller opruimen voor zekerheid
+    delete pendingCalls[to];
   });
 
   socket.on('call:ice-candidate', ({ to, candidate }) => {
-    const targetSocket = onlineUsers[to];
+    const targetSocket = getSocketId(to);
     if (targetSocket) io.to(targetSocket).emit('call:ice-candidate', { candidate });
   });
 
   socket.on('call:end', async ({ to }) => {
-    const targetSocket = onlineUsers[to];
+    const targetSocket = getSocketId(to);
     if (targetSocket) io.to(targetSocket).emit('call:ended');
     // Als oproep nog uitstond (niet beantwoord) → gemiste oproep notificatie
     if (pendingCalls[to]) {
@@ -487,14 +494,15 @@ io.on('connection', (socket) => {
   });
 
   socket.on('call:decline', ({ to }) => {
-    const targetSocket = onlineUsers[to];
+    const targetSocket = getSocketId(to);
     if (targetSocket) io.to(targetSocket).emit('call:declined');
     // Bewust geweigerd → geen gemiste oproep
     delete pendingCalls[socket.data.uid];
+    delete pendingCalls[to];
   });
 
   socket.on('call:renegotiate', ({ to, signal }) => {
-    const targetSocket = onlineUsers[to];
+    const targetSocket = getSocketId(to);
     if (targetSocket) io.to(targetSocket).emit('call:renegotiate', { signal });
   });
 
@@ -575,9 +583,12 @@ io.on('connection', (socket) => {
   socket.on('disconnect', async () => {
     const uid = socket.data.uid;
     if (uid) {
-      delete onlineUsers[uid];
-      await db.collection('users').doc(uid).update({ online: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(() => {});
-      io.emit('user:status', { uid, online: false });
+      onlineUsers[uid]?.delete(socket.id);
+      if (!onlineUsers[uid]?.size) {
+        delete onlineUsers[uid];
+        await db.collection('users').doc(uid).update({ online: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(() => {});
+        io.emit('user:status', { uid, online: false });
+      }
       console.log(`👋 Offline: ${uid}`);
     }
   });
@@ -643,7 +654,7 @@ app.post('/api/friend-requests', async (req, res) => {
     });
 
     // Stuur realtime notificatie naar ontvanger
-    const targetSocket = onlineUsers[toUser.uid];
+    const targetSocket = getSocketId(toUser.uid);
     if (targetSocket) {
       io.to(targetSocket).emit('friend:request', {
         id: reqRef.id, fromUid, fromName, fromEmail, fromPhoto: fromPhoto || null,
@@ -697,7 +708,7 @@ app.post('/api/friend-requests/:requestId/accept', async (req, res) => {
     await batch.commit();
 
     // Notificeer de verzender realtime
-    const senderSocket = onlineUsers[fromUid];
+    const senderSocket = getSocketId(fromUid);
     if (senderSocket) {
       io.to(senderSocket).emit('friend:accepted', { byUid: toUid, byName: toName, byEmail: toEmail });
     }
