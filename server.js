@@ -474,24 +474,25 @@ io.on('connection', (socket) => {
   socket.on('message:send', async ({ convId, message }, callback) => {
     try {
       const verifiedMessage = { ...message, senderId: socket.userId };
-      const msgRef = await db.collection('conversations').doc(convId)
-        .collection('messages').add({
-          ...verifiedMessage,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-
-      const savedMsg = { id: msgRef.id, ...verifiedMessage };
-
-      // Gesprek updaten met laatste bericht
       const lastMessage = verifiedMessage.type === 'contact'
         ? `Contactpersoon: ${verifiedMessage.sharedContact?.name || ''}`
         : verifiedMessage.type === 'call' ? (verifiedMessage.isVideo ? 'Video-oproep' : 'Spraakoproep')
         : verifiedMessage.text;
-      await db.collection('conversations').doc(convId).update({
-        lastMessage,
-        lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
+
+      // Sla bericht op en update gesprek tegelijk (parallel)
+      const [msgRef] = await Promise.all([
+        db.collection('conversations').doc(convId).collection('messages').add({
+          ...verifiedMessage,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        }),
+        db.collection('conversations').doc(convId).update({
+          lastMessage,
+          lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }),
+      ]);
+
+      const savedMsg = { id: msgRef.id, ...verifiedMessage };
 
       // Stuur bericht naar iedereen in de kamer (inclusief afzender)
       io.to(convId).emit('message:received', savedMsg);
@@ -505,28 +506,27 @@ io.on('connection', (socket) => {
         socket.emit('message:status', { convId, msgId: savedMsg.id, status: 'delivered' });
       }
 
-      // Push notificatie naar leden die offline zijn
-      try {
-        const convDoc = await db.collection('conversations').doc(convId).get();
-        const members = convDoc.data()?.members || [];
-        const senderName = verifiedMessage.senderName || 'Iemand';
-        for (const memberUid of members) {
-          if (memberUid === verifiedMessage.senderId) continue;
-          if (onlineUsers[memberUid]?.size) continue; // online, geen push nodig
-          const userDoc = await db.collection('users').doc(memberUid).get();
-          const fcmToken = userDoc.data()?.fcmToken;
-          if (!fcmToken) continue;
-          await admin.messaging().send({
-            token: fcmToken,
-            notification: {
-              title: senderName,
-              body: verifiedMessage.text?.substring(0, 100) || 'Nieuw bericht',
-            },
-            data: { convId },
-            webpush: { fcmOptions: { link: APP_URL } },
-          }).catch(() => {});
-        }
-      } catch {}
+      // Push notificaties asynchroon — blokkeert de socket handler niet
+      (async () => {
+        try {
+          const convDoc = await db.collection('conversations').doc(convId).get();
+          const members = convDoc.data()?.members || [];
+          const senderName = verifiedMessage.senderName || 'Iemand';
+          await Promise.all(members.map(async (memberUid) => {
+            if (memberUid === verifiedMessage.senderId) return;
+            if (onlineUsers[memberUid]?.size) return;
+            const userDoc = await db.collection('users').doc(memberUid).get();
+            const fcmToken = userDoc.data()?.fcmToken;
+            if (!fcmToken) return;
+            await admin.messaging().send({
+              token: fcmToken,
+              notification: { title: senderName, body: verifiedMessage.text?.substring(0, 100) || 'Nieuw bericht' },
+              data: { convId },
+              webpush: { fcmOptions: { link: APP_URL } },
+            }).catch(() => {});
+          }));
+        } catch {}
+      })();
     } catch (err) {
       console.error('Fout bij opslaan bericht:', err);
       socket.emit('error', { message: 'Bericht kon niet worden opgeslagen' });
