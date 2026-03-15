@@ -527,6 +527,7 @@ io.on('connection', (socket) => {
           lastMessage,
           lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          deletedFor: [],  // Herstel gesprek voor iedereen die het had verwijderd
         }),
       ]);
 
