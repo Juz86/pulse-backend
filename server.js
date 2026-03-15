@@ -353,6 +353,11 @@ io.on('connection', (socket) => {
     console.log(`👤 Online: ${uid}`);
   });
 
+  // ── Stuur actuele online lijst op verzoek ──
+  socket.on('users:online:request', () => {
+    socket.emit('users:online', Object.keys(onlineUsers));
+  });
+
   // ── Profielupdate broadcasten naar alle verbonden clients ──
   socket.on('user:updated', ({ uid, displayName, photoURL }) => {
     socket.broadcast.emit('user:updated', { uid, displayName, photoURL });
