@@ -172,13 +172,14 @@ app.post('/api/send-reset', async (req, res) => {
 // ─── REST: Gebruikersprofiel opslaan ─────────────────────────────────────────
 app.post('/api/users', verifyAuth, async (req, res) => {
   try {
-    const { uid, displayName, email, photoURL } = req.body;
+    const { uid, displayName, email, photoURL, role } = req.body;
     if (!uid || !validEmail(email)) return res.status(400).json({ error: 'uid en geldig e-mailadres zijn verplicht' });
     if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
 
     const name = displayName || email.split('@')[0];
+    const validRole = role === 'parent' ? 'parent' : 'user';
     await db.collection('users').doc(uid).set(
-      { uid, displayName: name, email, photoURL: photoURL || '', updatedAt: admin.firestore.FieldValue.serverTimestamp(), online: true },
+      { uid, displayName: name, email, photoURL: photoURL || '', updatedAt: admin.firestore.FieldValue.serverTimestamp(), online: true, role: validRole },
       { merge: true }
     );
 
@@ -444,6 +445,10 @@ io.on('connection', (socket) => {
     io.emit('user:status', { uid, online: true, inactive: false });
     socket.emit('users:online', Object.keys(onlineUsers));
     socket.emit('users:inactive', [...inactiveUsers]);
+    // Stuur paused event als account gepauzeerd is
+    db.collection('users').doc(uid).get().then(snap => {
+      if (snap.exists && snap.data().paused) socket.emit('account:paused');
+    }).catch(() => {});
     console.log(`👤 Online: ${uid}`);
   });
 
@@ -789,6 +794,106 @@ io.on('connection', (socket) => {
   });
 });
 
+// ─── REST: Ouderlijk toezicht ─────────────────────────────────────────────────
+
+// GET /api/parent/children — haal gekoppelde kinderen op
+app.get('/api/parent/children', verifyAuth, async (req, res) => {
+  try {
+    const parentDoc = await db.collection('users').doc(req.uid).get();
+    if (!parentDoc.exists || parentDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
+    const snap = await db.collection('users').where('parentId', '==', req.uid).get();
+    const children = snap.docs.map(d => {
+      const { uid, displayName, email, photoURL, online, lastSeen, paused } = d.data();
+      return { uid, displayName, email, photoURL: photoURL || null, online: online || false, lastSeen: lastSeen || null, paused: paused || false };
+    });
+    res.json(children);
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
+});
+
+// POST /api/parent/supervision-request — ouder stuurt verzoek naar kind
+app.post('/api/parent/supervision-request', verifyAuth, async (req, res) => {
+  try {
+    const { childEmail } = req.body;
+    if (!validEmail(childEmail)) return res.status(400).json({ error: 'Ongeldig e-mailadres.' });
+    const parentDoc = await db.collection('users').doc(req.uid).get();
+    if (!parentDoc.exists || parentDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
+    const parentData = parentDoc.data();
+    const childSnap = await db.collection('users').where('email', '==', childEmail).limit(1).get();
+    if (childSnap.empty) return res.status(404).json({ error: 'Gebruiker niet gevonden.' });
+    const childDoc = childSnap.docs[0];
+    const childData = childDoc.data();
+    if (childData.role === 'parent') return res.status(400).json({ error: 'Dit is een ouderaccount.' });
+    if (childData.parentId) return res.status(400).json({ error: 'Dit account heeft al een toezichthouder.' });
+    // Check of er al een pending verzoek is
+    const existing = await db.collection('supervisionRequests')
+      .where('parentUid', '==', req.uid).where('childUid', '==', childDoc.id).where('status', '==', 'pending').limit(1).get();
+    if (!existing.empty) return res.status(400).json({ error: 'Verzoek al verzonden.' });
+    const reqRef = await db.collection('supervisionRequests').add({
+      parentUid: req.uid,
+      parentName: parentData.displayName || parentData.email,
+      parentEmail: parentData.email,
+      childUid: childDoc.id,
+      childName: childData.displayName || childData.email,
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    // Stuur real-time notificatie naar kind
+    const childSockets = onlineUsers[childDoc.id];
+    if (childSockets) childSockets.forEach(sid => io.to(sid).emit('supervision:request', {
+      requestId: reqRef.id,
+      parentName: parentData.displayName || parentData.email,
+      parentEmail: parentData.email,
+    }));
+    res.json({ success: true, requestId: reqRef.id });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
+});
+
+// POST /api/parent/supervision-response/:requestId — kind accepteert/weigert
+app.post('/api/parent/supervision-response/:requestId', verifyAuth, async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const { accept } = req.body;
+    const reqDoc = await db.collection('supervisionRequests').doc(requestId).get();
+    if (!reqDoc.exists) return res.status(404).json({ error: 'Verzoek niet gevonden.' });
+    const reqData = reqDoc.data();
+    if (reqData.childUid !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+    if (reqData.status !== 'pending') return res.status(400).json({ error: 'Verzoek al verwerkt.' });
+    await db.collection('supervisionRequests').doc(requestId).update({ status: accept ? 'accepted' : 'declined' });
+    if (accept) {
+      await db.collection('users').doc(req.uid).update({ parentId: reqData.parentUid, parentEmail: reqData.parentEmail });
+    }
+    res.json({ success: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
+});
+
+// POST /api/parent/pause/:childUid — pauzeer kind
+app.post('/api/parent/pause/:childUid', verifyAuth, async (req, res) => {
+  try {
+    const { childUid } = req.params;
+    const childDoc = await db.collection('users').doc(childUid).get();
+    if (!childDoc.exists) return res.status(404).json({ error: 'Niet gevonden.' });
+    if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+    await db.collection('users').doc(childUid).update({ paused: true });
+    const s = onlineUsers[childUid];
+    if (s) s.forEach(sid => io.to(sid).emit('account:paused'));
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: 'Serverfout' }); }
+});
+
+// POST /api/parent/resume/:childUid — hervat kind
+app.post('/api/parent/resume/:childUid', verifyAuth, async (req, res) => {
+  try {
+    const { childUid } = req.params;
+    const childDoc = await db.collection('users').doc(childUid).get();
+    if (!childDoc.exists) return res.status(404).json({ error: 'Niet gevonden.' });
+    if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+    await db.collection('users').doc(childUid).update({ paused: false });
+    const s = onlineUsers[childUid];
+    if (s) s.forEach(sid => io.to(sid).emit('account:resumed'));
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: 'Serverfout' }); }
+});
+
 // ─── REST: FCM token opslaan ─────────────────────────────────────────────────
 app.post('/api/fcm-token', verifyAuth, async (req, res) => {
   try {
@@ -858,6 +963,17 @@ app.post('/api/friend-requests', verifyAuth, friendReqLimiter, async (req, res) 
       });
     }
 
+    // E-mail naar ouder als kind een verzoek stuurt
+    db.collection('users').doc(fromUid).get().then(senderDoc => {
+      const parentEmail = senderDoc.data()?.parentEmail;
+      if (!parentEmail) { console.warn(`Geen parentEmail voor ${fromUid}`); return; }
+      transporter.sendMail({
+        from: `"Pulse" <${process.env.EMAIL_USER}>`,
+        to: parentEmail,
+        subject: 'Pulse — Vriendschapsverzoek verstuurd',
+        html: `<div style="font-family:sans-serif;max-width:400px;margin:auto"><h2 style="color:#7c4dff">Pulse — Ouderlijk toezicht</h2><p><strong>${fromName}</strong> heeft een vriendschapsverzoek verstuurd naar <strong>${toUser.displayName || toEmail}</strong>.</p></div>`,
+      }).catch(() => {});
+    }).catch(() => console.warn('Kon parentEmail niet ophalen'));
     res.json({ success: true, requestId: reqRef.id, toUid: toUser.uid });
   } catch (err) {
     console.error(err);
@@ -912,6 +1028,17 @@ app.post('/api/friend-requests/:requestId/accept', verifyAuth, async (req, res) 
       io.to(senderSocket).emit('friend:accepted', { byUid: toUid, byName: toName, byEmail: toEmail });
     }
 
+    // E-mail naar ouder als kind een verzoek accepteert
+    db.collection('users').doc(toUid).get().then(acceptorDoc => {
+      const parentEmail = acceptorDoc.data()?.parentEmail;
+      if (!parentEmail) { console.warn(`Geen parentEmail voor ${toUid}`); return; }
+      transporter.sendMail({
+        from: `"Pulse" <${process.env.EMAIL_USER}>`,
+        to: parentEmail,
+        subject: 'Pulse — Nieuw contact toegevoegd',
+        html: `<div style="font-family:sans-serif;max-width:400px;margin:auto"><h2 style="color:#7c4dff">Pulse — Ouderlijk toezicht</h2><p><strong>${toName}</strong> heeft een vriendschapsverzoek van <strong>${fromName}</strong> geaccepteerd.</p></div>`,
+      }).catch(() => {});
+    }).catch(() => console.warn('Kon parentEmail niet ophalen'));
     res.json({ success: true });
   } catch (err) {
     console.error(err);
