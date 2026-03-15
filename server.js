@@ -401,8 +401,17 @@ io.on('connection', (socket) => {
         lastMessageAt:  admin.firestore.FieldValue.serverTimestamp(),
         updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
       });
-      const savedMsg = { id: msgRef.id, convId, type: 'call', isVideo: !!isVideo, direction, duration: duration || 0, senderId, senderName };
+      const savedMsg = { id: msgRef.id, convId, type: 'call', isVideo: !!isVideo, direction, duration: safeDuration, senderId, senderName };
+      // Stuur naar iedereen in de room (als ze de chat open hebben)
       io.to(convId).emit('message:received', savedMsg);
+      // Stuur ook rechtstreeks naar elk lid — ook als ze de chat niet open hebben
+      const convDoc = await db.collection('conversations').doc(convId).get();
+      const members = convDoc.exists ? (convDoc.data().members || []) : [];
+      members.forEach(uid => {
+        if (uid === senderId) return; // beller heeft al optimistisch bericht
+        const sockets = onlineUsers[uid];
+        if (sockets) sockets.forEach(sid => io.to(sid).emit('message:received', savedMsg));
+      });
     } catch (e) {
       console.error('call:log fout:', e);
     }
