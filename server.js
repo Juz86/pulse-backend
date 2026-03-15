@@ -551,6 +551,14 @@ io.on('connection', (socket) => {
           const convDoc = await db.collection('conversations').doc(convId).get();
           const members = convDoc.data()?.members || [];
           const senderName = verifiedMessage.senderName || 'Iemand';
+
+          // Stuur ook rechtstreeks naar elk lid (ook als ze de chat niet open hebben)
+          members.forEach(memberUid => {
+            if (memberUid === verifiedMessage.senderId) return;
+            const sockets = onlineUsers[memberUid];
+            if (sockets) sockets.forEach(sid => io.to(sid).emit('message:received', savedMsg));
+          });
+
           await Promise.all(members.map(async (memberUid) => {
             if (memberUid === verifiedMessage.senderId) return;
             if (onlineUsers[memberUid]?.size) return;
