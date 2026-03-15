@@ -42,7 +42,7 @@ const APP_URL = process.env.APP_URL || 'https://pulse-message.netlify.app';
 // ─── Bijhouden actieve inkomende oproepen { calleeUid: { callerUid, callerName, isVideo } } ─
 const pendingCalls  = {};
 const activeCalls   = new Set(); // uid's die momenteel in een actief gesprek zitten
-const inactiveUsers = new Set(); // uid's die online zijn maar inactief (1 min geen activiteit)
+const inactiveUsers = new Set(); // uid's die online zijn maar inactief (3 min geen activiteit)
 
 // ─── Express + HTTP + Socket.IO ──────────────────────────────────────────────
 const app = express();
