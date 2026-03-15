@@ -853,6 +853,46 @@ app.post('/api/friend-requests/:requestId/decline', verifyAuth, async (req, res)
   }
 });
 
+// ─── Automatisch opschonen: berichten ouder dan 30 dagen ─────────────────────
+async function cleanupOldMessages() {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 30);
+  const cutoffTs = admin.firestore.Timestamp.fromDate(cutoff);
+
+  try {
+    const convsSnap = await db.collection('conversations').get();
+    let totalDeleted = 0;
+
+    for (const convDoc of convsSnap.docs) {
+      const oldMsgs = await convDoc.ref.collection('messages')
+        .where('createdAt', '<', cutoffTs)
+        .get();
+
+      if (oldMsgs.empty) continue;
+
+      // Verwijder in batches van 500 (Firestore limiet)
+      const chunks = [];
+      for (let i = 0; i < oldMsgs.docs.length; i += 500) {
+        chunks.push(oldMsgs.docs.slice(i, i + 500));
+      }
+      for (const chunk of chunks) {
+        const batch = db.batch();
+        chunk.forEach(d => batch.delete(d.ref));
+        await batch.commit();
+        totalDeleted += chunk.length;
+      }
+    }
+
+    console.log(`🧹 Opschonen klaar: ${totalDeleted} berichten verwijderd`);
+  } catch (err) {
+    console.error('Opschonen mislukt:', err);
+  }
+}
+
+// Dagelijks uitvoeren (elke 24 uur), en direct bij opstarten
+cleanupOldMessages();
+setInterval(cleanupOldMessages, 24 * 60 * 60 * 1000);
+
 // ─── Server starten ───────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
