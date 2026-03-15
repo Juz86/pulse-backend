@@ -4,6 +4,10 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const nodemailer = require('nodemailer');
+const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
+const sendCodeLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { error: 'Te veel verzoeken, probeer later opnieuw.' } });
+const friendReqLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 20, message: { error: 'Te veel verzoeken, probeer later opnieuw.' } });
 
 // ─── Firebase Admin initialiseren ───────────────────────────────────────────
 // Vervang dit met jouw eigen serviceAccountKey.json bestand van Firebase
@@ -52,7 +56,7 @@ app.get('/', (req, res) => {
 });
 
 // ─── OTP: Stuur verificatiecode ──────────────────────────────────────────────
-app.post('/api/send-code', async (req, res) => {
+app.post('/api/send-code', sendCodeLimiter, async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: 'E-mail ontbreekt.' });
 
@@ -88,7 +92,10 @@ app.post('/api/verify-code', (req, res) => {
   const entry = otpStore.get(email);
   if (!entry)                    return res.status(400).json({ error: 'Geen code gevonden. Vraag een nieuwe aan.' });
   if (Date.now() > entry.expiresAt) { otpStore.delete(email); return res.status(400).json({ error: 'Code verlopen.' }); }
-  if (entry.code !== code)       return res.status(400).json({ error: 'Verkeerde code.' });
+  const a = Buffer.from(String(entry.code));
+  const b = Buffer.from(String(code));
+  const mismatch = a.length !== b.length || !crypto.timingSafeEqual(a, b);
+  if (mismatch)                  return res.status(400).json({ error: 'Verkeerde code.' });
   otpStore.delete(email);
   res.json({ ok: true });
 });
@@ -299,6 +306,7 @@ app.delete('/api/account/:uid', async (req, res) => {
     for (const convDoc of convsSnap.docs) {
       const convRef = convDoc.ref;
       const { members = [] } = convDoc.data();
+      if (!Array.isArray(members)) continue;
       const msgsSnap = await convRef.collection('messages').get();
       const batch = db.batch();
       msgsSnap.docs.forEach(d => batch.delete(d.ref));
@@ -372,14 +380,16 @@ io.on('connection', (socket) => {
   // ── Oproep opslaan als bericht in gesprek ──
   socket.on('call:log', async ({ convId, isVideo, direction, duration, senderId, senderName }) => {
     try {
+      if (!convId || !senderId || !direction) return;
+      const safeDuration = (typeof duration === 'number' && isFinite(duration) && duration >= 0) ? Math.round(duration) : 0;
       const msgRef = await db.collection('conversations').doc(convId)
         .collection('messages').add({
-          type: 'call', isVideo: !!isVideo, direction, duration: duration || 0,
+          type: 'call', isVideo: !!isVideo, direction, duration: safeDuration,
           senderId, senderName,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-      const dur = duration > 0
-        ? (duration >= 60 ? `${Math.floor(duration / 60)} min` : `${duration} sec`)
+      const dur = safeDuration > 0
+        ? (safeDuration >= 60 ? `${Math.floor(safeDuration / 60)} min` : `${safeDuration} sec`)
         : '';
       const label = direction === 'completed'
         ? (isVideo ? 'Video-oproep' : 'Spraakoproep') + (dur ? ` · ${dur}` : '')
@@ -654,7 +664,7 @@ app.post('/api/fcm-token', async (req, res) => {
 });
 
 // ─── REST: Vriendschapsverzoek sturen ────────────────────────────────────────
-app.post('/api/friend-requests', async (req, res) => {
+app.post('/api/friend-requests', friendReqLimiter, async (req, res) => {
   try {
     const { fromUid, fromName, fromEmail, fromPhoto, toEmail } = req.body;
     if (!fromUid || !toEmail) return res.status(400).json({ error: 'fromUid en toEmail zijn verplicht' });
