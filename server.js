@@ -41,6 +41,7 @@ const APP_URL = process.env.APP_URL || 'https://pulse-message.netlify.app';
 
 // ─── Bijhouden actieve inkomende oproepen { calleeUid: { callerUid, callerName, isVideo } } ─
 const pendingCalls = {};
+const activeCalls  = new Set(); // uid's die momenteel in een actief gesprek zitten
 
 // ─── Express + HTTP + Socket.IO ──────────────────────────────────────────────
 const app = express();
@@ -593,6 +594,11 @@ io.on('connection', (socket) => {
   socket.on('call:offer', async ({ to, from, offer, isVideo, callerName }) => {
     const targetSocket = getSocketId(to);
     if (targetSocket) {
+      // Controleer of ontvanger al in een actief gesprek zit
+      if (activeCalls.has(to)) {
+        socket.emit('call:busy', { to });
+        return;
+      }
       io.to(targetSocket).emit('call:incoming', { from, offer, isVideo, callerName });
       // Bijhouden dat deze oproep uitstaat (nog niet beantwoord)
       pendingCalls[to] = { from, callerName, isVideo };
@@ -619,9 +625,10 @@ io.on('connection', (socket) => {
   socket.on('call:answer', ({ to, answer }) => {
     const targetSocket = getSocketId(to);
     if (targetSocket) io.to(targetSocket).emit('call:answer', { answer });
-    // Oproep beantwoord → niet meer als gemist beschouwen (to = de beller)
-    delete pendingCalls[socket.data.uid]; // ontvanger uid = de 'to' van het original offer
-    // Ook op uid van de beller opruimen voor zekerheid
+    // Oproep beantwoord → beide users zijn nu in een actief gesprek
+    activeCalls.add(socket.data.uid);
+    activeCalls.add(to);
+    delete pendingCalls[socket.data.uid];
     delete pendingCalls[to];
   });
 
@@ -633,6 +640,9 @@ io.on('connection', (socket) => {
   socket.on('call:end', async ({ to }) => {
     const targetSocket = getSocketId(to);
     if (targetSocket) io.to(targetSocket).emit('call:ended');
+    // Beide users zijn niet meer in een actief gesprek
+    activeCalls.delete(socket.data.uid);
+    activeCalls.delete(to);
     // Als oproep nog uitstond (niet beantwoord) → gemiste oproep notificatie
     if (pendingCalls[to]) {
       const { callerName, isVideo } = pendingCalls[to];
@@ -658,6 +668,8 @@ io.on('connection', (socket) => {
     const targetSocket = getSocketId(to);
     if (targetSocket) io.to(targetSocket).emit('call:declined');
     // Bewust geweigerd → geen gemiste oproep
+    activeCalls.delete(socket.data.uid);
+    activeCalls.delete(to);
     delete pendingCalls[socket.data.uid];
     delete pendingCalls[to];
   });
@@ -745,6 +757,7 @@ io.on('connection', (socket) => {
     const uid = socket.data.uid;
     if (uid) {
       onlineUsers[uid]?.delete(socket.id);
+      activeCalls.delete(uid);
       if (!onlineUsers[uid]?.size) {
         delete onlineUsers[uid];
         await db.collection('users').doc(uid).update({ online: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(() => {});
