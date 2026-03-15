@@ -411,8 +411,8 @@ io.on('connection', (socket) => {
   });
 
   // ── Profielupdate broadcasten naar alle verbonden clients ──
-  socket.on('user:updated', ({ uid, displayName, photoURL }) => {
-    socket.broadcast.emit('user:updated', { uid, displayName, photoURL });
+  socket.on('user:updated', ({ displayName, photoURL }) => {
+    socket.broadcast.emit('user:updated', { uid: socket.userId, displayName, photoURL });
   });
 
   // ── Video upgrade doorsturen naar de andere kant ──
@@ -473,19 +473,20 @@ io.on('connection', (socket) => {
   // ── Bericht sturen ──
   socket.on('message:send', async ({ convId, message }, callback) => {
     try {
+      const verifiedMessage = { ...message, senderId: socket.userId };
       const msgRef = await db.collection('conversations').doc(convId)
         .collection('messages').add({
-          ...message,
+          ...verifiedMessage,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
 
-      const savedMsg = { id: msgRef.id, ...message };
+      const savedMsg = { id: msgRef.id, ...verifiedMessage };
 
       // Gesprek updaten met laatste bericht
-      const lastMessage = message.type === 'contact'
-        ? `Contactpersoon: ${message.sharedContact?.name || ''}`
-        : message.type === 'call' ? (message.isVideo ? 'Video-oproep' : 'Spraakoproep')
-        : message.text;
+      const lastMessage = verifiedMessage.type === 'contact'
+        ? `Contactpersoon: ${verifiedMessage.sharedContact?.name || ''}`
+        : verifiedMessage.type === 'call' ? (verifiedMessage.isVideo ? 'Video-oproep' : 'Spraakoproep')
+        : verifiedMessage.text;
       await db.collection('conversations').doc(convId).update({
         lastMessage,
         lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -508,9 +509,9 @@ io.on('connection', (socket) => {
       try {
         const convDoc = await db.collection('conversations').doc(convId).get();
         const members = convDoc.data()?.members || [];
-        const senderName = message.senderName || 'Iemand';
+        const senderName = verifiedMessage.senderName || 'Iemand';
         for (const memberUid of members) {
-          if (memberUid === message.senderId) continue;
+          if (memberUid === verifiedMessage.senderId) continue;
           if (onlineUsers[memberUid]?.size) continue; // online, geen push nodig
           const userDoc = await db.collection('users').doc(memberUid).get();
           const fcmToken = userDoc.data()?.fcmToken;
@@ -519,7 +520,7 @@ io.on('connection', (socket) => {
             token: fcmToken,
             notification: {
               title: senderName,
-              body: message.text?.substring(0, 100) || 'Nieuw bericht',
+              body: verifiedMessage.text?.substring(0, 100) || 'Nieuw bericht',
             },
             data: { convId },
             webpush: { fcmOptions: { link: APP_URL } },
