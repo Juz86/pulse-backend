@@ -6,8 +6,13 @@ const admin = require('firebase-admin');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
-const sendCodeLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { error: 'Te veel verzoeken, probeer later opnieuw.' } });
+const sendCodeLimiter  = rateLimit({ windowMs: 15 * 60 * 1000, max: 5,  message: { error: 'Te veel verzoeken, probeer later opnieuw.' } });
 const friendReqLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 20, message: { error: 'Te veel verzoeken, probeer later opnieuw.' } });
+const globalLimiter    = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, message: { error: 'Te veel verzoeken.' } });
+const strictLimiter    = rateLimit({ windowMs: 60 * 60 * 1000, max: 5,   message: { error: 'Te veel verzoeken.' } });
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function validEmail(e) { return typeof e === 'string' && EMAIL_REGEX.test(e.trim()); }
 
 // ─── Firebase Admin initialiseren ───────────────────────────────────────────
 // Vervang dit met jouw eigen serviceAccountKey.json bestand van Firebase
@@ -40,15 +45,38 @@ const pendingCalls = {};
 // ─── Express + HTTP + Socket.IO ──────────────────────────────────────────────
 const app = express();
 const server = http.createServer(app);
+const FRONTEND_URL = process.env.FRONTEND_URL || APP_URL;
+
 const io = new Server(server, {
-  cors: {
-    origin: '*',        // In productie: vervang * door jouw domeinnaam
-    methods: ['GET', 'POST'],
-  },
+  cors: { origin: FRONTEND_URL, methods: ['GET', 'POST'], credentials: true },
 });
 
-app.use(cors());
+app.use(cors({ origin: FRONTEND_URL, credentials: true }));
 app.use(express.json());
+app.use(globalLimiter);
+
+// ─── Security headers ─────────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
+
+// ─── Auth middleware ──────────────────────────────────────────────────────────
+async function verifyAuth(req, res, next) {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Niet geautoriseerd.' });
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.uid = decoded.uid;
+    next();
+  } catch {
+    res.status(401).json({ error: 'Ongeldig token.' });
+  }
+}
 
 // ─── Gezondheidscheck ────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
@@ -58,7 +86,7 @@ app.get('/', (req, res) => {
 // ─── OTP: Stuur verificatiecode ──────────────────────────────────────────────
 app.post('/api/send-code', sendCodeLimiter, async (req, res) => {
   const { email } = req.body;
-  if (!email) return res.status(400).json({ error: 'E-mail ontbreekt.' });
+  if (!validEmail(email)) return res.status(400).json({ error: 'Ongeldig e-mailadres.' });
 
   const code = Math.floor(100000 + Math.random() * 900000).toString();
   otpStore.set(email, { code, expiresAt: Date.now() + 15 * 60 * 1000 });
@@ -103,7 +131,7 @@ app.post('/api/verify-code', (req, res) => {
 // ─── Wachtwoord reset mail (eigen stijl) ─────────────────────────────────────
 app.post('/api/send-reset', async (req, res) => {
   const { email, actionUrl } = req.body;
-  if (!email) return res.status(400).json({ error: 'E-mail ontbreekt.' });
+  if (!validEmail(email)) return res.status(400).json({ error: 'Ongeldig e-mailadres.' });
   try {
     const resetLink = await admin.auth().generatePasswordResetLink(email, {
       url: actionUrl || 'http://localhost:3000',
@@ -135,15 +163,16 @@ app.post('/api/send-reset', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('Reset mail fout:', err);
-    res.status(500).json({ error: err.message || 'E-mail versturen mislukt.' });
+    res.status(500).json({ error: 'E-mail versturen mislukt.' });
   }
 });
 
 // ─── REST: Gebruikersprofiel opslaan ─────────────────────────────────────────
-app.post('/api/users', async (req, res) => {
+app.post('/api/users', verifyAuth, async (req, res) => {
   try {
     const { uid, displayName, email, photoURL } = req.body;
-    if (!uid || !email) return res.status(400).json({ error: 'uid en email zijn verplicht' });
+    if (!uid || !validEmail(email)) return res.status(400).json({ error: 'uid en geldig e-mailadres zijn verplicht' });
+    if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
 
     const name = displayName || email.split('@')[0];
     await db.collection('users').doc(uid).set(
@@ -167,10 +196,10 @@ app.post('/api/users', async (req, res) => {
 });
 
 // ─── REST: Gebruiker zoeken op email ─────────────────────────────────────────
-app.get('/api/users/search', async (req, res) => {
+app.get('/api/users/search', verifyAuth, async (req, res) => {
   try {
     const { email } = req.query;
-    if (!email) return res.status(400).json({ error: 'email is verplicht' });
+    if (!validEmail(email)) return res.status(400).json({ error: 'Ongeldig e-mailadres.' });
 
     const snap = await db.collection('users').where('email', '==', email).limit(1).get();
     if (snap.empty) return res.status(404).json({ error: 'Gebruiker niet gevonden' });
@@ -184,9 +213,10 @@ app.get('/api/users/search', async (req, res) => {
 });
 
 // ─── REST: Gesprekken ophalen ─────────────────────────────────────────────────
-app.get('/api/conversations/:uid', async (req, res) => {
+app.get('/api/conversations/:uid', verifyAuth, async (req, res) => {
   try {
     const { uid } = req.params;
+    if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
     const snap = await db.collection('conversations')
       .where('members', 'array-contains', uid)
       .orderBy('updatedAt', 'desc')
@@ -230,10 +260,10 @@ app.get('/api/conversations/:uid', async (req, res) => {
 });
 
 // ─── REST: Berichten ophalen ──────────────────────────────────────────────────
-app.get('/api/messages/:convId', async (req, res) => {
+app.get('/api/messages/:convId', verifyAuth, async (req, res) => {
   try {
     const { convId } = req.params;
-    const { uid } = req.query;
+    const uid = req.uid;
     const limit = parseInt(req.query.limit) || 50;
 
     let query = db.collection('conversations').doc(convId)
@@ -257,11 +287,10 @@ app.get('/api/messages/:convId', async (req, res) => {
 });
 
 // ─── REST: Gesprek verwijderen (soft delete per gebruiker) ───────────────────
-app.delete('/api/conversations/:convId', async (req, res) => {
+app.delete('/api/conversations/:convId', verifyAuth, async (req, res) => {
   try {
     const { convId } = req.params;
-    const { uid } = req.query;
-    if (!uid) return res.status(400).json({ error: 'uid is verplicht' });
+    const uid = req.uid;
 
     const convRef = db.collection('conversations').doc(convId);
     const convDoc = await convRef.get();
@@ -294,10 +323,11 @@ app.delete('/api/conversations/:convId', async (req, res) => {
 
 
 // ─── REST: Account verwijderen ───────────────────────────────────────────────
-app.delete('/api/account/:uid', async (req, res) => {
+app.delete('/api/account/:uid', verifyAuth, strictLimiter, async (req, res) => {
   try {
     const { uid } = req.params;
     if (!uid) return res.status(400).json({ error: 'uid is verplicht' });
+    if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
 
     // 1. Verwijder alle gesprekken waarbij de gebruiker lid is
     const convsSnap = await db.collection('conversations')
@@ -347,11 +377,25 @@ function getSocketId(uid) {
   return sockets?.size ? sockets.values().next().value : null;
 }
 
+// ── Socket.IO auth middleware ──────────────────────────────────────────────
+io.use(async (socket, next) => {
+  const token = socket.handshake.auth?.token;
+  if (!token) return next(new Error('Authenticatie vereist.'));
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    socket.userId = decoded.uid;
+    next();
+  } catch {
+    next(new Error('Ongeldig token.'));
+  }
+});
+
 io.on('connection', (socket) => {
-  console.log('🔌 Verbonden:', socket.id);
+  const uid = socket.userId;
+  console.log('🔌 Verbonden:', socket.id, uid);
 
   // ── User registreren als online ──
-  socket.on('user:online', async ({ uid }) => {
+  socket.on('user:online', async () => {
     if (!onlineUsers[uid]) onlineUsers[uid] = new Set();
     onlineUsers[uid].add(socket.id);
     socket.data.uid = uid;
@@ -378,10 +422,13 @@ io.on('connection', (socket) => {
   });
 
   // ── Oproep opslaan als bericht in gesprek ──
-  socket.on('call:log', async ({ convId, isVideo, direction, duration, senderId, senderName }) => {
+  socket.on('call:log', async ({ convId, isVideo, direction, duration }) => {
     try {
-      if (!convId || !senderId || !direction) return;
+      if (!convId || !direction) return;
+      const senderId = uid; // gebruik verified socket.userId
       const safeDuration = (typeof duration === 'number' && isFinite(duration) && duration >= 0) ? Math.round(duration) : 0;
+      const userDoc = await db.collection('users').doc(senderId).get();
+      const senderName = userDoc.exists ? (userDoc.data().displayName || '') : '';
       const msgRef = await db.collection('conversations').doc(convId)
         .collection('messages').add({
           type: 'call', isVideo: !!isVideo, direction, duration: safeDuration,
@@ -486,11 +533,11 @@ io.on('connection', (socket) => {
   });
 
   // ── Typen indicator ──
-  socket.on('typing:start', ({ convId, uid, name }) => {
+  socket.on('typing:start', ({ convId, name }) => {
     socket.to(convId).emit('typing:update', { uid, name, typing: true });
   });
 
-  socket.on('typing:stop', ({ convId, uid }) => {
+  socket.on('typing:stop', ({ convId }) => {
     socket.to(convId).emit('typing:update', { uid, typing: false });
   });
 
@@ -617,7 +664,7 @@ io.on('connection', (socket) => {
   });
 
     // ── Berichtenstatus: gelezen ──
-  socket.on('messages:read', ({ convId, uid }) => {
+  socket.on('messages:read', ({ convId }) => {
     socket.to(convId).emit('message:status', { convId, readerId: uid, status: 'read' });
   });
 
@@ -661,10 +708,11 @@ io.on('connection', (socket) => {
 });
 
 // ─── REST: FCM token opslaan ─────────────────────────────────────────────────
-app.post('/api/fcm-token', async (req, res) => {
+app.post('/api/fcm-token', verifyAuth, async (req, res) => {
   try {
     const { uid, token } = req.body;
     if (!uid || !token) return res.status(400).json({ error: 'uid en token verplicht' });
+    if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
     await db.collection('users').doc(uid).update({ fcmToken: token });
     res.json({ ok: true });
   } catch (err) {
@@ -673,10 +721,11 @@ app.post('/api/fcm-token', async (req, res) => {
 });
 
 // ─── REST: Vriendschapsverzoek sturen ────────────────────────────────────────
-app.post('/api/friend-requests', friendReqLimiter, async (req, res) => {
+app.post('/api/friend-requests', verifyAuth, friendReqLimiter, async (req, res) => {
   try {
     const { fromUid, fromName, fromEmail, fromPhoto, toEmail } = req.body;
-    if (!fromUid || !toEmail) return res.status(400).json({ error: 'fromUid en toEmail zijn verplicht' });
+    if (!fromUid || !validEmail(toEmail)) return res.status(400).json({ error: 'fromUid en geldig toEmail zijn verplicht' });
+    if (req.uid !== fromUid) return res.status(403).json({ error: 'Geen toegang.' });
 
     // Zoek de ontvanger op email
     const snap = await db.collection('users').where('email', '==', toEmail).limit(1).get();
@@ -735,9 +784,10 @@ app.post('/api/friend-requests', friendReqLimiter, async (req, res) => {
 });
 
 // ─── REST: Vriendschapsverzoeken ophalen voor een gebruiker ──────────────────
-app.get('/api/friend-requests/:uid', async (req, res) => {
+app.get('/api/friend-requests/:uid', verifyAuth, async (req, res) => {
   try {
     const { uid } = req.params;
+    if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
     const snap = await db.collection('friendRequests')
       .where('toUid', '==', uid)
       .where('status', '==', 'pending')
@@ -752,12 +802,13 @@ app.get('/api/friend-requests/:uid', async (req, res) => {
 });
 
 // ─── REST: Vriendschapsverzoek accepteren ─────────────────────────────────────
-app.post('/api/friend-requests/:requestId/accept', async (req, res) => {
+app.post('/api/friend-requests/:requestId/accept', verifyAuth, async (req, res) => {
   try {
     const { requestId } = req.params;
     const reqDoc = await db.collection('friendRequests').doc(requestId).get();
     if (!reqDoc.exists) return res.status(404).json({ error: 'Verzoek niet gevonden' });
     const { fromUid, fromName, fromEmail, fromPhoto, toUid, toName, toEmail } = reqDoc.data();
+    if (req.uid !== toUid) return res.status(403).json({ error: 'Geen toegang.' });
 
     const batch = db.batch();
     // Voeg toe aan beiden contactenlijst
@@ -787,9 +838,12 @@ app.post('/api/friend-requests/:requestId/accept', async (req, res) => {
 });
 
 // ─── REST: Vriendschapsverzoek weigeren ──────────────────────────────────────
-app.post('/api/friend-requests/:requestId/decline', async (req, res) => {
+app.post('/api/friend-requests/:requestId/decline', verifyAuth, async (req, res) => {
   try {
     const { requestId } = req.params;
+    const reqDoc = await db.collection('friendRequests').doc(requestId).get();
+    if (!reqDoc.exists) return res.status(404).json({ error: 'Verzoek niet gevonden' });
+    if (req.uid !== reqDoc.data().toUid) return res.status(403).json({ error: 'Geen toegang.' });
     await db.collection('friendRequests').doc(requestId).update({ status: 'declined' });
     res.json({ success: true });
   } catch (err) {
