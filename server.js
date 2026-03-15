@@ -498,11 +498,14 @@ io.on('connection', (socket) => {
         ? (isVideo ? 'Video-oproep' : 'Spraakoproep') + (dur ? ` · ${dur}` : '')
         : direction === 'declined'
           ? (isVideo ? 'Video-oproep geweigerd' : 'Oproep geweigerd')
-          : (isVideo ? 'Gemiste video-oproep' : 'Gemiste spraakoproep');
+          : (isVideo ? 'Gemiste video-oproep' : 'Gemiste oproep');
       await db.collection('conversations').doc(convId).update({
-        lastMessage:    label,
-        lastMessageAt:  admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+        lastMessage:       label,
+        lastMessageAt:     admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt:         admin.firestore.FieldValue.serverTimestamp(),
+        lastCallSenderId:  senderId,
+        lastCallDirection: direction,
+        lastCallIsVideo:   !!isVideo,
       });
       const savedMsg = { id: msgRef.id, convId, type: 'call', isVideo: !!isVideo, direction, duration: safeDuration, senderId, senderName };
       // Stuur naar iedereen in de room (als ze de chat open hebben)
