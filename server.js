@@ -40,8 +40,9 @@ const otpStore = new Map();
 const APP_URL = process.env.APP_URL || 'https://pulse-message.netlify.app';
 
 // ─── Bijhouden actieve inkomende oproepen { calleeUid: { callerUid, callerName, isVideo } } ─
-const pendingCalls = {};
-const activeCalls  = new Set(); // uid's die momenteel in een actief gesprek zitten
+const pendingCalls  = {};
+const activeCalls   = new Set(); // uid's die momenteel in een actief gesprek zitten
+const inactiveUsers = new Set(); // uid's die online zijn maar inactief (1 min geen activiteit)
 
 // ─── Express + HTTP + Socket.IO ──────────────────────────────────────────────
 const app = express();
@@ -438,15 +439,31 @@ io.on('connection', (socket) => {
     if (!onlineUsers[uid]) onlineUsers[uid] = new Set();
     onlineUsers[uid].add(socket.id);
     socket.data.uid = uid;
-    await db.collection('users').doc(uid).update({ online: true, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(() => {});
-    io.emit('user:status', { uid, online: true });
+    inactiveUsers.delete(uid); // Actief bij verbinding
+    await db.collection('users').doc(uid).update({ online: true, inactive: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(() => {});
+    io.emit('user:status', { uid, online: true, inactive: false });
     socket.emit('users:online', Object.keys(onlineUsers));
+    socket.emit('users:inactive', [...inactiveUsers]);
     console.log(`👤 Online: ${uid}`);
   });
 
   // ── Stuur actuele online lijst op verzoek ──
   socket.on('users:online:request', () => {
     socket.emit('users:online', Object.keys(onlineUsers));
+    socket.emit('users:inactive', [...inactiveUsers]);
+  });
+
+  // ── Inactiviteit detectie ──
+  socket.on('user:inactive', async () => {
+    inactiveUsers.add(uid);
+    await db.collection('users').doc(uid).update({ inactive: true }).catch(() => {});
+    io.emit('user:status', { uid, online: true, inactive: true });
+  });
+
+  socket.on('user:active', async () => {
+    inactiveUsers.delete(uid);
+    await db.collection('users').doc(uid).update({ inactive: false }).catch(() => {});
+    io.emit('user:status', { uid, online: true, inactive: false });
   });
 
   // ── Profielupdate broadcasten naar alle verbonden clients ──
@@ -760,7 +777,8 @@ io.on('connection', (socket) => {
       activeCalls.delete(uid);
       if (!onlineUsers[uid]?.size) {
         delete onlineUsers[uid];
-        await db.collection('users').doc(uid).update({ online: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(() => {});
+        inactiveUsers.delete(uid);
+        await db.collection('users').doc(uid).update({ online: false, inactive: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(() => {});
         io.emit('user:status', { uid, online: false });
       }
       console.log(`👋 Offline: ${uid}`);
