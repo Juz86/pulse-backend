@@ -278,8 +278,46 @@ app.get('/api/messages/:convId', verifyAuth, async (req, res) => {
     }
 
     const snap = await query.get();
-    const msgs = snap.docs.map(d => ({ id: d.id, ...d.data() })).reverse();
+    const msgs = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter(m => !(m.deletedFor || []).includes(uid))
+      .reverse();
     res.json(msgs);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Serverfout' });
+  }
+});
+
+// ─── REST: Bericht verwijderen ───────────────────────────────────────────────
+app.delete('/api/messages/:convId/:msgId', verifyAuth, async (req, res) => {
+  try {
+    const { convId, msgId } = req.params;
+    const scope = req.query.scope === 'all' ? 'all' : 'self';
+    const uid = req.uid;
+
+    const msgRef = db.collection('conversations').doc(convId).collection('messages').doc(msgId);
+    const msgDoc = await msgRef.get();
+    if (!msgDoc.exists) return res.status(404).json({ error: 'Bericht niet gevonden' });
+
+    if (scope === 'all') {
+      // Alleen de afzender mag voor iedereen verwijderen
+      if (msgDoc.data().senderId !== uid) return res.status(403).json({ error: 'Geen toegang.' });
+      await msgRef.delete();
+      // Stuur event naar iedereen in de room én rechtstreeks naar elk lid
+      io.to(convId).emit('message:deleted', { convId, msgId });
+      const convDoc = await db.collection('conversations').doc(convId).get();
+      const members = convDoc.exists ? (convDoc.data().members || []) : [];
+      members.forEach(memberUid => {
+        const sockets = onlineUsers[memberUid];
+        if (sockets) sockets.forEach(sid => io.to(sid).emit('message:deleted', { convId, msgId }));
+      });
+    } else {
+      // Voor mezelf: voeg uid toe aan deletedFor array
+      await msgRef.update({ deletedFor: admin.firestore.FieldValue.arrayUnion(uid) });
+    }
+
+    res.json({ success: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Serverfout' });
