@@ -963,8 +963,8 @@ app.get('/api/parent/children', verifyAuth, async (req, res) => {
     if (!parentDoc.exists || parentDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
     const snap = await db.collection('users').where('parentId', '==', req.uid).get();
     const children = snap.docs.map(d => {
-      const { uid, displayName, email, photoURL, online, lastSeen, paused } = d.data();
-      return { uid, displayName, email, photoURL: photoURL || null, online: online || false, lastSeen: lastSeen || null, paused: paused || false };
+      const { uid, displayName, username, email, photoURL, online, lastSeen, paused } = d.data();
+      return { uid, displayName, username: username || null, email, photoURL: photoURL || null, online: online || false, lastSeen: lastSeen || null, paused: paused || false };
     });
     res.json(children);
   } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
