@@ -858,7 +858,25 @@ app.post('/api/parent/supervision-response/:requestId', verifyAuth, async (req, 
     if (reqData.status !== 'pending') return res.status(400).json({ error: 'Verzoek al verwerkt.' });
     await db.collection('supervisionRequests').doc(requestId).update({ status: accept ? 'accepted' : 'declined' });
     if (accept) {
-      await db.collection('users').doc(req.uid).update({ parentId: reqData.parentUid, parentEmail: reqData.parentEmail });
+      const [childDoc, parentDoc] = await Promise.all([
+        db.collection('users').doc(req.uid).get(),
+        db.collection('users').doc(reqData.parentUid).get(),
+      ]);
+      const childData  = childDoc.data()  || {};
+      const parentData = parentDoc.data() || {};
+      const batch = db.batch();
+      batch.update(db.collection('users').doc(req.uid), { parentId: reqData.parentUid, parentEmail: reqData.parentEmail });
+      // Wederzijds als contact toevoegen
+      batch.set(db.collection('users').doc(req.uid).collection('contacts').doc(reqData.parentUid), {
+        uid: reqData.parentUid, displayName: parentData.displayName || parentData.email, email: parentData.email, photoURL: parentData.photoURL || null, addedAt: new Date().toISOString(),
+      });
+      batch.set(db.collection('users').doc(reqData.parentUid).collection('contacts').doc(req.uid), {
+        uid: req.uid, displayName: childData.displayName || childData.email, email: childData.email, photoURL: childData.photoURL || null, addedAt: new Date().toISOString(),
+      });
+      await batch.commit();
+      // Notificeer ouder realtime
+      const parentSocket = getSocketId(reqData.parentUid);
+      if (parentSocket) io.to(parentSocket).emit('friend:accepted', { byUid: req.uid, byName: childData.displayName || childData.email, byEmail: childData.email });
     }
     res.json({ success: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
