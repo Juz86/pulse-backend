@@ -915,10 +915,11 @@ app.get('/api/parent/activities', verifyAuth, async (req, res) => {
   try {
     const snap = await db.collection('parentActivities')
       .where('parentId', '==', req.uid)
-      .orderBy('createdAt', 'desc')
       .limit(50)
       .get();
-    const activities = snap.docs.map(d => ({ id: d.id, ...d.data(), createdAt: d.data().createdAt || null }));
+    const activities = snap.docs
+      .map(d => ({ id: d.id, ...d.data(), createdAt: d.data().createdAt || null }))
+      .sort((a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0));
     res.json(activities);
   } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
 });
