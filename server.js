@@ -24,6 +24,66 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+// ─── Redis wachtrij (optioneel) ──────────────────────────────────────────────
+let redis = null;
+let redisReady = false;
+try {
+  const Redis = require('ioredis');
+  const redisUrl = process.env.REDIS_URL;
+  if (redisUrl) {
+    const redisClient = new Redis(redisUrl, {
+      maxRetriesPerRequest: 1,
+      connectTimeout: 3000,
+      enableOfflineQueue: false,
+      retryStrategy: () => null, // niet automatisch herhalen
+    });
+    redisClient.on('ready', () => {
+      redis = redisClient;
+      redisReady = true;
+      console.log('✅ Redis verbonden');
+    });
+    redisClient.on('error', (err) => {
+      console.warn('⚠️ Redis niet beschikbaar, fallback op Firestore:', err.message);
+      redis = null;
+      redisReady = false;
+    });
+    redisClient.on('reconnecting', () => {
+      console.log('🔄 Redis herverbinden…');
+    });
+  } else {
+    console.log('ℹ️ Geen REDIS_URL — berichtenwachtrij uitgeschakeld');
+  }
+} catch (e) {
+  console.warn('⚠️ ioredis laden mislukt, fallback op Firestore:', e.message);
+  redis = null;
+}
+
+/** Voeg bericht toe aan wachtrij voor offline ontvanger */
+async function queueMessage(receiverUid, msg) {
+  if (!redis) return;
+  try {
+    const key = `queue:${receiverUid}`;
+    await redis.rpush(key, JSON.stringify(msg));
+    await redis.expire(key, 7 * 24 * 60 * 60); // 7 dagen TTL
+  } catch (e) {
+    console.warn('Redis queueMessage mislukt:', e.message);
+  }
+}
+
+/** Haal alle wachtende berichten op en verwijder de wachtrij */
+async function flushQueue(receiverUid) {
+  if (!redis) return [];
+  try {
+    const key = `queue:${receiverUid}`;
+    const items = await redis.lrange(key, 0, -1);
+    if (items.length) await redis.del(key);
+    return items.map(i => { try { return JSON.parse(i); } catch { return null; } }).filter(Boolean);
+  } catch (e) {
+    console.warn('Redis flushQueue mislukt:', e.message);
+    return [];
+  }
+}
+
 // ─── E-mail transporter (Nodemailer via Gmail) ────────────────────────────────
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -447,6 +507,39 @@ io.on('connection', (socket) => {
     db.collection('users').doc(uid).get().then(snap => {
       if (snap.exists && snap.data().paused) socket.emit('account:paused');
     }).catch(() => {});
+
+    // ── Bezorg wachtende berichten uit Redis wachtrij ──
+    const queued = await flushQueue(uid);
+    if (queued.length > 0) {
+      // Bezorg in chronologische volgorde
+      for (const msg of queued) {
+        socket.emit('message:received', msg);
+      }
+      // Markeer als bezorgd in Firestore (per gesprek, gegroepeerd voor efficiëntie)
+      const byConv = {};
+      queued.forEach(msg => {
+        if (msg.convId && msg.id) {
+          if (!byConv[msg.convId]) byConv[msg.convId] = [];
+          byConv[msg.convId].push(msg);
+        }
+      });
+      for (const [convId, msgs] of Object.entries(byConv)) {
+        const batch = db.batch();
+        msgs.forEach(msg => {
+          const ref = db.collection('conversations').doc(convId).collection('messages').doc(msg.id);
+          batch.update(ref, { status: 'bezorgd' });
+        });
+        batch.commit().catch(() => {});
+        // Notificeer verzenders dat berichten nu bezorgd zijn
+        msgs.forEach(msg => {
+          const senderSockets = onlineUsers[msg.senderId];
+          if (senderSockets) {
+            senderSockets.forEach(sid => io.to(sid).emit('message:status', { convId, msgId: msg.id, status: 'bezorgd' }));
+          }
+        });
+      }
+    }
+
     console.log(`👤 Online: ${uid}`);
   });
 
@@ -591,6 +684,8 @@ io.on('connection', (socket) => {
           await Promise.all(members.map(async (memberUid) => {
             if (memberUid === verifiedMessage.senderId) return;
             if (onlineUsers[memberUid]?.size) return;
+            // Offline ontvanger: sla op in Redis wachtrij voor actieve bezorging bij reconnect
+            await queueMessage(memberUid, savedMsg);
             const userDoc = await db.collection('users').doc(memberUid).get();
             const fcmToken = userDoc.data()?.fcmToken;
             if (!fcmToken) return;
