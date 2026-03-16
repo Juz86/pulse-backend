@@ -84,6 +84,49 @@ async function flushQueue(receiverUid) {
   }
 }
 
+/** Stuur push-notificatie naar één of meerdere apparaten van een gebruiker */
+async function sendPush(uid, notification, data = {}) {
+  try {
+    const userDoc = await db.collection('users').doc(uid).get();
+    if (!userDoc.exists) return;
+    const userData = userDoc.data();
+    // Ondersteun zowel fcmTokens array (meerdere apparaten) als legacy fcmToken
+    const tokens = [...new Set([
+      ...(Array.isArray(userData.fcmTokens) ? userData.fcmTokens : []),
+      ...(userData.fcmToken ? [userData.fcmToken] : []),
+    ])];
+    if (!tokens.length) return;
+    // FCM data-velden moeten strings zijn
+    const stringData = Object.fromEntries(
+      Object.entries(data).map(([k, v]) => [k, String(v)])
+    );
+    const response = await admin.messaging().sendEachForMulticast({
+      tokens,
+      notification,
+      data: stringData,
+      webpush: { fcmOptions: { link: APP_URL } },
+    });
+    // Verwijder verlopen of ongeldige tokens automatisch
+    const toRemove = [];
+    response.responses.forEach((r, i) => {
+      if (!r.success) {
+        const code = r.error?.code;
+        if (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token') {
+          toRemove.push(tokens[i]);
+        }
+      }
+    });
+    if (toRemove.length) {
+      const updates = { fcmTokens: admin.firestore.FieldValue.arrayRemove(...toRemove) };
+      if (toRemove.includes(userData.fcmToken)) updates.fcmToken = admin.firestore.FieldValue.delete();
+      await db.collection('users').doc(uid).update(updates).catch(() => {});
+    }
+    console.log(`📬 Push → ${uid}: ${response.successCount}/${tokens.length} bezorgd`);
+  } catch (e) {
+    console.warn(`Push mislukt voor ${uid}:`, e.message);
+  }
+}
+
 // ─── E-mail transporter (Nodemailer via Gmail) ────────────────────────────────
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -686,15 +729,10 @@ io.on('connection', (socket) => {
             if (onlineUsers[memberUid]?.size) return;
             // Offline ontvanger: sla op in Redis wachtrij voor actieve bezorging bij reconnect
             await queueMessage(memberUid, savedMsg);
-            const userDoc = await db.collection('users').doc(memberUid).get();
-            const fcmToken = userDoc.data()?.fcmToken;
-            if (!fcmToken) return;
-            await admin.messaging().send({
-              token: fcmToken,
-              notification: { title: senderName, body: verifiedMessage.text?.substring(0, 100) || 'Nieuw bericht' },
-              data: { convId },
-              webpush: { fcmOptions: { link: APP_URL } },
-            }).catch(() => {});
+            await sendPush(memberUid,
+              { title: senderName, body: verifiedMessage.text?.substring(0, 100) || 'Nieuw bericht' },
+              { convId }
+            );
           }));
         } catch {}
       })();
@@ -725,23 +763,18 @@ io.on('connection', (socket) => {
       io.to(targetSocket).emit('call:incoming', { from, offer, isVideo, callerName });
       // Bijhouden dat deze oproep uitstaat (nog niet beantwoord)
       pendingCalls[to] = { from, callerName, isVideo };
+      // Stuur ook FCM zodat notificatie zichtbaar is als app op achtergrond staat
+      sendPush(to,
+        { title: isVideo ? '📹 Inkomende video-oproep' : '📞 Inkomende oproep', body: `${callerName} belt je via Pulse` },
+        { type: 'call' }
+      );
     } else {
       socket.emit('call:unavailable', { to });
-      // Gebruiker is offline → stuur gemiste oproep pushnotificatie
-      try {
-        const userDoc = await db.collection('users').doc(to).get();
-        const fcmToken = userDoc.data()?.fcmToken;
-        if (fcmToken) {
-          await admin.messaging().send({
-            token: fcmToken,
-            notification: {
-              title: '📞 Gemiste oproep',
-              body: `${callerName} heeft je ${isVideo ? 'geprobeerd te videobellen' : 'gebeld'}.`,
-            },
-            webpush: { fcmOptions: { link: APP_URL } },
-          }).catch(() => {});
-        }
-      } catch {}
+      // Gebruiker is offline → gemiste oproep notificatie
+      sendPush(to,
+        { title: '📞 Gemiste oproep', body: `${callerName} heeft je ${isVideo ? 'geprobeerd te videobellen' : 'gebeld'}.` },
+        { type: 'missed_call' }
+      );
     }
   });
 
@@ -770,20 +803,10 @@ io.on('connection', (socket) => {
     if (pendingCalls[to]) {
       const { callerName, isVideo } = pendingCalls[to];
       delete pendingCalls[to];
-      try {
-        const userDoc = await db.collection('users').doc(to).get();
-        const fcmToken = userDoc.data()?.fcmToken;
-        if (fcmToken) {
-          await admin.messaging().send({
-            token: fcmToken,
-            notification: {
-              title: '📞 Gemiste oproep',
-              body: `${callerName} heeft je ${isVideo ? 'geprobeerd te videobellen' : 'gebeld'}.`,
-            },
-            webpush: { fcmOptions: { link: APP_URL } },
-          }).catch(() => {});
-        }
-      } catch {}
+      sendPush(to,
+        { title: '📞 Gemiste oproep', body: `${callerName} heeft je ${isVideo ? 'geprobeerd te videobellen' : 'gebeld'}.` },
+        { type: 'missed_call' }
+      );
     }
   });
 
@@ -1019,6 +1042,10 @@ app.post('/api/parent/pause/:childUid', verifyAuth, async (req, res) => {
     await db.collection('users').doc(childUid).update({ paused: true });
     const s = onlineUsers[childUid];
     if (s) s.forEach(sid => io.to(sid).emit('account:paused'));
+    sendPush(childUid,
+      { title: 'Pulse', body: 'Je account is gepauzeerd door je ouder.' },
+      { type: 'paused' }
+    );
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: 'Serverfout' }); }
 });
@@ -1057,7 +1084,10 @@ app.post('/api/fcm-token', verifyAuth, async (req, res) => {
     const { uid, token } = req.body;
     if (!uid || !token) return res.status(400).json({ error: 'uid en token verplicht' });
     if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
-    await db.collection('users').doc(uid).update({ fcmToken: token });
+    await db.collection('users').doc(uid).update({
+      fcmToken:  token,  // legacy — backward compat
+      fcmTokens: admin.firestore.FieldValue.arrayUnion(token),
+    });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Serverfout' });
