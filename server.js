@@ -119,7 +119,7 @@ async function sendPush(uid, notification, data = {}) {
     if (toRemove.length) {
       const updates = { fcmTokens: admin.firestore.FieldValue.arrayRemove(...toRemove) };
       if (toRemove.includes(userData.fcmToken)) updates.fcmToken = admin.firestore.FieldValue.delete();
-      await db.collection('users').doc(uid).update(updates).catch(() => {});
+      await db.collection('users').doc(uid).update(updates).catch(e => console.warn('FCM token cleanup mislukt:', e.message));
     }
     console.log(`📬 Push → ${uid}: ${response.successCount}/${tokens.length} bezorgd`);
   } catch (e) {
@@ -542,14 +542,14 @@ io.on('connection', (socket) => {
     onlineUsers[uid].add(socket.id);
     socket.data.uid = uid;
     inactiveUsers.delete(uid); // Actief bij verbinding
-    await db.collection('users').doc(uid).update({ online: true, inactive: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(() => {});
+    await db.collection('users').doc(uid).update({ online: true, inactive: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(e => console.warn('Online-update mislukt:', e.message));
     io.emit('user:status', { uid, online: true, inactive: false });
     socket.emit('users:online', Object.keys(onlineUsers));
     socket.emit('users:inactive', [...inactiveUsers]);
     // Stuur paused event als account gepauzeerd is
     db.collection('users').doc(uid).get().then(snap => {
       if (snap.exists && snap.data().paused) socket.emit('account:paused');
-    }).catch(() => {});
+    }).catch(e => console.warn('Paused-check mislukt:', e.message));
 
     // ── Bezorg wachtende berichten uit Redis wachtrij ──
     const queued = await flushQueue(uid);
@@ -572,7 +572,7 @@ io.on('connection', (socket) => {
           const ref = db.collection('conversations').doc(convId).collection('messages').doc(msg.id);
           batch.update(ref, { status: 'bezorgd' });
         });
-        batch.commit().catch(() => {});
+        batch.commit().catch(e => console.warn('Batch bezorgd-update mislukt:', e.message));
         // Notificeer verzenders dat berichten nu bezorgd zijn
         msgs.forEach(msg => {
           const senderSockets = onlineUsers[msg.senderId];
@@ -595,13 +595,13 @@ io.on('connection', (socket) => {
   // ── Inactiviteit detectie ──
   socket.on('user:inactive', async () => {
     inactiveUsers.add(uid);
-    await db.collection('users').doc(uid).update({ inactive: true }).catch(() => {});
+    await db.collection('users').doc(uid).update({ inactive: true }).catch(e => console.warn('Inactief-update mislukt:', e.message));
     io.emit('user:status', { uid, online: true, inactive: true });
   });
 
   socket.on('user:active', async () => {
     inactiveUsers.delete(uid);
-    await db.collection('users').doc(uid).update({ inactive: false }).catch(() => {});
+    await db.collection('users').doc(uid).update({ inactive: false }).catch(e => console.warn('Actief-update mislukt:', e.message));
     io.emit('user:status', { uid, online: true, inactive: false });
   });
 
@@ -763,11 +763,6 @@ io.on('connection', (socket) => {
       io.to(targetSocket).emit('call:incoming', { from, offer, isVideo, callerName });
       // Bijhouden dat deze oproep uitstaat (nog niet beantwoord)
       pendingCalls[to] = { from, callerName, isVideo };
-      // Stuur ook FCM zodat notificatie zichtbaar is als app op achtergrond staat
-      sendPush(to,
-        { title: isVideo ? '📹 Inkomende video-oproep' : '📞 Inkomende oproep', body: `${callerName} belt je via Pulse` },
-        { type: 'call' }
-      );
     } else {
       socket.emit('call:unavailable', { to });
       // Gebruiker is offline → gemiste oproep notificatie
@@ -934,7 +929,7 @@ io.on('connection', (socket) => {
       if (!onlineUsers[uid]?.size) {
         delete onlineUsers[uid];
         inactiveUsers.delete(uid);
-        await db.collection('users').doc(uid).update({ online: false, inactive: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(() => {});
+        await db.collection('users').doc(uid).update({ online: false, inactive: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(e => console.warn('Offline-update mislukt:', e.message));
         io.emit('user:status', { uid, online: false });
       }
       console.log(`👋 Offline: ${uid}`);
@@ -1159,10 +1154,10 @@ app.post('/api/friend-requests', verifyAuth, friendReqLimiter, async (req, res) 
         parentId, childUid: fromUid, childName: fromName,
         type: 'friend_request_sent', description,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      }).catch(() => {});
+      }).catch(e => console.warn('parentActivities opslaan mislukt (sent):', e.message));
       const parentSocket = getSocketId(parentId);
       if (parentSocket) io.to(parentSocket).emit('parent:activity', { type: 'friend_request_sent', description, childName: fromName });
-    }).catch(() => {});
+    }).catch(e => console.warn('Ouder ophalen mislukt (sent):', e.message));
     res.json({ success: true, requestId: reqRef.id, toUid: toUser.uid });
   } catch (err) {
     console.error(err);
@@ -1226,10 +1221,10 @@ app.post('/api/friend-requests/:requestId/accept', verifyAuth, async (req, res) 
         parentId, childUid: toUid, childName: toName,
         type: 'friend_request_accepted', description,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      }).catch(() => {});
+      }).catch(e => console.warn('parentActivities opslaan mislukt (accepted):', e.message));
       const parentSocket = getSocketId(parentId);
       if (parentSocket) io.to(parentSocket).emit('parent:activity', { type: 'friend_request_accepted', description, childName: toName });
-    }).catch(() => {});
+    }).catch(e => console.warn('Ouder ophalen mislukt (accepted):', e.message));
     res.json({ success: true });
   } catch (err) {
     console.error(err);
