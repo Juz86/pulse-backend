@@ -993,16 +993,18 @@ app.post('/api/friend-requests', verifyAuth, friendReqLimiter, async (req, res) 
       });
     }
 
-    // Activiteit opslaan voor ouder als kind een verzoek stuurt
+    // Activiteit opslaan + ouder realtime notificeren als kind een verzoek stuurt
     db.collection('users').doc(fromUid).get().then(senderDoc => {
       const parentId = senderDoc.data()?.parentId;
       if (!parentId) return;
+      const description = `${fromName} heeft een vriendschapsverzoek verstuurd naar ${toUser.displayName || toEmail}.`;
       db.collection('parentActivities').add({
         parentId, childUid: fromUid, childName: fromName,
-        type: 'friend_request_sent',
-        description: `${fromName} heeft een vriendschapsverzoek verstuurd naar ${toUser.displayName || toEmail}.`,
+        type: 'friend_request_sent', description,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       }).catch(() => {});
+      const parentSocket = getSocketId(parentId);
+      if (parentSocket) io.to(parentSocket).emit('parent:activity', { type: 'friend_request_sent', description, childName: fromName });
     }).catch(() => {});
     res.json({ success: true, requestId: reqRef.id, toUid: toUser.uid });
   } catch (err) {
@@ -1058,16 +1060,18 @@ app.post('/api/friend-requests/:requestId/accept', verifyAuth, async (req, res) 
       io.to(senderSocket).emit('friend:accepted', { byUid: toUid, byName: toName, byEmail: toEmail });
     }
 
-    // Activiteit opslaan voor ouder als kind een verzoek accepteert
+    // Activiteit opslaan + ouder realtime notificeren als kind een verzoek accepteert
     db.collection('users').doc(toUid).get().then(acceptorDoc => {
       const parentId = acceptorDoc.data()?.parentId;
       if (!parentId) return;
+      const description = `${toName} heeft een vriendschapsverzoek van ${fromName} geaccepteerd.`;
       db.collection('parentActivities').add({
         parentId, childUid: toUid, childName: toName,
-        type: 'friend_request_accepted',
-        description: `${toName} heeft een vriendschapsverzoek van ${fromName} geaccepteerd.`,
+        type: 'friend_request_accepted', description,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       }).catch(() => {});
+      const parentSocket = getSocketId(parentId);
+      if (parentSocket) io.to(parentSocket).emit('parent:activity', { type: 'friend_request_accepted', description, childName: toName });
     }).catch(() => {});
     res.json({ success: true });
   } catch (err) {
