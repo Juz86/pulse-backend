@@ -140,7 +140,8 @@ const transporter = nodemailer.createTransport({
 const otpStore = new Map();
 
 // ─── App URL ──────────────────────────────────────────────────────────────────
-const APP_URL = process.env.APP_URL || 'https://pulse-message.netlify.app';
+const APP_URL = process.env.APP_URL;
+if (!APP_URL) console.warn('⚠️ APP_URL niet ingesteld — stel dit in als de Cloudflare Pages URL in de Railway omgevingsvariabelen.');
 
 // ─── Bijhouden actieve inkomende oproepen { calleeUid: { callerUid, callerName, isVideo } } ─
 const pendingCalls  = {};
@@ -688,6 +689,12 @@ io.on('connection', (socket) => {
   // ── Bericht sturen ──
   socket.on('message:send', async ({ convId, message }, callback) => {
     try {
+      // Blokkeer gepauzeerde accounts
+      const senderDoc = await db.collection('users').doc(uid).get();
+      if (senderDoc.exists && senderDoc.data().paused) {
+        if (typeof callback === 'function') callback({ error: 'Account gepauzeerd.' });
+        return;
+      }
       const verifiedMessage = { ...message, senderId: socket.userId };
       const lastMessage = verifiedMessage.type === 'contact'
         ? `Contactpersoon: ${verifiedMessage.sharedContact?.name || ''}`
@@ -751,7 +758,7 @@ io.on('connection', (socket) => {
               { convId }
             );
           }));
-        } catch {}
+        } catch (e) { console.warn('Push/bezorgstatus fout na message:send:', e.message); }
       })();
     } catch (err) {
       console.error('Fout bij opslaan bericht:', err);
@@ -1043,6 +1050,7 @@ app.post('/api/parent/change-child-password/:childUid', verifyAuth, async (req, 
     if (!password || password.length < 6) return res.status(400).json({ error: 'Wachtwoord moet minimaal 6 tekens zijn.' });
     const childDoc = await db.collection('users').doc(childUid).get();
     if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
+    if (childDoc.data().role !== 'child') return res.status(403).json({ error: 'Alleen kindaccounts worden ondersteund.' });
     if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
     await admin.auth().updateUser(childUid, { password });
     res.json({ success: true });
@@ -1096,7 +1104,12 @@ app.post('/api/parent/pause/:childUid', verifyAuth, async (req, res) => {
     if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
     await db.collection('users').doc(childUid).update({ paused: true });
     const s = onlineUsers[childUid];
-    if (s) s.forEach(sid => io.to(sid).emit('account:paused'));
+    if (s) s.forEach(sid => {
+      io.to(sid).emit('account:paused');
+      // Beëindig actieve oproep als kind in gesprek zit
+      if (activeCalls.has(childUid)) io.to(sid).emit('call:ended');
+    });
+    activeCalls.delete(childUid);
     sendPush(childUid,
       { title: 'Pulse', body: 'Je account is gepauzeerd door je ouder.' },
       { type: 'paused' }
