@@ -281,7 +281,11 @@ app.post('/api/users', verifyAuth, async (req, res) => {
 
     const name = displayName || email.split('@')[0];
     const updateData = { uid, displayName: name, email, photoURL: photoURL || '', updatedAt: admin.firestore.FieldValue.serverTimestamp(), online: true };
-    if (role !== undefined) updateData.role = role === 'parent' ? 'parent' : 'user';
+    // Role mag alleen worden gezet als het account nog geen rol heeft (bij aanmaken)
+    // Nooit overschrijven via client-request — voorkomt role-escalatie
+    const existingDoc = await db.collection('users').doc(uid).get();
+    if (!existingDoc.exists && role === 'parent') updateData.role = 'parent';
+    else if (!existingDoc.exists) updateData.role = 'user';
     await db.collection('users').doc(uid).set(updateData, { merge: true });
 
     // memberNames bijwerken in alle gesprekken van deze gebruiker
@@ -297,6 +301,19 @@ app.post('/api/users', verifyAuth, async (req, res) => {
     console.error(err);
     res.status(500).json({ error: 'Serverfout' });
   }
+});
+
+// ─── REST: Gebruikersnaam opzoeken voor login (openbaar — geen auth) ──────────
+app.get('/api/users/lookup-username', async (req, res) => {
+  try {
+    const { username } = req.query;
+    if (!username || typeof username !== 'string') return res.status(400).json({ error: 'Gebruikersnaam verplicht.' });
+    const clean = username.trim().toLowerCase();
+    const snap = await db.collection('users').where('username', '==', clean).limit(1).get();
+    if (snap.empty) return res.status(404).json({ error: 'Gebruikersnaam niet gevonden.' });
+    // Geef alleen terug dat de gebruiker bestaat — intern e-mailadres niet tonen
+    res.json({ exists: true, email: `${clean}@pulse.internal` });
+  } catch (err) { res.status(500).json({ error: 'Serverfout' }); }
 });
 
 // ─── REST: Gebruiker zoeken op email ─────────────────────────────────────────
@@ -953,78 +970,121 @@ app.get('/api/parent/children', verifyAuth, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
 });
 
-// POST /api/parent/supervision-request — ouder stuurt verzoek naar kind
-app.post('/api/parent/supervision-request', verifyAuth, async (req, res) => {
+// POST /api/parent/create-child — ouder maakt kindaccount direct aan
+app.post('/api/parent/create-child', verifyAuth, async (req, res) => {
   try {
-    const { childEmail } = req.body;
-    if (!validEmail(childEmail)) return res.status(400).json({ error: 'Ongeldig e-mailadres.' });
     const parentDoc = await db.collection('users').doc(req.uid).get();
     if (!parentDoc.exists || parentDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
     const parentData = parentDoc.data();
-    const childSnap = await db.collection('users').where('email', '==', childEmail).limit(1).get();
-    if (childSnap.empty) return res.status(404).json({ error: 'Gebruiker niet gevonden.' });
-    const childDoc = childSnap.docs[0];
-    const childData = childDoc.data();
-    if (childData.role === 'parent') return res.status(400).json({ error: 'Dit is een ouderaccount.' });
-    if (childData.parentId) return res.status(400).json({ error: 'Dit account heeft al een toezichthouder.' });
-    // Check of er al een pending verzoek is
-    const existing = await db.collection('supervisionRequests')
-      .where('parentUid', '==', req.uid).where('childUid', '==', childDoc.id).where('status', '==', 'pending').limit(1).get();
-    if (!existing.empty) return res.status(400).json({ error: 'Verzoek al verzonden.' });
-    const reqRef = await db.collection('supervisionRequests').add({
-      parentUid: req.uid,
-      parentName: parentData.displayName || parentData.email,
-      parentEmail: parentData.email,
-      childUid: childDoc.id,
-      childName: childData.displayName || childData.email,
-      status: 'pending',
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+
+    const { name, username, password } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: 'Naam is verplicht.' });
+    if (!username || typeof username !== 'string') return res.status(400).json({ error: 'Gebruikersnaam is verplicht.' });
+    if (!password || password.length < 6) return res.status(400).json({ error: 'Wachtwoord moet minimaal 6 tekens zijn.' });
+
+    const cleanUsername = username.trim().toLowerCase();
+    if (!/^[a-z0-9_]{2,30}$/.test(cleanUsername)) {
+      return res.status(400).json({ error: 'Gebruikersnaam mag alleen letters, cijfers en _ bevatten (2-30 tekens).' });
+    }
+
+    // Controleer of gebruikersnaam al in gebruik is
+    const existing = await db.collection('users').where('username', '==', cleanUsername).limit(1).get();
+    if (!existing.empty) return res.status(400).json({ error: 'Deze gebruikersnaam is al in gebruik.' });
+
+    const internalEmail = `${cleanUsername}@pulse.internal`;
+
+    // Maak Firebase Auth account aan via Admin SDK
+    const newUser = await admin.auth().createUser({
+      email:       internalEmail,
+      password,
+      displayName: name.trim(),
     });
-    // Stuur real-time notificatie naar kind
-    const childSockets = onlineUsers[childDoc.id];
-    if (childSockets) childSockets.forEach(sid => io.to(sid).emit('supervision:request', {
-      requestId: reqRef.id,
-      parentName: parentData.displayName || parentData.email,
+
+    // Sla kindprofiel op in Firestore
+    await db.collection('users').doc(newUser.uid).set({
+      uid:         newUser.uid,
+      displayName: name.trim(),
+      username:    cleanUsername,
+      email:       internalEmail,
+      photoURL:    '',
+      role:        'child',
+      parentId:    req.uid,
       parentEmail: parentData.email,
-    }));
-    res.json({ success: true, requestId: reqRef.id });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
+      online:      false,
+      paused:      false,
+      createdAt:   admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Voeg wederzijds als contact toe
+    const batch = db.batch();
+    batch.set(db.collection('users').doc(newUser.uid).collection('contacts').doc(req.uid), {
+      uid: req.uid, displayName: parentData.displayName || parentData.email,
+      email: parentData.email, photoURL: parentData.photoURL || null, addedAt: new Date().toISOString(),
+    });
+    batch.set(db.collection('users').doc(req.uid).collection('contacts').doc(newUser.uid), {
+      uid: newUser.uid, displayName: name.trim(),
+      email: internalEmail, photoURL: null, addedAt: new Date().toISOString(),
+    });
+    await batch.commit();
+
+    res.json({ success: true, uid: newUser.uid, displayName: name.trim(), username: cleanUsername, online: false, paused: false });
+  } catch (err) {
+    console.error('create-child fout:', err);
+    if (err.code === 'auth/email-already-exists') return res.status(400).json({ error: 'Deze gebruikersnaam is al in gebruik.' });
+    res.status(500).json({ error: 'Serverfout' });
+  }
 });
 
-// POST /api/parent/supervision-response/:requestId — kind accepteert/weigert
-app.post('/api/parent/supervision-response/:requestId', verifyAuth, async (req, res) => {
+// POST /api/parent/change-child-password/:childUid — ouder wijzigt wachtwoord van kind
+app.post('/api/parent/change-child-password/:childUid', verifyAuth, async (req, res) => {
   try {
-    const { requestId } = req.params;
-    const { accept } = req.body;
-    const reqDoc = await db.collection('supervisionRequests').doc(requestId).get();
-    if (!reqDoc.exists) return res.status(404).json({ error: 'Verzoek niet gevonden.' });
-    const reqData = reqDoc.data();
-    if (reqData.childUid !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
-    if (reqData.status !== 'pending') return res.status(400).json({ error: 'Verzoek al verwerkt.' });
-    await db.collection('supervisionRequests').doc(requestId).update({ status: accept ? 'accepted' : 'declined' });
-    if (accept) {
-      const [childDoc, parentDoc] = await Promise.all([
-        db.collection('users').doc(req.uid).get(),
-        db.collection('users').doc(reqData.parentUid).get(),
-      ]);
-      const childData  = childDoc.data()  || {};
-      const parentData = parentDoc.data() || {};
-      const batch = db.batch();
-      batch.update(db.collection('users').doc(req.uid), { parentId: reqData.parentUid, parentEmail: reqData.parentEmail });
-      // Wederzijds als contact toevoegen
-      batch.set(db.collection('users').doc(req.uid).collection('contacts').doc(reqData.parentUid), {
-        uid: reqData.parentUid, displayName: parentData.displayName || parentData.email, email: parentData.email, photoURL: parentData.photoURL || null, addedAt: new Date().toISOString(),
-      });
-      batch.set(db.collection('users').doc(reqData.parentUid).collection('contacts').doc(req.uid), {
-        uid: req.uid, displayName: childData.displayName || childData.email, email: childData.email, photoURL: childData.photoURL || null, addedAt: new Date().toISOString(),
-      });
-      await batch.commit();
-      // Notificeer ouder realtime
-      const parentSocket = getSocketId(reqData.parentUid);
-      if (parentSocket) io.to(parentSocket).emit('friend:accepted', { byUid: req.uid, byName: childData.displayName || childData.email, byEmail: childData.email });
-    }
+    const { childUid } = req.params;
+    const { password } = req.body;
+    if (!password || password.length < 6) return res.status(400).json({ error: 'Wachtwoord moet minimaal 6 tekens zijn.' });
+    const childDoc = await db.collection('users').doc(childUid).get();
+    if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
+    if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+    await admin.auth().updateUser(childUid, { password });
     res.json({ success: true });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
+  } catch (err) { console.error('change-child-password fout:', err); res.status(500).json({ error: 'Serverfout' }); }
+});
+
+// DELETE /api/parent/delete-child/:childUid — ouder verwijdert kindaccount
+app.delete('/api/parent/delete-child/:childUid', verifyAuth, async (req, res) => {
+  try {
+    const { childUid } = req.params;
+    const childDoc = await db.collection('users').doc(childUid).get();
+    if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
+    const childData = childDoc.data();
+    if (childData.parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+    if (childData.role !== 'child') return res.status(403).json({ error: 'Alleen kindaccounts kunnen worden verwijderd via dit endpoint.' });
+
+    // Verwijder gesprekken
+    const convsSnap = await db.collection('conversations').where('members', 'array-contains', childUid).get();
+    for (const convDoc of convsSnap.docs) {
+      const { members = [] } = convDoc.data();
+      const msgsSnap = await convDoc.ref.collection('messages').get();
+      const batch = db.batch();
+      msgsSnap.docs.forEach(d => batch.delete(d.ref));
+      if (members.length <= 2) batch.delete(convDoc.ref);
+      else batch.update(convDoc.ref, { members: members.filter(m => m !== childUid) });
+      await batch.commit();
+    }
+
+    // Verwijder contacten-subcollectie
+    const contactsSnap = await db.collection('users').doc(childUid).collection('contacts').get();
+    if (!contactsSnap.empty) {
+      const batch = db.batch();
+      contactsSnap.docs.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+    }
+
+    // Verwijder Firestore document + Firebase Auth account
+    await db.collection('users').doc(childUid).delete();
+    await admin.auth().deleteUser(childUid);
+
+    res.json({ success: true });
+  } catch (err) { console.error('delete-child fout:', err); res.status(500).json({ error: 'Serverfout' }); }
 });
 
 // POST /api/parent/pause/:childUid — pauzeer kind
