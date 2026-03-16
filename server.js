@@ -910,6 +910,19 @@ app.post('/api/parent/resume/:childUid', verifyAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Serverfout' }); }
 });
 
+// GET /api/parent/activities — haal activiteiten op voor ouder
+app.get('/api/parent/activities', verifyAuth, async (req, res) => {
+  try {
+    const snap = await db.collection('parentActivities')
+      .where('parentId', '==', req.uid)
+      .orderBy('createdAt', 'desc')
+      .limit(50)
+      .get();
+    const activities = snap.docs.map(d => ({ id: d.id, ...d.data(), createdAt: d.data().createdAt || null }));
+    res.json(activities);
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
+});
+
 // ─── REST: FCM token opslaan ─────────────────────────────────────────────────
 app.post('/api/fcm-token', verifyAuth, async (req, res) => {
   try {
@@ -979,17 +992,17 @@ app.post('/api/friend-requests', verifyAuth, friendReqLimiter, async (req, res) 
       });
     }
 
-    // E-mail naar ouder als kind een verzoek stuurt
+    // Activiteit opslaan voor ouder als kind een verzoek stuurt
     db.collection('users').doc(fromUid).get().then(senderDoc => {
-      const parentEmail = senderDoc.data()?.parentEmail;
-      if (!parentEmail) { console.warn(`Geen parentEmail voor ${fromUid}`); return; }
-      transporter.sendMail({
-        from: `"Pulse" <${process.env.EMAIL_USER}>`,
-        to: parentEmail,
-        subject: 'Pulse — Vriendschapsverzoek verstuurd',
-        html: `<div style="font-family:sans-serif;max-width:400px;margin:auto"><h2 style="color:#7c4dff">Pulse — Ouderlijk toezicht</h2><p><strong>${fromName}</strong> heeft een vriendschapsverzoek verstuurd naar <strong>${toUser.displayName || toEmail}</strong>.</p></div>`,
+      const parentId = senderDoc.data()?.parentId;
+      if (!parentId) return;
+      db.collection('parentActivities').add({
+        parentId, childUid: fromUid, childName: fromName,
+        type: 'friend_request_sent',
+        description: `${fromName} heeft een vriendschapsverzoek verstuurd naar ${toUser.displayName || toEmail}.`,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
       }).catch(() => {});
-    }).catch(() => console.warn('Kon parentEmail niet ophalen'));
+    }).catch(() => {});
     res.json({ success: true, requestId: reqRef.id, toUid: toUser.uid });
   } catch (err) {
     console.error(err);
@@ -1044,17 +1057,17 @@ app.post('/api/friend-requests/:requestId/accept', verifyAuth, async (req, res) 
       io.to(senderSocket).emit('friend:accepted', { byUid: toUid, byName: toName, byEmail: toEmail });
     }
 
-    // E-mail naar ouder als kind een verzoek accepteert
+    // Activiteit opslaan voor ouder als kind een verzoek accepteert
     db.collection('users').doc(toUid).get().then(acceptorDoc => {
-      const parentEmail = acceptorDoc.data()?.parentEmail;
-      if (!parentEmail) { console.warn(`Geen parentEmail voor ${toUid}`); return; }
-      transporter.sendMail({
-        from: `"Pulse" <${process.env.EMAIL_USER}>`,
-        to: parentEmail,
-        subject: 'Pulse — Nieuw contact toegevoegd',
-        html: `<div style="font-family:sans-serif;max-width:400px;margin:auto"><h2 style="color:#7c4dff">Pulse — Ouderlijk toezicht</h2><p><strong>${toName}</strong> heeft een vriendschapsverzoek van <strong>${fromName}</strong> geaccepteerd.</p></div>`,
+      const parentId = acceptorDoc.data()?.parentId;
+      if (!parentId) return;
+      db.collection('parentActivities').add({
+        parentId, childUid: toUid, childName: toName,
+        type: 'friend_request_accepted',
+        description: `${toName} heeft een vriendschapsverzoek van ${fromName} geaccepteerd.`,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
       }).catch(() => {});
-    }).catch(() => console.warn('Kon parentEmail niet ophalen'));
+    }).catch(() => {});
     res.json({ success: true });
   } catch (err) {
     console.error(err);
