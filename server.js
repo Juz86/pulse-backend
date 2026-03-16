@@ -545,6 +545,7 @@ io.on('connection', (socket) => {
       const [msgRef] = await Promise.all([
         db.collection('conversations').doc(convId).collection('messages').add({
           ...verifiedMessage,
+          status: 'verstuurd',
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         }),
         db.collection('conversations').doc(convId).update({
@@ -555,7 +556,7 @@ io.on('connection', (socket) => {
         }),
       ]);
 
-      const savedMsg = { id: msgRef.id, ...verifiedMessage };
+      const savedMsg = { id: msgRef.id, ...verifiedMessage, status: 'verstuurd' };
 
       // Stuur bericht naar iedereen in de kamer (inclusief afzender)
       io.to(convId).emit('message:received', savedMsg);
@@ -563,13 +564,7 @@ io.on('connection', (socket) => {
       // Bevestig aan afzender zodat optimistic bericht vervangen kan worden
       if (typeof callback === 'function') callback(savedMsg);
 
-      // Stuur "delivered" als ontvanger online is in de kamer
-      const room = io.sockets.adapter.rooms.get(convId);
-      if (room && room.size > 1) {
-        socket.emit('message:status', { convId, msgId: savedMsg.id, status: 'delivered' });
-      }
-
-      // Push notificaties asynchroon — blokkeert de socket handler niet
+      // Push notificaties + bezorgstatus asynchroon — blokkeert de socket handler niet
       (async () => {
         try {
           const convDoc = await db.collection('conversations').doc(convId).get();
@@ -577,11 +572,21 @@ io.on('connection', (socket) => {
           const senderName = verifiedMessage.senderName || 'Iemand';
 
           // Stuur ook rechtstreeks naar elk lid (ook als ze de chat niet open hebben)
+          let anyReceiverOnline = false;
           members.forEach(memberUid => {
             if (memberUid === verifiedMessage.senderId) return;
             const sockets = onlineUsers[memberUid];
-            if (sockets) sockets.forEach(sid => io.to(sid).emit('message:received', savedMsg));
+            if (sockets) {
+              anyReceiverOnline = true;
+              sockets.forEach(sid => io.to(sid).emit('message:received', savedMsg));
+            }
           });
+
+          // Als ontvanger online is → markeer als bezorgd in Firestore en notificeer verzender
+          if (anyReceiverOnline) {
+            await msgRef.update({ status: 'bezorgd' });
+            socket.emit('message:status', { convId, msgId: savedMsg.id, status: 'bezorgd' });
+          }
 
           await Promise.all(members.map(async (memberUid) => {
             if (memberUid === verifiedMessage.senderId) return;
@@ -746,9 +751,36 @@ io.on('connection', (socket) => {
     }
   });
 
-    // ── Berichtenstatus: gelezen ──
-  socket.on('messages:read', ({ convId }) => {
-    socket.to(convId).emit('message:status', { convId, readerId: uid, status: 'read' });
+  // ── Berichtenstatus: gelezen ──
+  socket.on('messages:read', async ({ convId }) => {
+    try {
+      // Haal gesprekleden op om verzenders te notificeren
+      const convDoc = await db.collection('conversations').doc(convId).get();
+      const members = convDoc.exists ? (convDoc.data().members || []) : [];
+      const senderUids = members.filter(m => m !== uid);
+
+      // Batch-update alle ongelezen berichten van anderen naar 'gelezen'
+      const snap = await db.collection('conversations').doc(convId)
+        .collection('messages')
+        .where('status', 'in', ['verstuurd', 'bezorgd'])
+        .get();
+
+      if (!snap.empty) {
+        const batch = db.batch();
+        snap.docs.forEach(doc => {
+          if (doc.data().senderId !== uid) batch.update(doc.ref, { status: 'gelezen' });
+        });
+        await batch.commit();
+      }
+
+      // Notificeer verzenders direct via onlineUsers
+      senderUids.forEach(senderUid => {
+        const sockets = onlineUsers[senderUid];
+        if (sockets) sockets.forEach(sid => io.to(sid).emit('message:status', { convId, status: 'gelezen' }));
+      });
+    } catch (e) {
+      console.error('messages:read error:', e);
+    }
   });
 
   // ── Groepslid toevoegen ──
