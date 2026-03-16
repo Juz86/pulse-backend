@@ -177,11 +177,9 @@ app.post('/api/users', verifyAuth, async (req, res) => {
     if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
 
     const name = displayName || email.split('@')[0];
-    const validRole = role === 'parent' ? 'parent' : 'user';
-    await db.collection('users').doc(uid).set(
-      { uid, displayName: name, email, photoURL: photoURL || '', updatedAt: admin.firestore.FieldValue.serverTimestamp(), online: true, role: validRole },
-      { merge: true }
-    );
+    const updateData = { uid, displayName: name, email, photoURL: photoURL || '', updatedAt: admin.firestore.FieldValue.serverTimestamp(), online: true };
+    if (role !== undefined) updateData.role = role === 'parent' ? 'parent' : 'user';
+    await db.collection('users').doc(uid).set(updateData, { merge: true });
 
     // memberNames bijwerken in alle gesprekken van deze gebruiker
     const convs = await db.collection('conversations').where('members', 'array-contains', uid).get();
