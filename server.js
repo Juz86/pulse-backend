@@ -560,14 +560,12 @@ io.on('connection', (socket) => {
     onlineUsers[uid].add(socket.id);
     socket.data.uid = uid;
     inactiveUsers.delete(uid); // Actief bij verbinding
+    const userSnap = await db.collection('users').doc(uid).get().catch(() => null);
     await db.collection('users').doc(uid).update({ online: true, inactive: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(e => console.warn('Online-update mislukt:', e.message));
     io.emit('user:status', { uid, online: true, inactive: false });
     socket.emit('users:online', Object.keys(onlineUsers));
     socket.emit('users:inactive', [...inactiveUsers]);
-    // Stuur paused event als account gepauzeerd is
-    db.collection('users').doc(uid).get().then(snap => {
-      if (snap.exists && snap.data().paused) socket.emit('account:paused');
-    }).catch(e => console.warn('Paused-check mislukt:', e.message));
+    if (userSnap?.exists && userSnap.data()?.paused) socket.emit('account:paused');
 
     // ── Bezorg wachtende berichten uit Redis wachtrij ──
     const queued = await flushQueue(uid);
