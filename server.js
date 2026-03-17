@@ -221,7 +221,7 @@ app.post('/api/send-code', sendCodeLimiter, async (req, res) => {
 });
 
 // ─── OTP: Verifieer code ─────────────────────────────────────────────────────
-app.post('/api/verify-code', (req, res) => {
+app.post('/api/verify-code', strictLimiter, (req, res) => {
   const { email, code } = req.body;
   const entry = otpStore.get(email);
   if (!entry)                    return res.status(400).json({ error: 'Geen code gevonden. Vraag een nieuwe aan.' });
@@ -235,7 +235,7 @@ app.post('/api/verify-code', (req, res) => {
 });
 
 // ─── Wachtwoord reset mail (eigen stijl) ─────────────────────────────────────
-app.post('/api/send-reset', async (req, res) => {
+app.post('/api/send-reset', sendCodeLimiter, async (req, res) => {
   const { email, actionUrl } = req.body;
   if (!validEmail(email)) return res.status(400).json({ error: 'Ongeldig e-mailadres.' });
   try {
@@ -388,16 +388,18 @@ app.get('/api/messages/:convId', verifyAuth, async (req, res) => {
     const uid = req.uid;
     const limit = parseInt(req.query.limit) || 50;
 
+    const convDoc = await db.collection('conversations').doc(convId).get();
+    if (!convDoc.exists) return res.status(404).json({ error: 'Gesprek niet gevonden.' });
+    const convData = convDoc.data();
+    if (!(convData.members || []).includes(uid)) return res.status(403).json({ error: 'Geen toegang tot dit gesprek.' });
+
     let query = db.collection('conversations').doc(convId)
       .collection('messages')
       .orderBy('createdAt', 'desc')
       .limit(limit);
 
-    if (uid) {
-      const convDoc = await db.collection('conversations').doc(convId).get();
-      const clearedAt = convDoc.exists ? convDoc.data().clearedAt?.[uid] : null;
-      if (clearedAt) query = query.where('createdAt', '>', clearedAt);
-    }
+    const clearedAt = convData.clearedAt?.[uid];
+    if (clearedAt) query = query.where('createdAt', '>', clearedAt);
 
     const snap = await query.get();
     const msgs = snap.docs
@@ -418,6 +420,8 @@ app.delete('/api/messages/:convId/:msgId', verifyAuth, async (req, res) => {
     const scope = req.query.scope === 'all' ? 'all' : 'self';
     const uid = req.uid;
 
+    const convDoc2 = await db.collection('conversations').doc(convId).get();
+    if (!convDoc2.exists || !(convDoc2.data().members || []).includes(uid)) return res.status(403).json({ error: 'Geen toegang tot dit gesprek.' });
     const msgRef = db.collection('conversations').doc(convId).collection('messages').doc(msgId);
     const msgDoc = await msgRef.get();
     if (!msgDoc.exists) return res.status(404).json({ error: 'Bericht niet gevonden' });
@@ -679,18 +683,28 @@ io.on('connection', (socket) => {
   });
 
   // ── Gesprek / kamer joinen ──
-  socket.on('conversation:join', ({ convId }) => {
-    socket.join(convId);
-    console.log(`📬 ${socket.data.uid} joined room ${convId}`);
+  socket.on('conversation:join', async ({ convId }) => {
+    try {
+      const convDoc = await db.collection('conversations').doc(convId).get();
+      if (!convDoc.exists || !(convDoc.data().members || []).includes(uid)) return;
+      socket.join(convId);
+    } catch {}
   });
 
   // ── Bericht sturen ──
   socket.on('message:send', async ({ convId, message }, callback) => {
     try {
-      // Blokkeer gepauzeerde accounts
-      const senderDoc = await db.collection('users').doc(uid).get();
+      // Blokkeer gepauzeerde accounts + verifieer lidmaatschap
+      const [senderDoc, convMemberDoc] = await Promise.all([
+        db.collection('users').doc(uid).get(),
+        db.collection('conversations').doc(convId).get(),
+      ]);
       if (senderDoc.exists && senderDoc.data().paused) {
         if (typeof callback === 'function') callback({ error: 'Account gepauzeerd.' });
+        return;
+      }
+      if (!convMemberDoc.exists || !(convMemberDoc.data().members || []).includes(uid)) {
+        if (typeof callback === 'function') callback({ error: 'Geen toegang tot dit gesprek.' });
         return;
       }
       const verifiedMessage = { ...message, senderId: socket.userId };
@@ -924,24 +938,28 @@ io.on('connection', (socket) => {
   });
 
   // ── Groepslid toevoegen ──
-  socket.on('conversation:addMember', async ({ convId, uid, displayName }, cb) => {
+  socket.on('conversation:addMember', async ({ convId, uid: targetUid, displayName }, cb) => {
     try {
+      const convDoc = await db.collection('conversations').doc(convId).get();
+      if (!convDoc.exists || !(convDoc.data().members || []).includes(uid)) { cb?.({ error: 'Geen toegang.' }); return; }
       await db.collection('conversations').doc(convId).update({
-        members: admin.firestore.FieldValue.arrayUnion(uid),
-        [`memberNames.${uid}`]: displayName,
+        members: admin.firestore.FieldValue.arrayUnion(targetUid),
+        [`memberNames.${targetUid}`]: displayName,
       });
-      io.to(convId).emit('conversation:memberAdded', { convId, uid, displayName });
+      io.to(convId).emit('conversation:memberAdded', { convId, uid: targetUid, displayName });
       cb?.({});
     } catch (e) { cb?.({ error: e.message }); }
   });
 
   // ── Groepslid verwijderen ──
-  socket.on('conversation:removeMember', async ({ convId, uid }, cb) => {
+  socket.on('conversation:removeMember', async ({ convId, uid: targetUid }, cb) => {
     try {
-      const update = { members: admin.firestore.FieldValue.arrayRemove(uid) };
-      update[`memberNames.${uid}`] = admin.firestore.FieldValue.delete();
+      const convDoc = await db.collection('conversations').doc(convId).get();
+      if (!convDoc.exists || !(convDoc.data().members || []).includes(uid)) { cb?.({ error: 'Geen toegang.' }); return; }
+      const update = { members: admin.firestore.FieldValue.arrayRemove(targetUid) };
+      update[`memberNames.${targetUid}`] = admin.firestore.FieldValue.delete();
       await db.collection('conversations').doc(convId).update(update);
-      io.to(convId).emit('conversation:memberRemoved', { convId, uid });
+      io.to(convId).emit('conversation:memberRemoved', { convId, uid: targetUid });
       cb?.({});
     } catch (e) { cb?.({ error: e.message }); }
   });
