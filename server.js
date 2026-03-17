@@ -748,16 +748,21 @@ io.on('connection', (socket) => {
             socket.emit('message:status', { convId, msgId: savedMsg.id, status: 'bezorgd' });
           }
 
-          await Promise.all(members.map(async (memberUid) => {
-            if (memberUid === verifiedMessage.senderId) return;
-            if (onlineUsers[memberUid]?.size) return;
-            // Offline ontvanger: sla op in Redis wachtrij voor actieve bezorging bij reconnect
-            await queueMessage(memberUid, savedMsg);
-            await sendPush(memberUid,
-              { title: senderName, body: verifiedMessage.text?.substring(0, 100) || 'Nieuw bericht' },
-              { convId }
-            );
-          }));
+          const offlineMembers = members.filter(memberUid =>
+            memberUid !== verifiedMessage.senderId && !onlineUsers[memberUid]?.size
+          );
+          // Verwerk in batches van 5 om Firestore/FCM overbelasting te voorkomen
+          const BATCH_SIZE = 5;
+          for (let i = 0; i < offlineMembers.length; i += BATCH_SIZE) {
+            const batch = offlineMembers.slice(i, i + BATCH_SIZE);
+            await Promise.all(batch.map(async (memberUid) => {
+              await queueMessage(memberUid, savedMsg);
+              await sendPush(memberUid,
+                { title: senderName, body: verifiedMessage.text?.substring(0, 100) || 'Nieuw bericht' },
+                { convId }
+              );
+            }));
+          }
         } catch (e) { console.warn('Push/bezorgstatus fout na message:send:', e.message); }
       })();
     } catch (err) {
