@@ -1063,6 +1063,8 @@ app.post('/api/parent/change-child-password/:childUid', verifyAuth, async (req, 
 // DELETE /api/parent/delete-child/:childUid — ouder verwijdert kindaccount
 app.delete('/api/parent/delete-child/:childUid', verifyAuth, async (req, res) => {
   try {
+    const callerDoc = await db.collection('users').doc(req.uid).get();
+    if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
     const { childUid } = req.params;
     const childDoc = await db.collection('users').doc(childUid).get();
     if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
@@ -1101,6 +1103,8 @@ app.delete('/api/parent/delete-child/:childUid', verifyAuth, async (req, res) =>
 // POST /api/parent/pause/:childUid — pauzeer kind
 app.post('/api/parent/pause/:childUid', verifyAuth, async (req, res) => {
   try {
+    const callerDoc = await db.collection('users').doc(req.uid).get();
+    if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
     const { childUid } = req.params;
     const childDoc = await db.collection('users').doc(childUid).get();
     if (!childDoc.exists) return res.status(404).json({ error: 'Niet gevonden.' });
@@ -1124,6 +1128,8 @@ app.post('/api/parent/pause/:childUid', verifyAuth, async (req, res) => {
 // POST /api/parent/resume/:childUid — hervat kind
 app.post('/api/parent/resume/:childUid', verifyAuth, async (req, res) => {
   try {
+    const callerDoc = await db.collection('users').doc(req.uid).get();
+    if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
     const { childUid } = req.params;
     const childDoc = await db.collection('users').doc(childUid).get();
     if (!childDoc.exists) return res.status(404).json({ error: 'Niet gevonden.' });
@@ -1138,13 +1144,14 @@ app.post('/api/parent/resume/:childUid', verifyAuth, async (req, res) => {
 // GET /api/parent/activities — haal activiteiten op voor ouder
 app.get('/api/parent/activities', verifyAuth, async (req, res) => {
   try {
+    const callerDoc = await db.collection('users').doc(req.uid).get();
+    if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
     const snap = await db.collection('parentActivities')
       .where('parentId', '==', req.uid)
+      .orderBy('createdAt', 'desc')
       .limit(50)
       .get();
-    const activities = snap.docs
-      .map(d => ({ id: d.id, ...d.data(), createdAt: d.data().createdAt || null }))
-      .sort((a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0));
+    const activities = snap.docs.map(d => ({ id: d.id, ...d.data(), createdAt: d.data().createdAt || null }));
     res.json(activities);
   } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
 });
