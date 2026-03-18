@@ -775,6 +775,27 @@ io.on('connection', (socket) => {
               );
             }));
           }
+
+          // @vermeldingen verwerken
+          const mentionedUids = Array.isArray(verifiedMessage.mentions) ? verifiedMessage.mentions : [];
+          if (mentionedUids.length > 0 && convDoc.data()?.isGroup) {
+            const groupName = convDoc.data()?.groupName || 'een groep';
+            for (const mentionedUid of mentionedUids) {
+              if (mentionedUid === verifiedMessage.senderId) continue;
+              if (!members.includes(mentionedUid)) continue;
+              const mentionedSockets = onlineUsers[mentionedUid];
+              if (mentionedSockets) {
+                mentionedSockets.forEach(sid => io.to(sid).emit('mention:notify', {
+                  convId, senderName, groupName,
+                }));
+              } else {
+                sendPush(mentionedUid,
+                  { title: `${senderName} heeft je vermeld`, body: `In ${groupName}: ${verifiedMessage.text?.substring(0, 80) || ''}` },
+                  { convId }
+                ).catch(e => console.warn('mention push mislukt:', e.message));
+              }
+            }
+          }
         } catch (e) { console.warn('Push/bezorgstatus fout na message:send:', e.message); }
       })();
     } catch (err) {
