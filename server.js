@@ -1038,7 +1038,17 @@ app.post('/api/parent/create-child', verifyAuth, async (req, res) => {
 
     // Controleer of gebruikersnaam al in gebruik is
     const existing = await db.collection('users').where('username', '==', cleanUsername).limit(1).get();
-    if (!existing.empty) return res.status(400).json({ error: 'Deze gebruikersnaam is al in gebruik.' });
+    if (!existing.empty) {
+      // Controleer of het bijbehorende Firebase Auth account nog bestaat (stale cleanup)
+      const existingUid = existing.docs[0].id;
+      let authExists = true;
+      try { await admin.auth().getUser(existingUid); } catch { authExists = false; }
+      if (!authExists) {
+        await db.collection('users').doc(existingUid).delete();
+      } else {
+        return res.status(400).json({ error: 'Deze gebruikersnaam is al in gebruik.' });
+      }
+    }
 
     const internalEmail = `${cleanUsername}@pulse.internal`;
 
