@@ -979,6 +979,7 @@ io.on('connection', (socket) => {
         memberEmails: memberEmails || {},
         isGroup: isGroup || false,
         groupName: groupName || null,
+        creatorId: isGroup ? uid : null,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         lastMessage: null,
@@ -1028,6 +1029,7 @@ io.on('connection', (socket) => {
     try {
       const convDoc = await db.collection('conversations').doc(convId).get();
       if (!convDoc.exists || !(convDoc.data().members || []).includes(uid)) { cb?.({ error: 'Geen toegang.' }); return; }
+      if (convDoc.data().isGroup && convDoc.data().creatorId && convDoc.data().creatorId !== uid) { cb?.({ error: 'Alleen de groepsbeheerder kan leden toevoegen.' }); return; }
       await db.collection('conversations').doc(convId).update({
         members: admin.firestore.FieldValue.arrayUnion(targetUid),
         [`memberNames.${targetUid}`]: displayName,
@@ -1042,6 +1044,7 @@ io.on('connection', (socket) => {
     try {
       const convDoc = await db.collection('conversations').doc(convId).get();
       if (!convDoc.exists || !(convDoc.data().members || []).includes(uid)) { cb?.({ error: 'Geen toegang.' }); return; }
+      if (convDoc.data().isGroup && convDoc.data().creatorId && convDoc.data().creatorId !== uid) { cb?.({ error: 'Alleen de groepsbeheerder kan leden verwijderen.' }); return; }
       const update = { members: admin.firestore.FieldValue.arrayRemove(targetUid) };
       update[`memberNames.${targetUid}`] = admin.firestore.FieldValue.delete();
       await db.collection('conversations').doc(convId).update(update);
@@ -1483,6 +1486,22 @@ async function cleanupOldMessages() {
 // Dagelijks uitvoeren (elke 24 uur), en direct bij opstarten
 cleanupOldMessages();
 setInterval(cleanupOldMessages, 24 * 60 * 60 * 1000);
+
+// ─── Reset online-status bij serverstart ──────────────────────────────────────
+// Bij herstart van de server staan alle users nog op online=true in Firestore.
+// Reset ze allemaal naar offline zodat de UI klopt totdat ze opnieuw verbinden.
+(async () => {
+  try {
+    const snap = await db.collection('users').where('online', '==', true).get();
+    if (snap.empty) return;
+    const batch = db.batch();
+    snap.docs.forEach(d => batch.update(d.ref, { online: false, inactive: false }));
+    await batch.commit();
+    console.log(`🔄 Online-status gereset voor ${snap.size} gebruiker(s) bij serverstart`);
+  } catch (err) {
+    console.warn('Online-reset bij start mislukt:', err.message);
+  }
+})();
 
 // ─── Server starten ───────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
