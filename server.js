@@ -147,6 +147,7 @@ if (!APP_URL) console.warn('⚠️ APP_URL niet ingesteld — stel dit in als de
 const pendingCalls  = {};
 const activeCalls   = new Set(); // uid's die momenteel in een actief gesprek zitten
 const inactiveUsers = new Set(); // uid's die online zijn maar inactief (3 min geen activiteit)
+const activeSessions = {}; // uid -> { sessionDocId, startTime } — sessietijdmeting per kind
 
 // ─── Express + HTTP + Socket.IO ──────────────────────────────────────────────
 const app = express();
@@ -574,6 +575,18 @@ io.on('connection', (socket) => {
       const legacyPaused = userSnap.data()?.paused;
       const features = pf || (legacyPaused ? { chat: true, call: true, video: true } : null);
       if (features && (features.chat || features.call || features.video)) socket.emit('account:paused', { features });
+
+      // Sessie bijhouden voor kinderen
+      const parentId = userSnap.data()?.parentId;
+      if (parentId && !activeSessions[uid]) {
+        const sessionRef = db.collection('userSessions').doc();
+        activeSessions[uid] = { sessionDocId: sessionRef.id, startTime: Date.now() };
+        sessionRef.set({
+          uid, parentId,
+          startTime: admin.firestore.FieldValue.serverTimestamp(),
+          endTime: null, duration: null,
+        }).catch(e => console.warn('Session start opslaan mislukt:', e.message));
+      }
     }
 
     // ── Bezorg wachtende berichten uit Redis wachtrij ──
@@ -1072,6 +1085,15 @@ io.on('connection', (socket) => {
         inactiveUsers.delete(uid);
         await db.collection('users').doc(uid).update({ online: false, inactive: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(e => console.warn('Offline-update mislukt:', e.message));
         io.emit('user:status', { uid, online: false });
+        // Sessie afsluiten
+        if (activeSessions[uid]) {
+          const { sessionDocId, startTime } = activeSessions[uid];
+          delete activeSessions[uid];
+          const duration = Math.round((Date.now() - startTime) / 1000);
+          db.collection('userSessions').doc(sessionDocId).update({
+            endTime: admin.firestore.FieldValue.serverTimestamp(), duration,
+          }).catch(e => console.warn('Session end opslaan mislukt:', e.message));
+        }
       }
       console.log(`👋 Offline: ${uid}`);
     }
@@ -1304,6 +1326,101 @@ app.get('/api/parent/activities', verifyAuth, async (req, res) => {
     const activities = snap.docs.map(d => ({ id: d.id, ...d.data(), createdAt: d.data().createdAt || null }));
     res.json(activities);
   } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
+});
+
+// GET /api/parent/analytics/:childUid — analyserapport voor kind
+app.get('/api/parent/analytics/:childUid', verifyAuth, async (req, res) => {
+  try {
+    const callerDoc = await db.collection('users').doc(req.uid).get();
+    if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
+    const { childUid } = req.params;
+    const childDoc = await db.collection('users').doc(childUid).get();
+    if (!childDoc.exists) return res.status(404).json({ error: 'Niet gevonden.' });
+    if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+
+    const childData = childDoc.data();
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const sevenDaysAgoMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+    const [contactsSnap, friendReqSentSnap, friendReqRecvSnap, sessionsSnap, convsSnap] = await Promise.all([
+      db.collection('users').doc(childUid).collection('contacts').get(),
+      db.collection('friendRequests').where('fromUid', '==', childUid).orderBy('createdAt', 'desc').limit(20).get(),
+      db.collection('friendRequests').where('toUid', '==', childUid).orderBy('createdAt', 'desc').limit(20).get(),
+      db.collection('userSessions').where('uid', '==', childUid).where('startTime', '>=', thirtyDaysAgo).orderBy('startTime', 'desc').limit(200).get(),
+      db.collection('conversations').where('members', 'array-contains', childUid).orderBy('lastMessageAt', 'desc').limit(25).get(),
+    ]);
+
+    const profile = {
+      displayName: childData.displayName, photoURL: childData.photoURL || null,
+      username: childData.username || null, online: !!onlineUsers[childUid]?.size,
+      lastSeen: childData.lastSeen || null,
+    };
+
+    const contactList = contactsSnap.docs.map(d => ({ uid: d.id, displayName: d.data().displayName, photoURL: d.data().photoURL || null }));
+
+    const friendRequests = {
+      sent: friendReqSentSnap.docs.map(d => ({ toName: d.data().toName || d.data().toEmail, status: d.data().status, createdAt: d.data().createdAt || null })),
+      received: friendReqRecvSnap.docs.map(d => ({ fromName: d.data().fromName || d.data().fromEmail, status: d.data().status, createdAt: d.data().createdAt || null })),
+    };
+
+    const dailyMap = {};
+    const hourlyMap = {};
+    let totalSecondsLast7Days = 0;
+    sessionsSnap.docs.forEach(doc => {
+      const d = doc.data();
+      const startMs = d.startTime?._seconds ? d.startTime._seconds * 1000 : (d.startTime?.seconds ? d.startTime.seconds * 1000 : 0);
+      const duration = d.duration || 0;
+      if (!startMs) return;
+      if (startMs >= sevenDaysAgoMs) totalSecondsLast7Days += duration;
+      const dt = new Date(startMs);
+      const dateStr = dt.toISOString().split('T')[0];
+      const hour = dt.getHours();
+      dailyMap[dateStr] = (dailyMap[dateStr] || 0) + duration;
+      hourlyMap[hour] = (hourlyMap[hour] || 0) + Math.round(duration / 60);
+    });
+    const last7Days = [];
+    for (let i = 6; i >= 0; i--) {
+      const dt = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+      const dateStr = dt.toISOString().split('T')[0];
+      last7Days.push({ date: dateStr, seconds: dailyMap[dateStr] || 0 });
+    }
+    const sessions = { totalSecondsLast7Days, daily: last7Days, hourlyPattern: hourlyMap };
+
+    const topContactsMap = {};
+    let totalMessagesSent = 0, totalCallSecs = 0, totalVideoSecs = 0;
+
+    await Promise.all(convsSnap.docs.slice(0, 20).map(async convDoc => {
+      const convData = convDoc.data();
+      const otherUid = convData.isGroup ? null : (convData.members || []).find(m => m !== childUid);
+      const otherName = otherUid ? (convData.memberNames?.[otherUid] || 'Onbekend') : (convData.name || 'Groep');
+      const key = otherUid || convDoc.id;
+      const msgsSnap = await db.collection('conversations').doc(convDoc.id).collection('messages')
+        .where('createdAt', '>=', thirtyDaysAgo).limit(500).get();
+      let sentMsgs = 0, calls = 0, videos = 0, callSecs = 0;
+      msgsSnap.docs.forEach(doc => {
+        const msg = doc.data();
+        if (msg.type === 'call') {
+          const dur = msg.duration || 0;
+          if (msg.isVideo) totalVideoSecs += dur; else totalCallSecs += dur;
+          if (msg.senderId === childUid) { calls++; if (msg.isVideo) videos++; callSecs += dur; }
+        } else if (msg.senderId === childUid) { sentMsgs++; totalMessagesSent++; }
+      });
+      if (sentMsgs > 0 || calls > 0) {
+        if (!topContactsMap[key]) topContactsMap[key] = { uid: otherUid, name: otherName, isGroup: !!convData.isGroup, messagesSent: 0, callCount: 0, videoCalls: 0, totalCallSecs: 0 };
+        topContactsMap[key].messagesSent += sentMsgs;
+        topContactsMap[key].callCount += calls;
+        topContactsMap[key].videoCalls += videos;
+        topContactsMap[key].totalCallSecs += callSecs;
+      }
+    }));
+
+    const topContacts = Object.values(topContactsMap)
+      .sort((a, b) => (b.messagesSent + b.callCount * 5) - (a.messagesSent + a.callCount * 5))
+      .slice(0, 8);
+    const messaging = { totalMessagesSent, totalCallSecs, totalVideoSecs, topContacts };
+
+    res.json({ profile, contacts: { total: contactsSnap.size, list: contactList.slice(0, 10) }, friendRequests, sessions, messaging });
+  } catch (err) { console.error('Analytics error:', err); res.status(500).json({ error: 'Serverfout' }); }
 });
 
 // ─── REST: FCM token opslaan ─────────────────────────────────────────────────
