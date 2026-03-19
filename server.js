@@ -14,6 +14,51 @@ const strictLimiter    = rateLimit({ windowMs: 60 * 60 * 1000, max: 5,   message
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function validEmail(e) { return typeof e === 'string' && EMAIL_REGEX.test(e.trim()); }
 
+// ─── Validatie schemas (zod) ─────────────────────────────────────────────────
+const { z } = require('zod');
+
+const schemas = {
+  messageSend: z.object({
+    convId:  z.string().min(1).max(128),
+    message: z.object({
+      text:  z.string().max(5000).optional(),
+      type:  z.enum(['text', 'image', 'call', 'contact', 'file']).optional(),
+    }).passthrough(),
+  }),
+  messageEdit: z.object({
+    convId:  z.string().min(1).max(128),
+    msgId:   z.string().min(1).max(128),
+    newText: z.string().min(1).max(5000),
+  }),
+  messageReact: z.object({
+    convId: z.string().min(1).max(128),
+    msgId:  z.string().min(1).max(128),
+    emoji:  z.string().min(1).max(8),
+  }),
+  convCreate: z.object({
+    members:      z.array(z.string().min(1).max(128)).min(1).max(50),
+    memberNames:  z.record(z.string().max(64)).optional(),
+    memberEmails: z.record(z.string().max(128)).optional(),
+    isGroup:      z.boolean().optional(),
+    groupName:    z.string().max(64).optional(),
+  }),
+  typing: z.object({
+    convId: z.string().min(1).max(128),
+    name:   z.string().max(64).optional(),
+  }),
+};
+
+// Helper: valideer socket event data, stuur fout terug bij mismatch
+function validate(schema, data, callback) {
+  const result = schema.safeParse(data);
+  if (!result.success) {
+    const msg = result.error.issues[0]?.message || 'Ongeldige invoer.';
+    if (typeof callback === 'function') callback({ error: msg });
+    return null;
+  }
+  return result.data;
+}
+
 // ─── Firebase Admin initialiseren ───────────────────────────────────────────
 // Vervang dit met jouw eigen serviceAccountKey.json bestand van Firebase
 const serviceAccount = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
@@ -564,9 +609,45 @@ io.use(async (socket, next) => {
   }
 });
 
+// ── Per-socket rate limiter ───────────────────────────────────────────────────
+// Retourneert true als het event binnen de limiet valt, false als het geblokkeerd is
+function makeRateLimiter(maxPerMinute) {
+  let count = 0;
+  let resetAt = Date.now() + 60_000;
+  return () => {
+    const now = Date.now();
+    if (now > resetAt) { count = 0; resetAt = now + 60_000; }
+    if (count >= maxPerMinute) return false;
+    count++;
+    return true;
+  };
+}
+
 io.on('connection', (socket) => {
   const uid = socket.userId;
   console.log('🔌 Verbonden:', socket.id, uid);
+
+  // Rate limiters per event-type (per socket = per gebruiker)
+  const limits = {
+    'message:send':          makeRateLimiter(30),
+    'message:react':         makeRateLimiter(60),
+    'message:edit':          makeRateLimiter(20),
+    'typing:start':          makeRateLimiter(60),
+    'call:offer':            makeRateLimiter(10),
+    'conversation:create':   makeRateLimiter(10),
+    'conversation:addMember':makeRateLimiter(20),
+  };
+  // Middleware: controleer voor elk inkomend event
+  socket.use(([event, ...args], next) => {
+    const check = limits[event];
+    if (check && !check()) {
+      console.warn(`⚡ Rate limit: ${uid} → ${event}`);
+      const cb = args[args.length - 1];
+      if (typeof cb === 'function') cb({ error: 'Te veel verzoeken. Wacht even.' });
+      return; // event niet doorlaten
+    }
+    next();
+  });
 
   // ── User registreren als online ──
   socket.on('user:online', async () => {
@@ -734,7 +815,10 @@ io.on('connection', (socket) => {
   });
 
   // ── Bericht sturen ──
-  socket.on('message:send', async ({ convId, message }, callback) => {
+  socket.on('message:send', async (data, callback) => {
+    const validated = validate(schemas.messageSend, data, callback);
+    if (!validated) return;
+    const { convId, message } = validated;
     try {
       // Blokkeer gepauzeerde accounts + verifieer lidmaatschap
       const [senderDoc, convMemberDoc] = await Promise.all([
@@ -849,7 +933,10 @@ io.on('connection', (socket) => {
   });
 
   // ── Emoji-reactie op bericht ──
-  socket.on('message:react', async ({ convId, msgId, emoji }, callback) => {
+  socket.on('message:react', async (data, callback) => {
+    const validated = validate(schemas.messageReact, data, callback);
+    if (!validated) return;
+    const { convId, msgId, emoji } = validated;
     try {
       const convDoc = await db.collection('conversations').doc(convId).get();
       if (!convDoc.exists || !(convDoc.data().members || []).includes(uid)) return callback?.({ error: 'Geen toegang.' });
@@ -883,9 +970,12 @@ io.on('connection', (socket) => {
   });
 
   // ── Bericht bewerken ──
-  socket.on('message:edit', async ({ convId, msgId, newText }, callback) => {
+  socket.on('message:edit', async (data, callback) => {
+    const validated = validate(schemas.messageEdit, data, callback);
+    if (!validated) return;
+    const { convId, msgId, newText } = validated;
     try {
-      const trimmed = newText?.trim();
+      const trimmed = newText.trim();
       if (!trimmed) return callback?.({ error: 'Bericht mag niet leeg zijn.' });
 
       const msgRef = db.collection('conversations').doc(convId).collection('messages').doc(msgId);
@@ -913,12 +1003,20 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ── Typen indicator ──
+  // ── Typen indicator (met auto-stop na 5 seconden) ──
+  const typingTimers = {};
   socket.on('typing:start', ({ convId, name }) => {
     socket.to(convId).emit('typing:update', { uid, name, typing: true });
+    clearTimeout(typingTimers[convId]);
+    typingTimers[convId] = setTimeout(() => {
+      socket.to(convId).emit('typing:update', { uid, typing: false });
+      delete typingTimers[convId];
+    }, 5000);
   });
 
   socket.on('typing:stop', ({ convId }) => {
+    clearTimeout(typingTimers[convId]);
+    delete typingTimers[convId];
     socket.to(convId).emit('typing:update', { uid, typing: false });
   });
 
@@ -992,7 +1090,10 @@ io.on('connection', (socket) => {
   });
 
   // ── Gesprek aanmaken ──
-  socket.on('conversation:create', async ({ members, memberNames, memberEmails, isGroup, groupName }, callback) => {
+  socket.on('conversation:create', async (data, callback) => {
+    const validated = validate(schemas.convCreate, data, callback);
+    if (!validated) return;
+    const { members, memberNames, memberEmails, isGroup, groupName } = validated;
     try {
       // Check of 1-op-1 gesprek al bestaat
       if (!isGroup && members.length === 2) {
