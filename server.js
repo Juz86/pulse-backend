@@ -1331,7 +1331,6 @@ app.get('/api/parent/activities', verifyAuth, async (req, res) => {
     if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
     const snap = await db.collection('parentActivities')
       .where('parentId', '==', req.uid)
-      .orderBy('createdAt', 'desc')
       .limit(50)
       .get();
     const activities = snap.docs.map(d => ({ id: d.id, ...d.data(), createdAt: d.data().createdAt || null }));
@@ -1357,8 +1356,8 @@ app.get('/api/parent/analytics/:childUid', verifyAuth, async (req, res) => {
       db.collection('users').doc(childUid).collection('contacts').get(),
       db.collection('friendRequests').where('fromUid', '==', childUid).limit(20).get(),
       db.collection('friendRequests').where('toUid', '==', childUid).limit(20).get(),
-      db.collection('userSessions').where('uid', '==', childUid).where('startTime', '>=', thirtyDaysAgo).orderBy('startTime', 'desc').limit(200).get(),
-      db.collection('conversations').where('members', 'array-contains', childUid).orderBy('lastMessageAt', 'desc').limit(25).get(),
+      db.collection('userSessions').where('uid', '==', childUid).limit(200).get(),
+      db.collection('conversations').where('members', 'array-contains', childUid).limit(25).get(),
     ]);
 
     const profile = {
@@ -1377,11 +1376,12 @@ app.get('/api/parent/analytics/:childUid', verifyAuth, async (req, res) => {
     const dailyMap = {};
     const hourlyMap = {};
     let totalSecondsLast7Days = 0;
+    const thirtyDaysAgoMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
     sessionsSnap.docs.forEach(doc => {
       const d = doc.data();
       const startMs = d.startTime?._seconds ? d.startTime._seconds * 1000 : (d.startTime?.seconds ? d.startTime.seconds * 1000 : 0);
       const duration = d.duration || 0;
-      if (!startMs) return;
+      if (!startMs || startMs < thirtyDaysAgoMs) return;
       if (startMs >= sevenDaysAgoMs) totalSecondsLast7Days += duration;
       const dt = new Date(startMs);
       const dateStr = dt.toISOString().split('T')[0];
