@@ -804,6 +804,37 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ── Bericht bewerken ──
+  socket.on('message:edit', async ({ convId, msgId, newText }, callback) => {
+    try {
+      const trimmed = newText?.trim();
+      if (!trimmed) return callback?.({ error: 'Bericht mag niet leeg zijn.' });
+
+      const msgRef = db.collection('conversations').doc(convId).collection('messages').doc(msgId);
+      const msgDoc = await msgRef.get();
+      if (!msgDoc.exists) return callback?.({ error: 'Bericht niet gevonden.' });
+      if (msgDoc.data().senderId !== uid) return callback?.({ error: 'Alleen eigen berichten bewerken.' });
+      if (msgDoc.data().type && msgDoc.data().type !== 'text') return callback?.({ error: 'Dit bericht kan niet bewerkt worden.' });
+
+      const editedAt = new Date().toISOString();
+      await msgRef.update({ text: trimmed, editedAt });
+
+      const payload = { convId, msgId, text: trimmed, editedAt };
+      io.to(convId).emit('message:edited', payload);
+      const convDoc = await db.collection('conversations').doc(convId).get();
+      const members = convDoc.exists ? (convDoc.data().members || []) : [];
+      members.forEach(memberUid => {
+        const sockets = onlineUsers[memberUid];
+        if (sockets) sockets.forEach(sid => io.to(sid).emit('message:edited', payload));
+      });
+
+      callback?.({ success: true });
+    } catch (err) {
+      console.error('Fout bij bewerken bericht:', err);
+      callback?.({ error: 'Serverfout' });
+    }
+  });
+
   // ── Typen indicator ──
   socket.on('typing:start', ({ convId, name }) => {
     socket.to(convId).emit('typing:update', { uid, name, typing: true });
