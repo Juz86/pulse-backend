@@ -1355,8 +1355,8 @@ app.get('/api/parent/analytics/:childUid', verifyAuth, async (req, res) => {
 
     const [contactsSnap, friendReqSentSnap, friendReqRecvSnap, sessionsSnap, convsSnap] = await Promise.all([
       db.collection('users').doc(childUid).collection('contacts').get(),
-      db.collection('friendRequests').where('fromUid', '==', childUid).orderBy('createdAt', 'desc').limit(20).get(),
-      db.collection('friendRequests').where('toUid', '==', childUid).orderBy('createdAt', 'desc').limit(20).get(),
+      db.collection('friendRequests').where('fromUid', '==', childUid).limit(20).get(),
+      db.collection('friendRequests').where('toUid', '==', childUid).limit(20).get(),
       db.collection('userSessions').where('uid', '==', childUid).where('startTime', '>=', thirtyDaysAgo).orderBy('startTime', 'desc').limit(200).get(),
       db.collection('conversations').where('members', 'array-contains', childUid).orderBy('lastMessageAt', 'desc').limit(25).get(),
     ]);
