@@ -181,10 +181,12 @@ module.exports = (io, onlineUsers) => {
       if (updated.call || updated.video) activeCalls.delete(childUid);
 
       const featureLabel = !feature || feature === 'all' ? 'alles' : feature === 'chat' ? 'chatten' : feature === 'call' ? 'bellen' : 'videobellen';
-      sendPush(childUid,
-        { title: 'Pulse', body: `${featureLabel.charAt(0).toUpperCase() + featureLabel.slice(1)} is gepauzeerd door je ouder.` },
-        { type: 'paused' }
-      );
+      if (!onlineUsers[childUid]?.size) {
+        sendPush(childUid,
+          { title: 'Pulse', body: `${featureLabel.charAt(0).toUpperCase() + featureLabel.slice(1)} is gepauzeerd door je ouder.` },
+          { type: 'paused' }
+        );
+      }
       res.json({ success: true, pausedFeatures: updated });
     } catch (err) { res.status(500).json({ error: 'Serverfout' }); }
   });
