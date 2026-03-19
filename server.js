@@ -147,7 +147,7 @@ if (!APP_URL) console.warn('⚠️ APP_URL niet ingesteld — stel dit in als de
 const pendingCalls  = {};
 const activeCalls   = new Set(); // uid's die momenteel in een actief gesprek zitten
 const inactiveUsers = new Set(); // uid's die online zijn maar inactief (3 min geen activiteit)
-const activeSessions = {}; // uid -> { sessionDocId, startTime } — sessietijdmeting per kind
+const activeSessions = {}; // uid -> { sessionDocId, startTime, accumulated, pausedAt } — sessietijdmeting per kind
 
 // ─── Express + HTTP + Socket.IO ──────────────────────────────────────────────
 const app = express();
@@ -580,7 +580,7 @@ io.on('connection', (socket) => {
       const parentId = userSnap.data()?.parentId;
       if (parentId && !activeSessions[uid]) {
         const sessionRef = db.collection('userSessions').doc();
-        activeSessions[uid] = { sessionDocId: sessionRef.id, startTime: Date.now() };
+        activeSessions[uid] = { sessionDocId: sessionRef.id, startTime: Date.now(), accumulated: 0, pausedAt: null };
         sessionRef.set({
           uid, parentId,
           startTime: admin.firestore.FieldValue.serverTimestamp(),
@@ -635,12 +635,22 @@ io.on('connection', (socket) => {
     inactiveUsers.add(uid);
     await db.collection('users').doc(uid).update({ inactive: true }).catch(e => console.warn('Inactief-update mislukt:', e.message));
     io.emit('user:status', { uid, online: true, inactive: true });
+    // Pauzeer sessietimer bij inactiviteit
+    if (activeSessions[uid] && !activeSessions[uid].pausedAt) {
+      activeSessions[uid].accumulated += Math.round((Date.now() - activeSessions[uid].startTime) / 1000);
+      activeSessions[uid].pausedAt = Date.now();
+    }
   });
 
   socket.on('user:active', async () => {
     inactiveUsers.delete(uid);
     await db.collection('users').doc(uid).update({ inactive: false }).catch(e => console.warn('Actief-update mislukt:', e.message));
     io.emit('user:status', { uid, online: true, inactive: false });
+    // Hervat sessietimer
+    if (activeSessions[uid] && activeSessions[uid].pausedAt) {
+      activeSessions[uid].startTime = Date.now();
+      activeSessions[uid].pausedAt = null;
+    }
   });
 
   // ── Profielupdate broadcasten naar alle verbonden clients ──
@@ -1087,9 +1097,10 @@ io.on('connection', (socket) => {
         io.emit('user:status', { uid, online: false });
         // Sessie afsluiten
         if (activeSessions[uid]) {
-          const { sessionDocId, startTime } = activeSessions[uid];
+          const { sessionDocId, startTime, accumulated, pausedAt } = activeSessions[uid];
           delete activeSessions[uid];
-          const duration = Math.round((Date.now() - startTime) / 1000);
+          const activeTime = pausedAt ? 0 : Math.round((Date.now() - startTime) / 1000);
+          const duration = accumulated + activeTime;
           db.collection('userSessions').doc(sessionDocId).update({
             endTime: admin.firestore.FieldValue.serverTimestamp(), duration,
           }).catch(e => console.warn('Session end opslaan mislukt:', e.message));
