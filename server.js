@@ -565,11 +565,16 @@ io.on('connection', (socket) => {
     onlineUsers[uid].add(socket.id);
     socket.data.uid = uid;
     inactiveUsers.delete(uid); // Actief bij verbinding
-    const userSnap = await db.collection('users').doc(uid).get().catch(() => null);
-    await db.collection('users').doc(uid).update({ online: true, inactive: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(e => console.warn('Online-update mislukt:', e.message));
+
+    // Direct broadcasten — geen wachten op Firestore
     io.emit('user:status', { uid, online: true, inactive: false });
     socket.emit('users:online', Object.keys(onlineUsers));
     socket.emit('users:inactive', [...inactiveUsers]);
+
+    // Firestore asynchroon bijwerken op de achtergrond
+    db.collection('users').doc(uid).update({ online: true, inactive: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(e => console.warn('Online-update mislukt:', e.message));
+
+    const userSnap = await db.collection('users').doc(uid).get().catch(() => null);
     if (userSnap?.exists) {
       const pf = userSnap.data()?.pausedFeatures;
       const legacyPaused = userSnap.data()?.paused;
@@ -1093,8 +1098,8 @@ io.on('connection', (socket) => {
       if (!onlineUsers[uid]?.size) {
         delete onlineUsers[uid];
         inactiveUsers.delete(uid);
-        await db.collection('users').doc(uid).update({ online: false, inactive: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(e => console.warn('Offline-update mislukt:', e.message));
         io.emit('user:status', { uid, online: false });
+        db.collection('users').doc(uid).update({ online: false, inactive: false, lastSeen: admin.firestore.FieldValue.serverTimestamp() }).catch(e => console.warn('Offline-update mislukt:', e.message));
         // Sessie afsluiten
         if (activeSessions[uid]) {
           const { sessionDocId, startTime, accumulated, pausedAt } = activeSessions[uid];
