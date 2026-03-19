@@ -1086,7 +1086,7 @@ io.on('connection', (socket) => {
   
   // ── Verbreken ──
   socket.on('disconnect', async () => {
-    const uid = socket.data.uid;
+    const uid = socket.userId ?? socket.data.uid;
     if (uid) {
       onlineUsers[uid]?.delete(socket.id);
       activeCalls.delete(uid);
