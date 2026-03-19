@@ -804,6 +804,40 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ── Emoji-reactie op bericht ──
+  socket.on('message:react', async ({ convId, msgId, emoji }, callback) => {
+    try {
+      const convDoc = await db.collection('conversations').doc(convId).get();
+      if (!convDoc.exists || !(convDoc.data().members || []).includes(uid)) return callback?.({ error: 'Geen toegang.' });
+
+      const msgRef = db.collection('conversations').doc(convId).collection('messages').doc(msgId);
+      const msgDoc = await msgRef.get();
+      if (!msgDoc.exists) return callback?.({ error: 'Bericht niet gevonden.' });
+
+      const currentReactors = (msgDoc.data().reactions || {})[emoji] || [];
+      const hasReacted = currentReactors.includes(uid);
+      const field = `reactions.${emoji}`;
+      await msgRef.update({
+        [field]: hasReacted
+          ? admin.firestore.FieldValue.arrayRemove(uid)
+          : admin.firestore.FieldValue.arrayUnion(uid),
+      });
+
+      const updatedReactions = (await msgRef.get()).data().reactions || {};
+      const payload = { convId, msgId, reactions: updatedReactions };
+      io.to(convId).emit('message:reaction', payload);
+      const members = convDoc.data().members || [];
+      members.forEach(memberUid => {
+        const sockets = onlineUsers[memberUid];
+        if (sockets) sockets.forEach(sid => io.to(sid).emit('message:reaction', payload));
+      });
+      callback?.({ success: true });
+    } catch (err) {
+      console.error('Fout bij reactie:', err);
+      callback?.({ error: 'Serverfout' });
+    }
+  });
+
   // ── Bericht bewerken ──
   socket.on('message:edit', async ({ convId, msgId, newText }, callback) => {
     try {
