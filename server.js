@@ -24,38 +24,36 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-// ─── Redis wachtrij (optioneel) ──────────────────────────────────────────────
+// ─── Redis wachtrij + Socket.IO adapter (optioneel) ─────────────────────────
 let redis = null;
 let redisReady = false;
-try {
-  const Redis = require('ioredis');
-  const redisUrl = process.env.REDIS_URL;
-  if (redisUrl) {
-    const redisClient = new Redis(redisUrl, {
+let redisPub = null;
+let redisSub = null;
+
+const redisUrl = process.env.REDIS_URL;
+if (redisUrl) {
+  try {
+    const Redis = require('ioredis');
+    const queueOptions = {
       maxRetriesPerRequest: 1,
       connectTimeout: 3000,
       enableOfflineQueue: false,
-      retryStrategy: () => null, // niet automatisch herhalen
-    });
-    redisClient.on('ready', () => {
-      redis = redisClient;
-      redisReady = true;
-      console.log('✅ Redis verbonden');
-    });
-    redisClient.on('error', (err) => {
-      console.warn('⚠️ Redis niet beschikbaar, fallback op Firestore:', err.message);
-      redis = null;
-      redisReady = false;
-    });
-    redisClient.on('reconnecting', () => {
-      console.log('🔄 Redis herverbinden…');
-    });
-  } else {
-    console.log('ℹ️ Geen REDIS_URL — berichtenwachtrij uitgeschakeld');
+      retryStrategy: () => null,
+    };
+    // Aparte clients: één voor wachtrij, twee voor pub/sub adapter
+    const redisClient = new Redis(redisUrl, queueOptions);
+    redisPub = new Redis(redisUrl, queueOptions);
+    redisSub = new Redis(redisUrl, queueOptions);
+
+    redisClient.on('ready', () => { redis = redisClient; redisReady = true; console.log('✅ Redis verbonden'); });
+    redisClient.on('error', (err) => { console.warn('⚠️ Redis queue niet beschikbaar:', err.message); redis = null; redisReady = false; });
+    redisPub.on('error', (err) => console.warn('⚠️ Redis pub fout:', err.message));
+    redisSub.on('error', (err) => console.warn('⚠️ Redis sub fout:', err.message));
+  } catch (e) {
+    console.warn('⚠️ ioredis laden mislukt:', e.message);
   }
-} catch (e) {
-  console.warn('⚠️ ioredis laden mislukt, fallback op Firestore:', e.message);
-  redis = null;
+} else {
+  console.log('ℹ️ Geen REDIS_URL — Redis uitgeschakeld');
 }
 
 /** Voeg bericht toe aan wachtrij voor offline ontvanger */
@@ -157,6 +155,17 @@ const FRONTEND_URL = process.env.FRONTEND_URL || APP_URL;
 const io = new Server(server, {
   cors: { origin: FRONTEND_URL, methods: ['GET', 'POST'], credentials: true },
 });
+
+// Redis adapter: synchroniseert Socket.IO events tussen meerdere server-instanties (Fly.io machines)
+if (redisPub && redisSub) {
+  try {
+    const { createAdapter } = require('@socket.io/redis-adapter');
+    io.adapter(createAdapter(redisPub, redisSub));
+    console.log('✅ Socket.IO Redis adapter actief');
+  } catch (e) {
+    console.warn('⚠️ Socket.IO Redis adapter mislukt:', e.message);
+  }
+}
 
 app.use(cors({ origin: FRONTEND_URL, credentials: true }));
 app.use(express.json());
