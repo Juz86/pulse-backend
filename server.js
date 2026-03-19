@@ -47,6 +47,7 @@ if (redisPub && redisSub) {
 }
 
 // ─── Express middleware ───────────────────────────────────────────────────────
+app.set('trust proxy', 1);
 app.use(cors({ origin: FRONTEND_URL, credentials: true }));
 app.use(express.json());
 app.use(globalLimiter);

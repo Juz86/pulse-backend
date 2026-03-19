@@ -6,10 +6,11 @@ const redisUrl = process.env.REDIS_URL;
 if (redisUrl) {
   try {
     const Redis = require('ioredis');
-    const opts = { maxRetriesPerRequest: 1, connectTimeout: 3000, enableOfflineQueue: false, retryStrategy: () => null };
-    const redisClient = new Redis(redisUrl, opts);
-    redisPub = new Redis(redisUrl, opts);
-    redisSub = new Redis(redisUrl, opts);
+    const queueOpts  = { maxRetriesPerRequest: 1, connectTimeout: 3000, enableOfflineQueue: false, retryStrategy: () => null };
+    const adapterOpts = { connectTimeout: 5000, retryStrategy: (t) => Math.min(t * 100, 3000) };
+    const redisClient = new Redis(redisUrl, queueOpts);
+    redisPub = new Redis(redisUrl, adapterOpts);
+    redisSub = new Redis(redisUrl, adapterOpts);
     redisClient.on('ready', () => { redis = redisClient; console.log('✅ Redis verbonden'); });
     redisClient.on('error', (e) => { console.warn('⚠️ Redis queue niet beschikbaar:', e.message); redis = null; });
     redisPub.on('error', (e) => console.warn('⚠️ Redis pub fout:', e.message));
