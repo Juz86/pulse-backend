@@ -569,7 +569,12 @@ io.on('connection', (socket) => {
     io.emit('user:status', { uid, online: true, inactive: false });
     socket.emit('users:online', Object.keys(onlineUsers));
     socket.emit('users:inactive', [...inactiveUsers]);
-    if (userSnap?.exists && userSnap.data()?.paused) socket.emit('account:paused');
+    if (userSnap?.exists) {
+      const pf = userSnap.data()?.pausedFeatures;
+      const legacyPaused = userSnap.data()?.paused;
+      const features = pf || (legacyPaused ? { chat: true, call: true, video: true } : null);
+      if (features && (features.chat || features.call || features.video)) socket.emit('account:paused', { features });
+    }
 
     // ── Bezorg wachtende berichten uit Redis wachtrij ──
     const queued = await flushQueue(uid);
@@ -699,8 +704,10 @@ io.on('connection', (socket) => {
         db.collection('users').doc(uid).get(),
         db.collection('conversations').doc(convId).get(),
       ]);
-      if (senderDoc.exists && senderDoc.data().paused) {
-        if (typeof callback === 'function') callback({ error: 'Account gepauzeerd.' });
+      const senderData = senderDoc.data() || {};
+      const senderPf = senderData.pausedFeatures || (senderData.paused ? { chat: true, call: true, video: true } : null);
+      if (senderDoc.exists && senderPf?.chat) {
+        if (typeof callback === 'function') callback({ error: 'Chatten is gepauzeerd door je ouder.' });
         return;
       }
       if (!convMemberDoc.exists || !(convMemberDoc.data().members || []).includes(uid)) {
@@ -1080,8 +1087,9 @@ app.get('/api/parent/children', verifyAuth, async (req, res) => {
     if (!parentDoc.exists || parentDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
     const snap = await db.collection('users').where('parentId', '==', req.uid).get();
     const children = snap.docs.map(d => {
-      const { uid, displayName, username, email, photoURL, online, lastSeen, paused } = d.data();
-      return { uid, displayName, username: username || null, email, photoURL: photoURL || null, online: online || false, lastSeen: lastSeen || null, paused: paused || false };
+      const { uid, displayName, username, email, photoURL, online, lastSeen, paused, pausedFeatures } = d.data();
+      const pf = pausedFeatures || { chat: paused || false, call: paused || false, video: paused || false };
+      return { uid, displayName, username: username || null, email, photoURL: photoURL || null, online: online || false, lastSeen: lastSeen || null, pausedFeatures: pf };
     });
     res.json(children);
   } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
@@ -1137,9 +1145,9 @@ app.post('/api/parent/create-child', verifyAuth, async (req, res) => {
       role:        'child',
       parentId:    req.uid,
       parentEmail: parentData.email,
-      online:      false,
-      paused:      false,
-      createdAt:   admin.firestore.FieldValue.serverTimestamp(),
+      online:         false,
+      pausedFeatures: { chat: false, call: false, video: false },
+      createdAt:      admin.firestore.FieldValue.serverTimestamp(),
     });
 
     // Voeg wederzijds als contact toe
@@ -1217,7 +1225,7 @@ app.delete('/api/parent/delete-child/:childUid', verifyAuth, async (req, res) =>
   } catch (err) { console.error('delete-child fout:', err); res.status(500).json({ error: 'Serverfout' }); }
 });
 
-// POST /api/parent/pause/:childUid — pauzeer kind
+// POST /api/parent/pause/:childUid — pauzeer kind (feature: 'chat'|'call'|'video'|'all')
 app.post('/api/parent/pause/:childUid', verifyAuth, async (req, res) => {
   try {
     const callerDoc = await db.collection('users').doc(req.uid).get();
@@ -1226,23 +1234,36 @@ app.post('/api/parent/pause/:childUid', verifyAuth, async (req, res) => {
     const childDoc = await db.collection('users').doc(childUid).get();
     if (!childDoc.exists) return res.status(404).json({ error: 'Niet gevonden.' });
     if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
-    await db.collection('users').doc(childUid).update({ paused: true });
+
+    const { feature } = req.body; // 'chat', 'call', 'video', or 'all' / undefined
+    const current = childDoc.data().pausedFeatures || { chat: false, call: false, video: false };
+    let updated;
+    if (!feature || feature === 'all') {
+      updated = { chat: true, call: true, video: true };
+    } else if (['chat', 'call', 'video'].includes(feature)) {
+      updated = { ...current, [feature]: true };
+    } else {
+      return res.status(400).json({ error: 'Ongeldig kenmerk.' });
+    }
+
+    await db.collection('users').doc(childUid).update({ pausedFeatures: updated });
     const s = onlineUsers[childUid];
     if (s) s.forEach(sid => {
-      io.to(sid).emit('account:paused');
-      // Beëindig actieve oproep als kind in gesprek zit
-      if (activeCalls.has(childUid)) io.to(sid).emit('call:ended');
+      io.to(sid).emit('account:paused', { features: updated });
+      if (activeCalls.has(childUid) && (updated.call || updated.video)) io.to(sid).emit('call:ended');
     });
-    activeCalls.delete(childUid);
+    if (updated.call || updated.video) activeCalls.delete(childUid);
+
+    const featureLabel = !feature || feature === 'all' ? 'alles' : feature === 'chat' ? 'chatten' : feature === 'call' ? 'bellen' : 'videobellen';
     sendPush(childUid,
-      { title: 'Pulse', body: 'Je account is gepauzeerd door je ouder.' },
+      { title: 'Pulse', body: `${featureLabel.charAt(0).toUpperCase() + featureLabel.slice(1)} is gepauzeerd door je ouder.` },
       { type: 'paused' }
     );
-    res.json({ success: true });
+    res.json({ success: true, pausedFeatures: updated });
   } catch (err) { res.status(500).json({ error: 'Serverfout' }); }
 });
 
-// POST /api/parent/resume/:childUid — hervat kind
+// POST /api/parent/resume/:childUid — hervat kind (feature: 'chat'|'call'|'video'|'all')
 app.post('/api/parent/resume/:childUid', verifyAuth, async (req, res) => {
   try {
     const callerDoc = await db.collection('users').doc(req.uid).get();
@@ -1251,10 +1272,22 @@ app.post('/api/parent/resume/:childUid', verifyAuth, async (req, res) => {
     const childDoc = await db.collection('users').doc(childUid).get();
     if (!childDoc.exists) return res.status(404).json({ error: 'Niet gevonden.' });
     if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
-    await db.collection('users').doc(childUid).update({ paused: false });
+
+    const { feature } = req.body;
+    const current = childDoc.data().pausedFeatures || { chat: false, call: false, video: false };
+    let updated;
+    if (!feature || feature === 'all') {
+      updated = { chat: false, call: false, video: false };
+    } else if (['chat', 'call', 'video'].includes(feature)) {
+      updated = { ...current, [feature]: false };
+    } else {
+      return res.status(400).json({ error: 'Ongeldig kenmerk.' });
+    }
+
+    await db.collection('users').doc(childUid).update({ pausedFeatures: updated });
     const s = onlineUsers[childUid];
-    if (s) s.forEach(sid => io.to(sid).emit('account:resumed'));
-    res.json({ success: true });
+    if (s) s.forEach(sid => io.to(sid).emit('account:resumed', { features: updated }));
+    res.json({ success: true, pausedFeatures: updated });
   } catch (err) { res.status(500).json({ error: 'Serverfout' }); }
 });
 
