@@ -29,10 +29,13 @@ if (!APP_URL) console.warn('⚠️ APP_URL niet ingesteld — stel dit in als de
 // ─── Express + HTTP + Socket.IO ──────────────────────────────────────────────
 const app = express();
 const server = http.createServer(app);
-const FRONTEND_URL = process.env.FRONTEND_URL || APP_URL;
+// CORS origin: gebruik env var als die ingesteld is, anders alle origins toestaan
+// (origin: true = reflecteer de request-origin, werkt met credentials: true zonder wildcard)
+const ALLOWED_ORIGINS = [process.env.FRONTEND_URL, APP_URL].filter(Boolean);
+const corsOrigin = ALLOWED_ORIGINS.length > 0 ? ALLOWED_ORIGINS : true;
 
 const io = new Server(server, {
-  cors: { origin: FRONTEND_URL, methods: ['GET', 'POST'], credentials: true },
+  cors: { origin: corsOrigin, methods: ['GET', 'POST'], credentials: true },
 });
 
 // Redis adapter: synchroniseert Socket.IO events tussen meerdere server-instanties
@@ -48,7 +51,7 @@ if (redisPub && redisSub) {
 
 // ─── Express middleware ───────────────────────────────────────────────────────
 app.set('trust proxy', 1);
-app.use(cors({ origin: FRONTEND_URL, credentials: true }));
+app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json());
 app.use(globalLimiter);
 app.use(securityHeaders);
