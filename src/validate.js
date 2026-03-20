@@ -20,8 +20,8 @@ const schemas = {
   }),
   convCreate: z.object({
     members:      z.array(z.string().min(1).max(128)).min(1).max(50),
-    memberNames:  z.record(z.string().max(64)).optional(),
-    memberEmails: z.record(z.string().max(128)).optional(),
+    memberNames:  z.record(z.string(), z.string().max(64)).optional(),
+    memberEmails: z.record(z.string(), z.string().max(128)).optional(),
     isGroup:      z.boolean().optional(),
     groupName:    z.string().max(64).optional(),
   }),
