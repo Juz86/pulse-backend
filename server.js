@@ -29,10 +29,17 @@ if (!APP_URL) console.warn('⚠️ APP_URL niet ingesteld — stel dit in als de
 // ─── Express + HTTP + Socket.IO ──────────────────────────────────────────────
 const app = express();
 const server = http.createServer(app);
-// CORS origin: gebruik env var als die ingesteld is, anders alle origins toestaan
-// (origin: true = reflecteer de request-origin, werkt met credentials: true zonder wildcard)
+// CORS origin: gebruik env var als die ingesteld is, anders alle origins toestaan.
+// origin:true = reflecteer de request-origin; werkt altijd met credentials:true.
+// Primaire beveiliging zit in de Firebase-token verificatie in de Socket.IO middleware.
 const ALLOWED_ORIGINS = [process.env.FRONTEND_URL, APP_URL].filter(Boolean);
-const corsOrigin = ALLOWED_ORIGINS.length > 0 ? ALLOWED_ORIGINS : true;
+const corsOrigin = ALLOWED_ORIGINS.length > 0
+  ? (origin, cb) => {
+      if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      console.warn('CORS geblokkeerd voor origin:', origin);
+      cb(new Error('CORS policy: niet toegestaan'));
+    }
+  : true;
 
 const io = new Server(server, {
   cors: { origin: corsOrigin, methods: ['GET', 'POST'], credentials: true },
