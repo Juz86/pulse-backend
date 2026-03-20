@@ -26,6 +26,8 @@ async function queueMessage(receiverUid, msg) {
   if (!redis) return;
   try {
     const key = `queue:${receiverUid}`;
+    const len = await redis.llen(key);
+    if (len >= 100) return; // max 100 berichten in wachtrij per gebruiker
     await redis.rpush(key, JSON.stringify(msg));
     await redis.expire(key, 7 * 24 * 60 * 60);
   } catch (e) { console.warn('Redis queueMessage mislukt:', e.message); }

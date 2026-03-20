@@ -65,6 +65,8 @@ module.exports = function registerCalls(io, socket, uid) {
         socket.emit('call:busy', { to });
         return;
       }
+      // Voorkom dubbele inkomende oproep notificaties voor hetzelfde gesprek
+      if (pendingCalls[to]) return;
       io.to(targetSocket).emit('call:incoming', { from, offer, isVideo, callerName });
       // Bijhouden dat deze oproep uitstaat (nog niet beantwoord)
       pendingCalls[to] = { from, callerName, isVideo };

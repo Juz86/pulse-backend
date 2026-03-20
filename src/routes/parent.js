@@ -264,8 +264,8 @@ module.exports = (io, onlineUsers) => {
       const contactList = contactsSnap.docs.map(d => ({ uid: d.id, displayName: d.data().displayName, photoURL: d.data().photoURL || null }));
 
       const friendRequests = {
-        sent: friendReqSentSnap.docs.map(d => ({ toName: d.data().toName || d.data().toEmail, status: d.data().status, createdAt: d.data().createdAt || null })),
-        received: friendReqRecvSnap.docs.map(d => ({ fromName: d.data().fromName || d.data().fromEmail, status: d.data().status, createdAt: d.data().createdAt || null })),
+        sent: friendReqSentSnap.docs.map(d => ({ toName: d.data().toName || d.data().toEmail || '', status: d.data().status, createdAt: d.data().createdAt || null })),
+        received: friendReqRecvSnap.docs.map(d => ({ fromName: d.data().fromName || d.data().fromEmail || '', status: d.data().status, createdAt: d.data().createdAt || null })),
       };
 
       const dailyMap = {};
@@ -295,7 +295,7 @@ module.exports = (io, onlineUsers) => {
       const topContactsMap = {};
       let totalMessagesSent = 0, totalCallSecs = 0, totalVideoSecs = 0;
 
-      await Promise.all(convsSnap.docs.slice(0, 20).map(async convDoc => {
+      await Promise.allSettled(convsSnap.docs.slice(0, 20).map(async convDoc => {
         const convData = convDoc.data();
         const otherUid = convData.isGroup ? null : (convData.members || []).find(m => m !== childUid);
         const otherName = otherUid ? (convData.memberNames?.[otherUid] || 'Onbekend') : (convData.name || 'Groep');

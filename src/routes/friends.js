@@ -1,4 +1,4 @@
-const { db } = require('../firebase');
+const { admin, db } = require('../firebase');
 const { verifyAuth, friendReqLimiter } = require('../middleware');
 const { getSocketId } = require('../state');
 
@@ -34,7 +34,7 @@ module.exports = (io, onlineUsers) => {
         batch.set(db.collection('users').doc(fromUid).collection('contacts').doc(toUser.uid), {
           uid: toUser.uid, displayName: toUser.displayName, email: toUser.email,
           photoURL: toUser.photoURL || null, nickname,
-          addedAt: require('firebase-admin').firestore.FieldValue.serverTimestamp(),
+          addedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
         await batch.commit();
         return res.json({ success: true, restored: true, toUid: toUser.uid });
@@ -53,7 +53,7 @@ module.exports = (io, onlineUsers) => {
         fromUid, fromName, fromEmail, fromPhoto: fromPhoto || null,
         toUid: toUser.uid, toName: toUser.displayName, toEmail: toUser.email,
         status: 'pending',
-        createdAt: require('firebase-admin').firestore.FieldValue.serverTimestamp(),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
       // Stuur realtime notificatie naar ontvanger
@@ -72,7 +72,7 @@ module.exports = (io, onlineUsers) => {
         db.collection('parentActivities').add({
           parentId, childUid: fromUid, childName: fromName,
           type: 'friend_request_sent', description,
-          createdAt: require('firebase-admin').firestore.FieldValue.serverTimestamp(),
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
         }).catch(e => console.warn('parentActivities opslaan mislukt (sent):', e.message));
         const parentSocket = getSocketId(parentId);
         if (parentSocket) io.to(parentSocket).emit('parent:activity', { type: 'friend_request_sent', description, childName: fromName });
@@ -139,7 +139,7 @@ module.exports = (io, onlineUsers) => {
         db.collection('parentActivities').add({
           parentId, childUid: toUid, childName: toName,
           type: 'friend_request_accepted', description,
-          createdAt: require('firebase-admin').firestore.FieldValue.serverTimestamp(),
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
         }).catch(e => console.warn('parentActivities opslaan mislukt (accepted):', e.message));
         const parentSocket = getSocketId(parentId);
         if (parentSocket) io.to(parentSocket).emit('parent:activity', { type: 'friend_request_accepted', description, childName: toName });

@@ -221,11 +221,13 @@ module.exports = function registerMessages(io, socket, uid) {
         .get();
 
       if (!snap.empty) {
-        const batch = db.batch();
-        snap.docs.forEach(doc => {
-          if (doc.data().senderId !== uid) batch.update(doc.ref, { status: 'gelezen' });
-        });
-        await batch.commit();
+        const toUpdate = snap.docs.filter(doc => doc.data().senderId !== uid);
+        const CHUNK = 500;
+        for (let i = 0; i < toUpdate.length; i += CHUNK) {
+          const batch = db.batch();
+          toUpdate.slice(i, i + CHUNK).forEach(doc => batch.update(doc.ref, { status: 'gelezen' }));
+          await batch.commit();
+        }
       }
 
       // Notificeer verzenders direct via onlineUsers
