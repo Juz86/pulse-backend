@@ -3,3 +3,4 @@ node_modules/
 *.log
 serviceAccountKey.json
 fly.toml
+.fly/

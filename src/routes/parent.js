@@ -81,10 +81,12 @@ module.exports = (io, onlineUsers) => {
       batch.set(db.collection('users').doc(newUser.uid).collection('contacts').doc(req.uid), {
         uid: req.uid, displayName: parentData.displayName || parentData.email,
         email: parentData.email, photoURL: parentData.photoURL || null, addedAt: new Date().toISOString(),
+        relation: 'familie',
       });
       batch.set(db.collection('users').doc(req.uid).collection('contacts').doc(newUser.uid), {
         uid: newUser.uid, displayName: name.trim(),
         email: internalEmail, photoURL: null, addedAt: new Date().toISOString(),
+        relation: 'familie',
       });
       await batch.commit();
 
@@ -261,7 +263,7 @@ module.exports = (io, onlineUsers) => {
         lastSeen: childData.lastSeen || null,
       };
 
-      const contactList = contactsSnap.docs.map(d => ({ uid: d.id, displayName: d.data().displayName, photoURL: d.data().photoURL || null }));
+      const contactList = contactsSnap.docs.map(d => ({ uid: d.id, displayName: d.data().displayName, photoURL: d.data().photoURL || null, email: d.data().email || null, username: d.data().username || null, relation: d.data().relation || null }));
 
       const friendRequests = {
         sent: friendReqSentSnap.docs.map(d => ({ toName: d.data().toName || d.data().toEmail || '', status: d.data().status, createdAt: d.data().createdAt || null })),
@@ -312,7 +314,10 @@ module.exports = (io, onlineUsers) => {
           } else if (msg.senderId === childUid) { sentMsgs++; totalMessagesSent++; }
         });
         if (sentMsgs > 0 || calls > 0) {
-          if (!topContactsMap[key]) topContactsMap[key] = { uid: otherUid, name: otherName, isGroup: !!convData.isGroup, messagesSent: 0, callCount: 0, videoCalls: 0, totalCallSecs: 0 };
+          if (!topContactsMap[key]) {
+            const contactInfo = contactList.find(cl => cl.uid === otherUid) || {};
+            topContactsMap[key] = { uid: otherUid, name: otherName, email: contactInfo.email || null, isGroup: !!convData.isGroup, messagesSent: 0, callCount: 0, videoCalls: 0, totalCallSecs: 0 };
+          }
           topContactsMap[key].messagesSent += sentMsgs;
           topContactsMap[key].callCount += calls;
           topContactsMap[key].videoCalls += videos;
@@ -323,6 +328,31 @@ module.exports = (io, onlineUsers) => {
       const topContacts = Object.values(topContactsMap)
         .sort((a, b) => (b.messagesSent + b.callCount * 5) - (a.messagesSent + a.callCount * 5))
         .slice(0, 8);
+
+      // Vul ontbrekende e-mailadressen op via users-document
+      const missingEmailUids = topContacts.filter(c => !c.email && !c.isGroup).map(c => c.uid);
+      if (missingEmailUids.length > 0) {
+        const userDocs = await Promise.allSettled(missingEmailUids.map(uid => db.collection('users').doc(uid).get()));
+        userDocs.forEach((result, i) => {
+          if (result.status === 'fulfilled' && result.value.exists) {
+            const tc = topContacts.find(c => c.uid === missingEmailUids[i]);
+            if (tc) tc.email = result.value.data().email || null;
+          }
+        });
+      }
+
+      // Vul ook ontbrekende e-mailadressen in contactList op
+      const missingListUids = contactList.filter(c => !c.email).map(c => c.uid);
+      if (missingListUids.length > 0) {
+        const listDocs = await Promise.allSettled(missingListUids.map(uid => db.collection('users').doc(uid).get()));
+        listDocs.forEach((result, i) => {
+          if (result.status === 'fulfilled' && result.value.exists) {
+            const entry = contactList.find(c => c.uid === missingListUids[i]);
+            if (entry) entry.email = result.value.data().email || null;
+          }
+        });
+      }
+
       const messaging = { totalMessagesSent, totalCallSecs, totalVideoSecs, topContacts };
 
       res.json({ profile, contacts: { total: contactsSnap.size, list: contactList.slice(0, 10) }, friendRequests, sessions, messaging });
