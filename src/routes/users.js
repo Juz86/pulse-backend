@@ -1,5 +1,5 @@
 const { admin, db } = require('../firebase');
-const { verifyAuth, strictLimiter } = require('../middleware');
+const { verifyAuth, strictLimiter, lookupUsernameLimiter } = require('../middleware');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function validEmail(e) { return typeof e === 'string' && EMAIL_REGEX.test(e.trim()); }
@@ -39,7 +39,7 @@ module.exports = (io, onlineUsers) => {
   });
 
   // ─── REST: Gebruikersnaam opzoeken voor login (openbaar — geen auth) ──────────
-  router.get('/api/users/lookup-username', async (req, res) => {
+  router.get('/api/users/lookup-username', lookupUsernameLimiter, async (req, res) => {
     try {
       const { username } = req.query;
       if (!username || typeof username !== 'string') return res.status(400).json({ error: 'Gebruikersnaam verplicht.' });

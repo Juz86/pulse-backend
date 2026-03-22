@@ -16,7 +16,7 @@ const cors = require('cors');
 const { admin, db } = require('./src/firebase');
 const { redisPub, redisSub } = require('./src/redis');
 const { onlineUsers, activeCalls, inactiveUsers, activeSessions } = require('./src/state');
-const { globalLimiter, securityHeaders, makeRateLimiter } = require('./src/middleware');
+const { globalLimiter, securityHeaders, makeRateLimiter, makeSecondLimiter } = require('./src/middleware');
 
 // ─── Route modules ────────────────────────────────────────────────────────────
 const authRouter    = require('./src/routes/auth');
@@ -91,7 +91,7 @@ io.on('connection', (socket) => {
 
   // Rate limiters per event-type (per socket = per gebruiker)
   const limits = {
-    'message:send':           makeRateLimiter(30),
+    'message:send':           makeSecondLimiter(10),
     'message:react':          makeRateLimiter(60),
     'message:edit':           makeRateLimiter(20),
     'typing:start':           makeRateLimiter(60),
