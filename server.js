@@ -1,3 +1,12 @@
+// ─── Sentry (moet als eerste worden geïnitialiseerd) ─────────────────────────
+const Sentry = require('@sentry/node');
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  enabled: process.env.NODE_ENV === 'production',
+  environment: process.env.NODE_ENV || 'development',
+  tracesSampleRate: 0.2,
+});
+
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -204,6 +213,15 @@ setInterval(cleanupOldMessages, 24 * 60 * 60 * 1000);
     console.warn('Online-reset bij start mislukt:', err.message);
   }
 })();
+
+// ─── Sentry error handler (na alle routes) ───────────────────────────────────
+Sentry.setupExpressErrorHandler(app);
+
+// Generieke Express error handler
+app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
+  console.error('[Pulse] Server error:', err.message);
+  res.status(500).json({ error: 'Interne serverfout' });
+});
 
 // ─── Server starten ───────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
