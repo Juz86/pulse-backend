@@ -103,7 +103,7 @@ io.on('connection', (socket) => {
   socket.use(([event, ...args], next) => {
     const check = limits[event];
     if (check && !check()) {
-      console.warn(`⚡ Rate limit: ${uid} → ${event}`);
+      console.warn(`[Pulse] Rate limit: ${uid} → ${event}`);
       const cb = args[args.length - 1];
       if (typeof cb === 'function') cb({ error: 'Te veel verzoeken. Wacht even.' });
       return; // event niet doorlaten
@@ -119,7 +119,7 @@ io.on('connection', (socket) => {
     typingTimers[convId] = setTimeout(() => {
       socket.to(convId).emit('typing:update', { uid, typing: false });
       delete typingTimers[convId];
-    }, 5000);
+    }, 2000);
   });
   socket.on('typing:stop', ({ convId }) => {
     clearTimeout(typingTimers[convId]);

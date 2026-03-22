@@ -1,6 +1,7 @@
 const { admin, db } = require('../firebase');
 const { verifyAuth, friendReqLimiter } = require('../middleware');
 const { getSocketId } = require('../state');
+const { sendPush } = require('../push');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function validEmail(e) { return typeof e === 'string' && EMAIL_REGEX.test(e.trim()); }
@@ -125,10 +126,15 @@ module.exports = (io, onlineUsers) => {
       batch.update(db.collection('friendRequests').doc(requestId), { status: 'accepted' });
       await batch.commit();
 
-      // Notificeer de verzender realtime
+      // Notificeer de verzender realtime, of via push als offline
       const senderSocket = getSocketId(fromUid);
       if (senderSocket) {
         io.to(senderSocket).emit('friend:accepted', { byUid: toUid, byName: toName, byEmail: toEmail });
+      } else {
+        sendPush(fromUid,
+          { title: 'Pulse — Verzoek geaccepteerd', body: `${toName} heeft jouw vriendschapsverzoek geaccepteerd.` },
+          {}
+        ).catch(e => console.warn('[Pulse] Push bij acceptatie mislukt:', e.message));
       }
 
       // Activiteit opslaan + ouder realtime notificeren als kind een verzoek accepteert
