@@ -2,7 +2,25 @@ const { admin, db } = require('../firebase');
 const { verifyAuth, strictLimiter, lookupUsernameLimiter } = require('../middleware');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
 function validEmail(e) { return typeof e === 'string' && EMAIL_REGEX.test(e.trim()); }
+function normalizeIdentifier(value) { return typeof value === 'string' ? value.trim().toLowerCase() : ''; }
+async function findUserByIdentifier(identifier) {
+  const clean = normalizeIdentifier(identifier);
+  if (!clean) return null;
+
+  if (validEmail(clean)) {
+    const emailSnap = await db.collection('users').where('email', '==', clean).limit(1).get();
+    if (!emailSnap.empty) return emailSnap.docs[0].data();
+  }
+
+  if (USERNAME_REGEX.test(clean)) {
+    const usernameSnap = await db.collection('users').where('username', '==', clean).limit(1).get();
+    if (!usernameSnap.empty) return usernameSnap.docs[0].data();
+  }
+
+  return null;
+}
 
 module.exports = (io, onlineUsers) => {
   const router = require('express').Router();
@@ -51,17 +69,19 @@ module.exports = (io, onlineUsers) => {
     } catch (err) { res.status(500).json({ error: 'Serverfout' }); }
   });
 
-  // ─── REST: Gebruiker zoeken op email ─────────────────────────────────────────
+  // ─── REST: Gebruiker zoeken op e-mailadres, pulse.internal of gebruikersnaam ──
   router.get('/api/users/search', verifyAuth, async (req, res) => {
     try {
-      const { email } = req.query;
-      if (!validEmail(email)) return res.status(400).json({ error: 'Ongeldig e-mailadres.' });
+      const query = normalizeIdentifier(req.query.q || req.query.email || '');
+      if (!query) return res.status(400).json({ error: 'Voer een e-mailadres of gebruikersnaam in.' });
+      if (!validEmail(query) && !USERNAME_REGEX.test(query)) {
+        return res.status(400).json({ error: 'Zoek op een geldig e-mailadres of gebruikersnaam.' });
+      }
 
-      const snap = await db.collection('users').where('email', '==', email).limit(1).get();
-      if (snap.empty) return res.status(404).json({ error: 'Gebruiker niet gevonden' });
+      const user = await findUserByIdentifier(query);
+      if (!user) return res.status(404).json({ error: 'Gebruiker niet gevonden' });
 
-      const user = snap.docs[0].data();
-      res.json({ uid: user.uid, displayName: user.displayName, email: user.email, photoURL: user.photoURL });
+      res.json({ uid: user.uid, displayName: user.displayName, email: user.email, photoURL: user.photoURL, username: user.username || null });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Serverfout' });

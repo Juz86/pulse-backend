@@ -34,8 +34,8 @@ module.exports = (io, onlineUsers) => {
       if (!password || password.length < 6) return res.status(400).json({ error: 'Wachtwoord moet minimaal 6 tekens zijn.' });
 
       const cleanUsername = username.trim().toLowerCase();
-      if (!/^[a-z0-9_]{2,30}$/.test(cleanUsername)) {
-        return res.status(400).json({ error: 'Gebruikersnaam mag alleen letters, cijfers en _ bevatten (2-30 tekens).' });
+      if (!/^[a-z0-9_]{3,20}$/.test(cleanUsername)) {
+        return res.status(400).json({ error: 'Gebruikersnaam mag alleen letters, cijfers en _ bevatten (3-20 tekens).' });
       }
 
       // Controleer of gebruikersnaam al in gebruik is
@@ -111,6 +111,56 @@ module.exports = (io, onlineUsers) => {
       await admin.auth().updateUser(childUid, { password });
       res.json({ success: true });
     } catch (err) { console.error('change-child-password fout:', err); res.status(500).json({ error: 'Serverfout' }); }
+  });
+
+  // POST /api/parent/change-child-username/:childUid — ouder wijzigt gebruikersnaam van kind
+  router.post('/api/parent/change-child-username/:childUid', verifyAuth, async (req, res) => {
+    try {
+      const { childUid } = req.params;
+      const { username } = req.body;
+      if (!username || typeof username !== 'string') return res.status(400).json({ error: 'Gebruikersnaam is verplicht.' });
+
+      const childRef = db.collection('users').doc(childUid);
+      const childDoc = await childRef.get();
+      if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
+      const childData = childDoc.data();
+      if (childData.role !== 'child') return res.status(403).json({ error: 'Alleen kindaccounts worden ondersteund.' });
+      if (childData.parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+
+      const cleanUsername = username.trim().toLowerCase();
+      if (!/^[a-z0-9_]{3,20}$/.test(cleanUsername)) {
+        return res.status(400).json({ error: 'Gebruikersnaam mag alleen letters, cijfers en _ bevatten (3-20 tekens).' });
+      }
+      if (cleanUsername === (childData.username || '').trim().toLowerCase()) {
+        return res.json({ success: true, username: cleanUsername, email: childData.email || `${cleanUsername}@pulse.internal` });
+      }
+
+      const existing = await db.collection('users').where('username', '==', cleanUsername).limit(1).get();
+      if (!existing.empty && existing.docs[0].id !== childUid) {
+        return res.status(400).json({ error: 'Deze gebruikersnaam is al in gebruik.' });
+      }
+
+      const internalEmail = `${cleanUsername}@pulse.internal`;
+      await admin.auth().updateUser(childUid, { email: internalEmail });
+      await childRef.update({ username: cleanUsername, email: internalEmail });
+
+      const batch = db.batch();
+      batch.update(db.collection('users').doc(req.uid).collection('contacts').doc(childUid), { username: cleanUsername, email: internalEmail });
+
+      const contactRefs = await db.collectionGroup('contacts').where('uid', '==', childUid).get();
+      contactRefs.docs.forEach((docSnap) => {
+        if (docSnap.ref.path !== `users/${req.uid}/contacts/${childUid}`) {
+          batch.update(docSnap.ref, { username: cleanUsername, email: internalEmail });
+        }
+      });
+      await batch.commit();
+
+      res.json({ success: true, username: cleanUsername, email: internalEmail });
+    } catch (err) {
+      console.error('change-child-username fout:', err);
+      if (err.code === 'auth/email-already-exists') return res.status(400).json({ error: 'Deze gebruikersnaam is al in gebruik.' });
+      res.status(500).json({ error: 'Serverfout' });
+    }
   });
 
   // DELETE /api/parent/delete-child/:childUid — ouder verwijdert kindaccount

@@ -4,7 +4,25 @@ const { getSocketId } = require('../state');
 const { sendPush } = require('../push');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
 function validEmail(e) { return typeof e === 'string' && EMAIL_REGEX.test(e.trim()); }
+function normalizeIdentifier(value) { return typeof value === 'string' ? value.trim().toLowerCase() : ''; }
+async function findUserByIdentifier(identifier) {
+  const clean = normalizeIdentifier(identifier);
+  if (!clean) return null;
+
+  if (validEmail(clean)) {
+    const emailSnap = await db.collection('users').where('email', '==', clean).limit(1).get();
+    if (!emailSnap.empty) return emailSnap.docs[0].data();
+  }
+
+  if (USERNAME_REGEX.test(clean)) {
+    const usernameSnap = await db.collection('users').where('username', '==', clean).limit(1).get();
+    if (!usernameSnap.empty) return usernameSnap.docs[0].data();
+  }
+
+  return null;
+}
 
 module.exports = (io, onlineUsers) => {
   const router = require('express').Router();
@@ -12,14 +30,18 @@ module.exports = (io, onlineUsers) => {
   // ─── REST: Vriendschapsverzoek sturen ────────────────────────────────────────
   router.post('/api/friend-requests', verifyAuth, friendReqLimiter, async (req, res) => {
     try {
-      const { fromUid, fromName, fromEmail, fromPhoto, toEmail } = req.body;
-      if (!fromUid || !validEmail(toEmail)) return res.status(400).json({ error: 'fromUid en geldig toEmail zijn verplicht' });
+      const { fromUid, fromName, fromEmail, fromPhoto, toEmail, toIdentifier } = req.body;
+      const identifier = normalizeIdentifier(toIdentifier || toEmail || '');
+      if (!fromUid || !identifier) {
+        return res.status(400).json({ error: 'fromUid en een e-mailadres of gebruikersnaam zijn verplicht' });
+      }
+      if (!validEmail(identifier) && !USERNAME_REGEX.test(identifier)) {
+        return res.status(400).json({ error: 'Gebruik een geldig e-mailadres of gebruikersnaam.' });
+      }
       if (req.uid !== fromUid) return res.status(403).json({ error: 'Geen toegang.' });
 
-      // Zoek de ontvanger op email
-      const snap = await db.collection('users').where('email', '==', toEmail).limit(1).get();
-      if (snap.empty) return res.status(404).json({ error: 'Gebruiker niet gevonden' });
-      const toUser = snap.docs[0].data();
+      const toUser = await findUserByIdentifier(identifier);
+      if (!toUser) return res.status(404).json({ error: 'Gebruiker niet gevonden' });
 
       if (toUser.uid === fromUid) return res.status(400).json({ error: 'Je kunt jezelf niet toevoegen' });
 
@@ -69,7 +91,7 @@ module.exports = (io, onlineUsers) => {
       db.collection('users').doc(fromUid).get().then(senderDoc => {
         const parentId = senderDoc.data()?.parentId;
         if (!parentId) return;
-        const description = `${fromName} heeft een vriendschapsverzoek verstuurd naar ${toUser.displayName || toEmail}.`;
+        const description = `${fromName} heeft een vriendschapsverzoek verstuurd naar ${toUser.displayName || toUser.email || identifier}.`;
         db.collection('parentActivities').add({
           parentId, childUid: fromUid, childName: fromName,
           type: 'friend_request_sent', description,
