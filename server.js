@@ -14,7 +14,7 @@ const cors = require('cors');
 
 // ─── Core modules ─────────────────────────────────────────────────────────────
 const { admin, db } = require('./src/firebase');
-const { redisPub, redisSub } = require('./src/redis');
+const { redisPub, redisSub, checkRateLimit } = require('./src/redis');
 const { onlineUsers, activeCalls, inactiveUsers, activeSessions } = require('./src/state');
 const { globalLimiter, securityHeaders, makeRateLimiter, makeSecondLimiter } = require('./src/middleware');
 
@@ -38,9 +38,18 @@ if (!APP_URL) console.warn('⚠️ APP_URL niet ingesteld — stel dit in als de
 // ─── Express + HTTP + Socket.IO ──────────────────────────────────────────────
 const app = express();
 const server = http.createServer(app);
-// CORS: reflecteer altijd de request-origin (origin:true).
-// Primaire beveiliging = Firebase-token verificatie in de Socket.IO auth middleware.
-const corsOrigin = true;
+
+// CORS: sta alleen bekende origins toe. Primaire beveiliging = Firebase-token
+// verificatie in de Socket.IO auth middleware.
+const allowedOrigins = APP_URL
+  ? [...APP_URL.split(',').map(s => s.trim()), 'http://localhost:3000', 'http://localhost:3001']
+  : null;
+const corsOrigin = allowedOrigins
+  ? (origin, cb) => {
+      if (!origin || allowedOrigins.includes(origin)) cb(null, true);
+      else cb(new Error('CORS: origin niet toegestaan'));
+    }
+  : true; // fallback voor development zonder APP_URL
 
 const io = new Server(server, {
   cors: { origin: corsOrigin, methods: ['GET', 'POST'], credentials: true },
@@ -89,24 +98,38 @@ io.on('connection', (socket) => {
   const uid = socket.userId;
   console.log('🔌 Verbonden:', socket.id, uid);
 
-  // Rate limiters per event-type (per socket = per gebruiker)
+  // In-memory limiters per socket (eerste verdedigingslinie, altijd actief)
   const limits = {
     'message:send':           makeSecondLimiter(10),
     'message:react':          makeRateLimiter(60),
     'message:edit':           makeRateLimiter(20),
     'typing:start':           makeRateLimiter(60),
-    'call:offer':             makeRateLimiter(10),
-    'conversation:create':    makeRateLimiter(10),
+    'call:offer':             makeRateLimiter(15, 60 * 60 * 1000), // 15 per uur
+    'conversation:create':    makeRateLimiter(10, 60 * 60 * 1000), // 10 per uur
     'conversation:addMember': makeRateLimiter(20),
   };
-  // Middleware: controleer voor elk inkomend event
-  socket.use(([event, ...args], next) => {
+  // Redis-limieten voor cross-instance bescherming (tweede verdedigingslinie)
+  const redisLimits = {
+    'call:offer':          { max: 15, windowMs: 60 * 60 * 1000 },
+    'conversation:create': { max: 10, windowMs: 60 * 60 * 1000 },
+    'message:send':        { max: 600, windowMs: 60 * 1000 },
+  };
+  // Middleware: in-memory check synchroon, Redis check asynchroon
+  socket.use(async ([event, ...args], next) => {
+    const cb = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+    // In-memory check
     const check = limits[event];
     if (check && !check()) {
-      console.warn(`[Pulse] Rate limit: ${uid} → ${event}`);
-      const cb = args[args.length - 1];
-      if (typeof cb === 'function') cb({ error: 'Te veel verzoeken. Wacht even.' });
-      return; // event niet doorlaten
+      console.warn(`[Pulse] Rate limit (lokaal): ${uid} → ${event}`);
+      if (cb) cb({ error: 'Te veel verzoeken. Wacht even.' });
+      return;
+    }
+    // Redis cross-instance check
+    const rDef = redisLimits[event];
+    if (rDef && !(await checkRateLimit(uid, event, rDef.max, rDef.windowMs))) {
+      console.warn(`[Pulse] Rate limit (Redis): ${uid} → ${event}`);
+      if (cb) cb({ error: 'Te veel verzoeken. Wacht even.' });
+      return;
     }
     next();
   });

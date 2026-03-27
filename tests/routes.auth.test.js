@@ -33,6 +33,8 @@ jest.mock('nodemailer', () => ({
 jest.mock('../src/redis', () => ({
   redisPub: null, redisSub: null,
   queueMessage: jest.fn(), flushQueue: jest.fn().mockResolvedValue([]),
+  getRedis: () => null,
+  checkRateLimit: jest.fn().mockResolvedValue(true),
 }));
 
 // ── Setup ────────────────────────────────────────────────────────────────────

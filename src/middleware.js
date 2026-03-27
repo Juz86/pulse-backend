@@ -28,13 +28,13 @@ async function verifyAuth(req, res, next) {
   }
 }
 
-function makeRateLimiter(maxPerMinute) {
+function makeRateLimiter(maxPerWindow, windowMs = 60_000) {
   let count = 0;
-  let resetAt = Date.now() + 60_000;
+  let resetAt = Date.now() + windowMs;
   return () => {
     const now = Date.now();
-    if (now > resetAt) { count = 0; resetAt = now + 60_000; }
-    if (count >= maxPerMinute) return false;
+    if (now > resetAt) { count = 0; resetAt = now + windowMs; }
+    if (count >= maxPerWindow) return false;
     count++;
     return true;
   };

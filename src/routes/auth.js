@@ -2,7 +2,7 @@ const router = require('express').Router();
 const crypto = require('crypto');
 const { admin } = require('../firebase');
 const { sendCodeLimiter, strictLimiter } = require('../middleware');
-const { transporter, otpStore } = require('../email');
+const { transporter, otpSet, otpGet, otpDel } = require('../email');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function validEmail(e) { return typeof e === 'string' && EMAIL_REGEX.test(e.trim()); }
@@ -13,7 +13,7 @@ router.post('/api/send-code', sendCodeLimiter, async (req, res) => {
   if (!validEmail(email)) return res.status(400).json({ error: 'Ongeldig e-mailadres.' });
 
   const code = crypto.randomInt(100000, 1000000).toString();
-  otpStore.set(email, { code, expiresAt: Date.now() + 15 * 60 * 1000 });
+  await otpSet(email, code, Date.now() + 15 * 60 * 1000);
 
   try {
     await transporter.sendMail({
@@ -34,21 +34,22 @@ router.post('/api/send-code', sendCodeLimiter, async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('E-mail fout:', err);
+    await otpDel(email); // code opruimen — gebruiker heeft hem niet ontvangen
     res.status(500).json({ error: 'E-mail versturen mislukt.' });
   }
 });
 
 // ─── OTP: Verifieer code ─────────────────────────────────────────────────────
-router.post('/api/verify-code', strictLimiter, (req, res) => {
+router.post('/api/verify-code', strictLimiter, async (req, res) => {
   const { email, code } = req.body;
-  const entry = otpStore.get(email);
-  if (!entry)                    return res.status(400).json({ error: 'Geen code gevonden. Vraag een nieuwe aan.' });
-  if (Date.now() > entry.expiresAt) { otpStore.delete(email); return res.status(400).json({ error: 'Code verlopen.' }); }
+  const entry = await otpGet(email);
+  if (!entry)                       return res.status(400).json({ error: 'Geen code gevonden. Vraag een nieuwe aan.' });
+  if (Date.now() > entry.expiresAt) { await otpDel(email); return res.status(400).json({ error: 'Code verlopen.' }); }
   const a = Buffer.from(String(entry.code));
   const b = Buffer.from(String(code));
   const mismatch = a.length !== b.length || !crypto.timingSafeEqual(a, b);
-  if (mismatch)                  return res.status(400).json({ error: 'Verkeerde code.' });
-  otpStore.delete(email);
+  if (mismatch)                     return res.status(400).json({ error: 'Verkeerde code.' });
+  await otpDel(email);
   res.json({ ok: true });
 });
 
@@ -58,7 +59,7 @@ router.post('/api/send-reset', sendCodeLimiter, async (req, res) => {
   if (!validEmail(email)) return res.status(400).json({ error: 'Ongeldig e-mailadres.' });
   try {
     const resetLink = await admin.auth().generatePasswordResetLink(email, {
-      url: actionUrl || 'http://localhost:3000',
+      url: actionUrl || process.env.APP_URL || 'http://localhost:3000',
     });
     await transporter.sendMail({
       from: `"Pulse" <${process.env.EMAIL_USER}>`,
