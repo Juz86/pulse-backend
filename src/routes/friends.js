@@ -45,6 +45,13 @@ module.exports = (io, onlineUsers) => {
 
       if (toUser.uid === fromUid) return res.status(400).json({ error: 'Je kunt jezelf niet toevoegen' });
 
+      // Check of contact verwijderd is door ouder
+      const senderDoc = await db.collection('users').doc(fromUid).get();
+      const removedByParent = senderDoc.data()?.removedByParent || [];
+      if (removedByParent.includes(toUser.uid)) {
+        return res.status(403).json({ error: 'Dit contact kan niet worden toegevoegd.' });
+      }
+
       // Check of ze al contacten zijn
       const alreadyA = await db.collection('users').doc(fromUid).collection('contacts').doc(toUser.uid).get();
       if (alreadyA.exists) return res.status(400).json({ error: 'Al in contactenlijst' });

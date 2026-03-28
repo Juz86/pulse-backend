@@ -370,6 +370,13 @@ module.exports = (io, onlineUsers) => {
       if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
       if (!targetUid || typeof targetUid !== 'string') return res.status(400).json({ error: 'targetUid is verplicht.' });
 
+      // Weiger als contact geblokkeerd is door ouder
+      const preCheckDoc = await db.collection('users').doc(uid).get();
+      const blockedByParent = preCheckDoc.data()?.blockedByParent || [];
+      if (blockedByParent.includes(targetUid)) {
+        return res.status(403).json({ error: 'Dit contact is geblokkeerd door je ouder en kan niet worden gedeblokkeerd.' });
+      }
+
       await db.collection('users').doc(uid).update({
         blockedUsers: admin.firestore.FieldValue.arrayRemove(targetUid),
       });
@@ -412,13 +419,14 @@ module.exports = (io, onlineUsers) => {
       const { uid } = req.params;
       if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
       const userDoc = await db.collection('users').doc(uid).get();
-      const blockedUids = userDoc.exists ? (userDoc.data().blockedUsers || []) : [];
-      if (blockedUids.length === 0) return res.json([]);
+      const blockedUids        = userDoc.exists ? (userDoc.data().blockedUsers    || []) : [];
+      const parentBlockedUids  = userDoc.exists ? (userDoc.data().blockedByParent || []) : [];
+      if (blockedUids.length === 0) return res.json({ contacts: [], parentBlockedUids });
       const docs = await Promise.all(blockedUids.map(bUid => db.collection('users').doc(bUid).get()));
-      const blocked = docs
+      const contacts = docs
         .filter(d => d.exists)
-        .map(d => ({ uid: d.id, displayName: d.data().displayName, email: d.data().email, photoURL: d.data().photoURL || null }));
-      res.json(blocked);
+        .map(d => ({ uid: d.id, displayName: d.data().displayName, email: d.data().email, photoURL: d.data().photoURL || null, isBlockedByParent: parentBlockedUids.includes(d.id) }));
+      res.json({ contacts, parentBlockedUids });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Serverfout' });

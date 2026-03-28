@@ -409,5 +409,169 @@ module.exports = (io, onlineUsers) => {
     } catch (err) { console.error('Analytics error:', err); res.status(500).json({ error: 'Serverfout' }); }
   });
 
+  // GET /api/parent/child/:childUid/contacts — contacten van kind ophalen
+  router.get('/api/parent/child/:childUid/contacts', verifyAuth, async (req, res) => {
+    try {
+      const callerDoc = await db.collection('users').doc(req.uid).get();
+      if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
+      const { childUid } = req.params;
+      const childDoc = await db.collection('users').doc(childUid).get();
+      if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
+      if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+
+      const childData = childDoc.data();
+      const blockedByParent = childData.blockedByParent || [];
+      const blockedUsers    = childData.blockedUsers    || [];
+
+      const contactsSnap = await db.collection('users').doc(childUid).collection('contacts').get();
+      const contacts = contactsSnap.docs.map(d => ({
+        uid: d.id,
+        displayName:      d.data().displayName,
+        email:            d.data().email,
+        photoURL:         d.data().photoURL || null,
+        username:         d.data().username || null,
+        isBlocked:        blockedUsers.includes(d.id),
+        isBlockedByParent: blockedByParent.includes(d.id),
+      }));
+      res.json(contacts);
+    } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
+  });
+
+  // POST /api/parent/child/:childUid/block-contact — ouder blokkeert contact van kind
+  router.post('/api/parent/child/:childUid/block-contact', verifyAuth, async (req, res) => {
+    try {
+      const callerDoc = await db.collection('users').doc(req.uid).get();
+      if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
+      const { childUid } = req.params;
+      const { targetUid } = req.body;
+      if (!targetUid || typeof targetUid !== 'string') return res.status(400).json({ error: 'targetUid is verplicht.' });
+
+      const [childDoc, targetDoc] = await Promise.all([
+        db.collection('users').doc(childUid).get(),
+        db.collection('users').doc(targetUid).get(),
+      ]);
+      if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
+      if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+
+      const targetName = targetDoc.exists ? (targetDoc.data().displayName || targetUid) : targetUid;
+      const childName  = childDoc.data().displayName || childUid;
+
+      await db.collection('users').doc(childUid).update({
+        blockedByParent: admin.firestore.FieldValue.arrayUnion(targetUid),
+        blockedUsers:    admin.firestore.FieldValue.arrayUnion(targetUid),
+      });
+
+      // Real-time naar kind
+      const childSockets = onlineUsers[childUid];
+      if (childSockets) childSockets.forEach(sid => io.to(sid).emit('contact:blocked-by-parent', { targetUid, targetName }));
+
+      // Push naar kind
+      sendPush(childUid,
+        { title: 'Pulse', body: `Je ouder heeft ${targetName} geblokkeerd.` },
+        { type: 'blocked_by_parent' }
+      ).catch(() => {});
+
+      // Log parentActivities
+      db.collection('parentActivities').add({
+        parentId: req.uid, childUid, childName, targetName,
+        type: 'parent_blocked_contact',
+        description: `Ouder heeft ${targetName} geblokkeerd voor ${childName}.`,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      }).catch(() => {});
+
+      res.json({ success: true });
+    } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
+  });
+
+  // POST /api/parent/child/:childUid/unblock-contact — ouder deblokkeer contact van kind
+  router.post('/api/parent/child/:childUid/unblock-contact', verifyAuth, async (req, res) => {
+    try {
+      const callerDoc = await db.collection('users').doc(req.uid).get();
+      if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
+      const { childUid } = req.params;
+      const { targetUid } = req.body;
+      if (!targetUid || typeof targetUid !== 'string') return res.status(400).json({ error: 'targetUid is verplicht.' });
+
+      const [childDoc, targetDoc] = await Promise.all([
+        db.collection('users').doc(childUid).get(),
+        db.collection('users').doc(targetUid).get(),
+      ]);
+      if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
+      if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+
+      const targetName = targetDoc.exists ? (targetDoc.data().displayName || targetUid) : targetUid;
+      const childName  = childDoc.data().displayName || childUid;
+
+      await db.collection('users').doc(childUid).update({
+        blockedByParent: admin.firestore.FieldValue.arrayRemove(targetUid),
+        blockedUsers:    admin.firestore.FieldValue.arrayRemove(targetUid),
+      });
+
+      // Real-time naar kind
+      const childSockets = onlineUsers[childUid];
+      if (childSockets) childSockets.forEach(sid => io.to(sid).emit('contact:unblocked-by-parent', { targetUid, targetName }));
+
+      db.collection('parentActivities').add({
+        parentId: req.uid, childUid, childName, targetName,
+        type: 'parent_unblocked_contact',
+        description: `Ouder heeft ${targetName} gedeblokkeerd voor ${childName}.`,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      }).catch(() => {});
+
+      res.json({ success: true });
+    } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
+  });
+
+  // POST /api/parent/child/:childUid/remove-contact — ouder verwijdert contact van kind
+  router.post('/api/parent/child/:childUid/remove-contact', verifyAuth, async (req, res) => {
+    try {
+      const callerDoc = await db.collection('users').doc(req.uid).get();
+      if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
+      const { childUid } = req.params;
+      const { targetUid } = req.body;
+      if (!targetUid || typeof targetUid !== 'string') return res.status(400).json({ error: 'targetUid is verplicht.' });
+
+      const [childDoc, targetDoc] = await Promise.all([
+        db.collection('users').doc(childUid).get(),
+        db.collection('users').doc(targetUid).get(),
+      ]);
+      if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
+      if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+
+      const targetName = targetDoc.exists ? (targetDoc.data().displayName || targetUid) : targetUid;
+      const childName  = childDoc.data().displayName || childUid;
+
+      // Verwijder wederzijds contact
+      const batch = db.batch();
+      batch.delete(db.collection('users').doc(childUid).collection('contacts').doc(targetUid));
+      batch.delete(db.collection('users').doc(targetUid).collection('contacts').doc(childUid));
+      await batch.commit();
+
+      // Voeg toe aan removedByParent zodat kind niet opnieuw kan toevoegen
+      await db.collection('users').doc(childUid).update({
+        removedByParent: admin.firestore.FieldValue.arrayUnion(targetUid),
+      });
+
+      // Real-time naar kind
+      const childSockets = onlineUsers[childUid];
+      if (childSockets) childSockets.forEach(sid => io.to(sid).emit('contact:removed-by-parent', { targetUid, targetName }));
+
+      // Push naar kind
+      sendPush(childUid,
+        { title: 'Pulse', body: `Je ouder heeft ${targetName} verwijderd uit je contacten.` },
+        { type: 'removed_by_parent' }
+      ).catch(() => {});
+
+      db.collection('parentActivities').add({
+        parentId: req.uid, childUid, childName, targetName,
+        type: 'parent_removed_contact',
+        description: `Ouder heeft ${targetName} verwijderd uit contacten van ${childName}.`,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      }).catch(() => {});
+
+      res.json({ success: true });
+    } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
+  });
+
   return router;
 };
