@@ -34,6 +34,28 @@ module.exports = function registerMessages(io, socket, uid) {
         if (typeof callback === 'function') callback({ error: 'Geen toegang tot dit gesprek.' });
         return;
       }
+
+      // Blokkeer check (alleen 1-op-1 gesprekken)
+      const convDataCheck = convMemberDoc.data();
+      if (!convDataCheck.isGroup) {
+        const otherUid = (convDataCheck.members || []).find(m => m !== uid);
+        if (otherUid) {
+          const senderBlocked = senderData.blockedUsers || [];
+          if (senderBlocked.includes(otherUid)) {
+            // Afzender heeft de ander geblokkeerd — stille drop
+            if (typeof callback === 'function') callback({ id: 'dropped_' + Date.now(), ...message, senderId: socket.userId, status: 'verstuurd' });
+            return;
+          }
+          const otherDoc = await db.collection('users').doc(otherUid).get();
+          const otherBlocked = otherDoc.data()?.blockedUsers || [];
+          if (otherBlocked.includes(uid)) {
+            // Ontvanger heeft de afzender geblokkeerd — stille drop (afzender weet het niet)
+            if (typeof callback === 'function') callback({ id: 'dropped_' + Date.now(), ...message, senderId: socket.userId, status: 'verstuurd' });
+            return;
+          }
+        }
+      }
+
       const verifiedMessage = { ...message, senderId: socket.userId };
       const lastMessage = verifiedMessage.type === 'contact'
         ? `Contactpersoon: ${verifiedMessage.sharedContact?.name || ''}`

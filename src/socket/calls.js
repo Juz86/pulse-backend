@@ -58,6 +58,18 @@ module.exports = function registerCalls(io, socket, uid) {
 
   // ── WebRTC Signaling: Bellen ──
   socket.on('call:offer', async ({ to, from, offer, isVideo, callerName }) => {
+    // Blokkeer check
+    const [callerDoc, targetCallDoc] = await Promise.all([
+      db.collection('users').doc(uid).get(),
+      db.collection('users').doc(to).get(),
+    ]);
+    const targetBlocked = targetCallDoc.data()?.blockedUsers || [];
+    const callerBlocked = callerDoc.data()?.blockedUsers || [];
+    if (targetBlocked.includes(uid) || callerBlocked.includes(to)) {
+      socket.emit('call:unavailable', { to });
+      return;
+    }
+
     const targetSocket = getSocketId(to);
     if (targetSocket) {
       // Controleer of ontvanger al in een actief gesprek zit

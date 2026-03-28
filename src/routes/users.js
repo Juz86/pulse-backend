@@ -1,5 +1,7 @@
 const { admin, db } = require('../firebase');
 const { verifyAuth, strictLimiter, lookupUsernameLimiter } = require('../middleware');
+const { getSocketId } = require('../state');
+const { sendPush } = require('../push');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
@@ -309,6 +311,110 @@ module.exports = (io, onlineUsers) => {
       if (!photoURL || typeof photoURL !== 'string') return res.status(400).json({ error: 'photoURL is verplicht.' });
       await db.collection('users').doc(uid).update({ photoURL });
       res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
+  // ─── REST: Contact blokkeren ──────────────────────────────────────────────────
+  router.post('/api/users/:uid/block', verifyAuth, strictLimiter, async (req, res) => {
+    try {
+      const { uid } = req.params;
+      const { targetUid } = req.body;
+      if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (!targetUid || typeof targetUid !== 'string') return res.status(400).json({ error: 'targetUid is verplicht.' });
+      if (targetUid === uid) return res.status(400).json({ error: 'Je kunt jezelf niet blokkeren.' });
+
+      await db.collection('users').doc(uid).update({
+        blockedUsers: admin.firestore.FieldValue.arrayUnion(targetUid),
+      });
+
+      // Parent notificatie
+      const [userDoc, targetDoc] = await Promise.all([
+        db.collection('users').doc(uid).get(),
+        db.collection('users').doc(targetUid).get(),
+      ]);
+      const userData = userDoc.data() || {};
+      const targetName = targetDoc.exists ? (targetDoc.data().displayName || targetUid) : targetUid;
+      const parentId = userData.parentId;
+      const childName = userData.displayName || uid;
+
+      if (parentId) {
+        const description = `${childName} heeft ${targetName} geblokkeerd.`;
+        db.collection('parentActivities').add({
+          parentId, childUid: uid, childName,
+          type: 'contact_blocked', description, targetName,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        }).catch(() => {});
+        const parentSocket = getSocketId(parentId);
+        if (parentSocket) io.to(parentSocket).emit('parent:activity', { type: 'contact_blocked', description, childName });
+        sendPush(parentId,
+          { title: `${childName} heeft een contact geblokkeerd`, body: description },
+          { type: 'contact_blocked' }
+        ).catch(() => {});
+      }
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
+  // ─── REST: Contact deblokkeren ────────────────────────────────────────────────
+  router.post('/api/users/:uid/unblock', verifyAuth, strictLimiter, async (req, res) => {
+    try {
+      const { uid } = req.params;
+      const { targetUid } = req.body;
+      if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (!targetUid || typeof targetUid !== 'string') return res.status(400).json({ error: 'targetUid is verplicht.' });
+
+      await db.collection('users').doc(uid).update({
+        blockedUsers: admin.firestore.FieldValue.arrayRemove(targetUid),
+      });
+
+      // Parent notificatie
+      const [userDoc, targetDoc] = await Promise.all([
+        db.collection('users').doc(uid).get(),
+        db.collection('users').doc(targetUid).get(),
+      ]);
+      const userData = userDoc.data() || {};
+      const targetName = targetDoc.exists ? (targetDoc.data().displayName || targetUid) : targetUid;
+      const parentId = userData.parentId;
+      const childName = userData.displayName || uid;
+
+      if (parentId) {
+        const description = `${childName} heeft ${targetName} gedeblokkeerd.`;
+        db.collection('parentActivities').add({
+          parentId, childUid: uid, childName,
+          type: 'contact_unblocked', description, targetName,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        }).catch(() => {});
+        const parentSocket = getSocketId(parentId);
+        if (parentSocket) io.to(parentSocket).emit('parent:activity', { type: 'contact_unblocked', description, childName });
+      }
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
+  // ─── REST: Geblokkeerde contacten ophalen ──────────────────────────────────────
+  router.get('/api/users/:uid/blocked', verifyAuth, async (req, res) => {
+    try {
+      const { uid } = req.params;
+      if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
+      const userDoc = await db.collection('users').doc(uid).get();
+      const blockedUids = userDoc.exists ? (userDoc.data().blockedUsers || []) : [];
+      if (blockedUids.length === 0) return res.json([]);
+      const docs = await Promise.all(blockedUids.map(bUid => db.collection('users').doc(bUid).get()));
+      const blocked = docs
+        .filter(d => d.exists)
+        .map(d => ({ uid: d.id, displayName: d.data().displayName, email: d.data().email, photoURL: d.data().photoURL || null }));
+      res.json(blocked);
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Serverfout' });
