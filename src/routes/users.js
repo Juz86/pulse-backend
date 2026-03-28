@@ -350,7 +350,7 @@ module.exports = (io, onlineUsers) => {
         const parentSocket = getSocketId(parentId);
         if (parentSocket) io.to(parentSocket).emit('parent:activity', { type: 'contact_blocked', description, childName });
         sendPush(parentId,
-          { title: `${childName} heeft een contact geblokkeerd`, body: description },
+          { title: 'Pulse — Contact geblokkeerd', body: description },
           { type: 'contact_blocked' }
         ).catch(() => {});
       }
@@ -393,6 +393,10 @@ module.exports = (io, onlineUsers) => {
         }).catch(() => {});
         const parentSocket = getSocketId(parentId);
         if (parentSocket) io.to(parentSocket).emit('parent:activity', { type: 'contact_unblocked', description, childName });
+        sendPush(parentId,
+          { title: 'Pulse — Contact gedeblokkeerd', body: description },
+          { type: 'contact_unblocked' }
+        ).catch(() => {});
       }
 
       res.json({ success: true });
