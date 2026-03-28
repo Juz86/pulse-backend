@@ -45,11 +45,19 @@ module.exports = (io, onlineUsers) => {
 
       if (toUser.uid === fromUid) return res.status(400).json({ error: 'Je kunt jezelf niet toevoegen' });
 
-      // Check of contact verwijderd is door ouder
-      const senderDoc = await db.collection('users').doc(fromUid).get();
-      const removedByParent = senderDoc.data()?.removedByParent || [];
-      if (removedByParent.includes(toUser.uid)) {
+      // Check of contact verwijderd/geblokkeerd is door ouder (zowel bij verzender als ontvanger)
+      const [senderDoc, recipientDoc] = await Promise.all([
+        db.collection('users').doc(fromUid).get(),
+        db.collection('users').doc(toUser.uid).get(),
+      ]);
+      const senderRemovedByParent = senderDoc.data()?.removedByParent || [];
+      if (senderRemovedByParent.includes(toUser.uid)) {
         return res.status(403).json({ error: 'Dit contact kan niet worden toegevoegd.' });
+      }
+      const recipientRemovedByParent = recipientDoc.data()?.removedByParent || [];
+      const recipientBlockedByParent = recipientDoc.data()?.blockedByParent || [];
+      if (recipientRemovedByParent.includes(fromUid) || recipientBlockedByParent.includes(fromUid)) {
+        return res.status(403).json({ error: 'Gebruiker niet gevonden' });
       }
 
       // Check of ze al contacten zijn
@@ -140,6 +148,17 @@ module.exports = (io, onlineUsers) => {
       if (!reqDoc.exists) return res.status(404).json({ error: 'Verzoek niet gevonden' });
       const { fromUid, fromName, fromEmail, fromPhoto, toUid, toName, toEmail } = reqDoc.data();
       if (req.uid !== toUid) return res.status(403).json({ error: 'Geen toegang.' });
+
+      // Check of ouder dit contact heeft verwijderd of geblokkeerd voor het kind
+      const acceptorDoc = await db.collection('users').doc(toUid).get();
+      const removedByParent = acceptorDoc.data()?.removedByParent || [];
+      const blockedByParent = acceptorDoc.data()?.blockedByParent || [];
+      if (removedByParent.includes(fromUid)) {
+        return res.status(403).json({ error: 'Dit contact is verwijderd door je ouder en kan niet worden toegevoegd.' });
+      }
+      if (blockedByParent.includes(fromUid)) {
+        return res.status(403).json({ error: 'Dit contact is geblokkeerd door je ouder.' });
+      }
 
       const batch = db.batch();
       // Voeg toe aan beiden contactenlijst
