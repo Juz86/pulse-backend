@@ -24,6 +24,7 @@ const miscRouter    = require('./src/routes/misc');
 const usersRouter   = require('./src/routes/users');
 const parentRouter  = require('./src/routes/parent');
 const friendsRouter = require('./src/routes/friends');
+const agendaRouter  = require('./src/routes/agenda');
 
 // ─── Socket handler modules ───────────────────────────────────────────────────
 const registerPresence      = require('./src/socket/presence');
@@ -79,6 +80,34 @@ app.use(miscRouter);
 app.use(usersRouter(io, onlineUsers));
 app.use(parentRouter(io, onlineUsers));
 app.use(friendsRouter(io, onlineUsers));
+app.use(agendaRouter(io));
+
+// ─── Agenda cleanup — verwijder activiteiten ouder dan 7 dagen ────────────────
+async function cleanupOldAgendaActivities() {
+  try {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 7);
+    const cutoffStr = cutoff.toISOString().slice(0, 10); // YYYY-MM-DD
+
+    const snap = await db.collectionGroup('activities')
+      .where('date', '<', cutoffStr)
+      .get();
+
+    if (snap.empty) return;
+
+    const batch = db.batch();
+    snap.docs.forEach(doc => batch.delete(doc.ref));
+    await batch.commit();
+
+    console.log(`🗑️  Agenda cleanup: ${snap.size} verlopen activiteite(n) verwijderd.`);
+  } catch (err) {
+    console.error('Agenda cleanup fout:', err);
+  }
+}
+
+// Direct uitvoeren bij opstarten, daarna elke 24 uur
+cleanupOldAgendaActivities();
+setInterval(cleanupOldAgendaActivities, 24 * 60 * 60 * 1000);
 
 // ─── Socket.IO auth middleware ────────────────────────────────────────────────
 io.use(async (socket, next) => {
