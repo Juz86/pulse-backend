@@ -43,7 +43,7 @@ const server = http.createServer(app);
 // CORS: sta alleen bekende origins toe. Primaire beveiliging = Firebase-token
 // verificatie in de Socket.IO auth middleware.
 const allowedOrigins = APP_URL
-  ? [...APP_URL.split(',').map(s => s.trim()), 'http://localhost:3000', 'http://localhost:3001']
+  ? [...APP_URL.split(',').map(s => s.trim()), 'http://localhost:3000', 'http://localhost:5173']
   : null;
 const corsOrigin = allowedOrigins
   ? (origin, cb) => {
