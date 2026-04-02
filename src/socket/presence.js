@@ -9,6 +9,7 @@ module.exports = function registerPresence(io, socket, uid) {
     if (!onlineUsers[uid]) onlineUsers[uid] = new Set();
     onlineUsers[uid].add(socket.id);
     socket.data.uid = uid;
+    socket.join(uid); // Voeg socket toe aan room op basis van uid voor betrouwbare targeting via Redis adapter
     inactiveUsers.delete(uid); // Actief bij verbinding
 
     // Direct broadcasten — geen wachten op Firestore

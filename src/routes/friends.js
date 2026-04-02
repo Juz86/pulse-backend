@@ -94,12 +94,18 @@ module.exports = (io, onlineUsers) => {
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      // Stuur realtime notificatie naar ontvanger
+      // Stuur realtime notificatie naar ontvanger via room (werkt ook bij meerdere server-instanties via Redis adapter)
       const targetSocket = getSocketId(toUser.uid);
-      if (targetSocket) {
-        io.to(targetSocket).emit('friend:request', {
-          id: reqRef.id, fromUid, fromName, fromEmail, fromPhoto: fromPhoto || null,
-        });
+      io.to(toUser.uid).emit('friend:request', {
+        id: reqRef.id, fromUid, fromName, fromEmail, fromPhoto: fromPhoto || null,
+      });
+
+      // Als ontvanger offline is: stuur push notificatie
+      if (!targetSocket) {
+        sendPush(toUser.uid,
+          { title: 'Pulse — Nieuwe uitnodiging', body: `${fromName} wil je toevoegen als contact.` },
+          {}
+        ).catch(e => console.warn('[Pulse] Push bij vriendschapsverzoek mislukt:', e.message));
       }
 
       // Activiteit opslaan + ouder realtime notificeren als kind een verzoek stuurt
