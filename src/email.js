@@ -1,17 +1,17 @@
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 const { getRedis } = require('./redis');
 const { db } = require('./firebase');
 
-// ─── Resend SMTP transporter ──────────────────────────────────────────────────
-const transporter = nodemailer.createTransport({
-  host: 'smtp.resend.com',
-  port: 465,
-  secure: true,
-  auth: {
-    user: 'resend',
-    pass: process.env.RESEND_API_KEY,
+// ─── Resend HTTP API (betrouwbaarder dan SMTP op cloud hosting) ───────────────
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+// Nodemailer-compatibele wrapper zodat auth.js ongewijzigd blijft
+const transporter = {
+  sendMail: async ({ from, to, subject, html }) => {
+    const { error } = await resend.emails.send({ from, to, subject, html });
+    if (error) throw new Error(error.message || 'Resend fout');
   },
-});
+};
 
 // ─── OTP store: Redis (snel) + Firestore (persistent, multi-instance safe) ────
 const OTP_TTL_SECONDS = 15 * 60;
