@@ -36,11 +36,12 @@ module.exports = (io, onlineUsers) => {
 
       const name = displayName || email.split('@')[0];
       const updateData = { uid, displayName: name, email, photoURL: photoURL || '', updatedAt: admin.firestore.FieldValue.serverTimestamp(), online: true };
-      // Role mag alleen worden gezet als het account nog geen rol heeft (bij aanmaken)
-      // Nooit overschrijven via client-request — voorkomt role-escalatie
+      // Role mag alleen worden gezet bij aanmaken of upgraden van 'user' naar 'parent'
+      // 'child' en 'parent' mogen nooit verlaagd worden via client-request
       const existingDoc = await db.collection('users').doc(uid).get();
       if (!existingDoc.exists && role === 'parent') updateData.role = 'parent';
       else if (!existingDoc.exists) updateData.role = 'user';
+      else if (existingDoc.data()?.role === 'user' && role === 'parent') updateData.role = 'parent';
       await db.collection('users').doc(uid).set(updateData, { merge: true });
 
       // memberNames bijwerken in alle gesprekken van deze gebruiker
