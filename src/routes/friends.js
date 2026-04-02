@@ -118,8 +118,7 @@ module.exports = (io, onlineUsers) => {
           type: 'friend_request_sent', description,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         }).catch(e => console.warn('parentActivities opslaan mislukt (sent):', e.message));
-        const parentSocket = getSocketId(parentId);
-        if (parentSocket) io.to(parentSocket).emit('parent:activity', { type: 'friend_request_sent', description, childName: fromName });
+        io.to(parentId).emit('parent:activity', { type: 'friend_request_sent', description, childName: fromName });
       }).catch(e => console.warn('Ouder ophalen mislukt (sent):', e.message));
       res.json({ success: true, requestId: reqRef.id, toUid: toUser.uid });
     } catch (err) {
@@ -180,11 +179,10 @@ module.exports = (io, onlineUsers) => {
       batch.update(db.collection('friendRequests').doc(requestId), { status: 'accepted' });
       await batch.commit();
 
-      // Notificeer de verzender realtime, of via push als offline
+      // Notificeer de verzender realtime via room, of via push als offline
       const senderSocket = getSocketId(fromUid);
-      if (senderSocket) {
-        io.to(senderSocket).emit('friend:accepted', { byUid: toUid, byName: toName, byEmail: toEmail });
-      } else {
+      io.to(fromUid).emit('friend:accepted', { byUid: toUid, byName: toName, byEmail: toEmail });
+      if (!senderSocket) {
         sendPush(fromUid,
           { title: 'Pulse — Verzoek geaccepteerd', body: `${toName} heeft jouw vriendschapsverzoek geaccepteerd.` },
           {}
@@ -201,8 +199,7 @@ module.exports = (io, onlineUsers) => {
           type: 'friend_request_accepted', description,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         }).catch(e => console.warn('parentActivities opslaan mislukt (accepted):', e.message));
-        const parentSocket = getSocketId(parentId);
-        if (parentSocket) io.to(parentSocket).emit('parent:activity', { type: 'friend_request_accepted', description, childName: toName });
+        io.to(parentId).emit('parent:activity', { type: 'friend_request_accepted', description, childName: toName });
       }).catch(e => console.warn('Ouder ophalen mislukt (accepted):', e.message));
       res.json({ success: true });
     } catch (err) {
