@@ -1,7 +1,7 @@
 const router = require('express').Router();
 const crypto = require('crypto');
 const { admin } = require('../firebase');
-const { sendCodeLimiter, strictLimiter } = require('../middleware');
+const { sendCodeLimiter, verifyCodeLimiter, strictLimiter } = require('../middleware');
 const { transporter, otpSet, otpGet, otpDel } = require('../email');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -40,7 +40,7 @@ router.post('/api/send-code', sendCodeLimiter, async (req, res) => {
 });
 
 // ─── OTP: Verifieer code ─────────────────────────────────────────────────────
-router.post('/api/verify-code', strictLimiter, async (req, res) => {
+router.post('/api/verify-code', verifyCodeLimiter, async (req, res) => {
   const { email, code } = req.body;
   const entry = await otpGet(email);
   if (!entry)                       return res.status(400).json({ error: 'Geen code gevonden. Vraag een nieuwe aan.' });

@@ -2,6 +2,7 @@ const rateLimit = require('express-rate-limit');
 const { admin } = require('./firebase');
 
 const sendCodeLimiter       = rateLimit({ windowMs: 15 * 60 * 1000, max: 5,   message: { error: 'Te veel verzoeken, probeer later opnieuw.' } });
+const verifyCodeLimiter     = rateLimit({ windowMs: 15 * 60 * 1000, max: 10,  message: { error: 'Te veel pogingen. Wacht 15 minuten.' } });
 const lookupUsernameLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10,  message: { error: 'Te veel verzoeken, probeer later opnieuw.' } });
 const friendReqLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 20,  message: { error: 'Te veel verzoeken, probeer later opnieuw.' } });
 const globalLimiter    = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, message: { error: 'Te veel verzoeken.' } });
@@ -53,4 +54,4 @@ function makeSecondLimiter(maxPerSecond) {
   };
 }
 
-module.exports = { sendCodeLimiter, lookupUsernameLimiter, friendReqLimiter, globalLimiter, strictLimiter, securityHeaders, verifyAuth, makeRateLimiter, makeSecondLimiter };
+module.exports = { sendCodeLimiter, verifyCodeLimiter, lookupUsernameLimiter, friendReqLimiter, globalLimiter, strictLimiter, securityHeaders, verifyAuth, makeRateLimiter, makeSecondLimiter };
