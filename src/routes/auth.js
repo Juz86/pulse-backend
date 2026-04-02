@@ -17,7 +17,7 @@ router.post('/api/send-code', sendCodeLimiter, async (req, res) => {
 
   try {
     await transporter.sendMail({
-      from: `"Pulse" <${process.env.EMAIL_USER}>`,
+      from: '"Pulse" <info@pulse-messenger.com>',
       to: email,
       subject: 'Jouw verificatiecode voor Pulse',
       html: `
@@ -62,7 +62,7 @@ router.post('/api/send-reset', sendCodeLimiter, async (req, res) => {
       url: actionUrl || process.env.APP_URL || 'http://localhost:3000',
     });
     await transporter.sendMail({
-      from: `"Pulse" <${process.env.EMAIL_USER}>`,
+      from: '"Pulse" <info@pulse-messenger.com>',
       to: email,
       subject: 'Wachtwoord opnieuw instellen — Pulse',
       html: `
