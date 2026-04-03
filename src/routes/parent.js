@@ -1,4 +1,4 @@
-const { admin, db } = require('../firebase');
+const { admin, db, storage } = require('../firebase');
 const { verifyAuth } = require('../middleware');
 const { sendPush } = require('../push');
 const { activeCalls } = require('../state');
@@ -175,7 +175,7 @@ module.exports = (io, onlineUsers) => {
       if (childData.parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
       if (childData.role !== 'child') return res.status(403).json({ error: 'Alleen kindaccounts kunnen worden verwijderd via dit endpoint.' });
 
-      // Verwijder gesprekken
+      // 1. Verwijder gesprekken + berichten
       const convsSnap = await db.collection('conversations').where('members', 'array-contains', childUid).get();
       for (const convDoc of convsSnap.docs) {
         const { members = [] } = convDoc.data();
@@ -187,7 +187,7 @@ module.exports = (io, onlineUsers) => {
         await batch.commit();
       }
 
-      // Verwijder contacten-subcollectie
+      // 2. Eigen contacts-subcollectie
       const contactsSnap = await db.collection('users').doc(childUid).collection('contacts').get();
       if (!contactsSnap.empty) {
         const batch = db.batch();
@@ -195,8 +195,59 @@ module.exports = (io, onlineUsers) => {
         await batch.commit();
       }
 
-      // Verwijder Firestore document + Firebase Auth account
+      // 3. Verwijder childUid uit contacts-subcollecties van andere gebruikers (ghost contacts)
+      const reverseSnap = await db.collectionGroup('contacts').where('uid', '==', childUid).get();
+      if (!reverseSnap.empty) {
+        for (let i = 0; i < reverseSnap.docs.length; i += 500) {
+          const batch = db.batch();
+          reverseSnap.docs.slice(i, i + 500).forEach(d => batch.delete(d.ref));
+          await batch.commit();
+        }
+      }
+
+      // 4. Vriendschapsverzoeken
+      const [frFrom, frTo] = await Promise.all([
+        db.collection('friendRequests').where('fromUid', '==', childUid).get(),
+        db.collection('friendRequests').where('toUid',   '==', childUid).get(),
+      ]);
+      const frDocs = [...frFrom.docs, ...frTo.docs];
+      if (frDocs.length > 0) {
+        const batch = db.batch();
+        frDocs.forEach(d => batch.delete(d.ref));
+        await batch.commit();
+      }
+
+      // 5. Gebruikerssessies (technische metadata)
+      const sessionsSnap = await db.collection('userSessions').where('uid', '==', childUid).get();
+      if (!sessionsSnap.empty) {
+        for (let i = 0; i < sessionsSnap.docs.length; i += 500) {
+          const batch = db.batch();
+          sessionsSnap.docs.slice(i, i + 500).forEach(d => batch.delete(d.ref));
+          await batch.commit();
+        }
+      }
+
+      // 6. Ouderactiviteiten voor dit kind
+      const paSnap = await db.collection('parentActivities').where('childUid', '==', childUid).get();
+      if (!paSnap.empty) {
+        for (let i = 0; i < paSnap.docs.length; i += 500) {
+          const batch = db.batch();
+          paSnap.docs.slice(i, i + 500).forEach(d => batch.delete(d.ref));
+          await batch.commit();
+        }
+      }
+
+      // 7. Firestore gebruikersdocument
       await db.collection('users').doc(childUid).delete();
+
+      // 8. Firebase Storage profielfoto
+      try {
+        await storage.bucket().file(`users/${childUid}/profilePhoto`).delete();
+      } catch (e) {
+        if (e.code !== 404) console.warn(`Storage verwijderen kind ${childUid} mislukt:`, e.message);
+      }
+
+      // 9. Firebase Auth account
       await admin.auth().deleteUser(childUid);
 
       res.json({ success: true });

@@ -1,4 +1,4 @@
-const { admin, db } = require('../firebase');
+const { admin, db, storage } = require('../firebase');
 const { verifyAuth, strictLimiter, lookupUsernameLimiter } = require('../middleware');
 const { getSocketId } = require('../state');
 const { sendPush } = require('../push');
@@ -22,6 +22,94 @@ async function findUserByIdentifier(identifier) {
   }
 
   return null;
+}
+
+// ─── Gedeelde helper: verwijder alle Firestore-data van een account ───────────
+// Verwijdert geen Firebase Auth — dat doet de aanroepende route expliciet.
+// Veilig voor zowel parent- als child-accounts.
+async function deleteAccountData(uid) {
+  // a) Gesprekken + berichten
+  const convsSnap = await db.collection('conversations')
+    .where('members', 'array-contains', uid).get();
+  for (const convDoc of convsSnap.docs) {
+    const { members = [] } = convDoc.data();
+    const msgsSnap = await convDoc.ref.collection('messages').get();
+    const batch = db.batch();
+    msgsSnap.docs.forEach(d => batch.delete(d.ref));
+    if (members.length <= 2) {
+      batch.delete(convDoc.ref);
+    } else {
+      batch.update(convDoc.ref, { members: members.filter(m => m !== uid) });
+    }
+    await batch.commit();
+  }
+
+  // b) Eigen contacts-subcollectie
+  const ownContactsSnap = await db.collection('users').doc(uid).collection('contacts').get();
+  if (!ownContactsSnap.empty) {
+    const batch = db.batch();
+    ownContactsSnap.docs.forEach(d => batch.delete(d.ref));
+    await batch.commit();
+  }
+
+  // c) Verwijder uid uit contacts-subcollecties van andere gebruikers (ghost contacts)
+  const reverseContactsSnap = await db.collectionGroup('contacts')
+    .where('uid', '==', uid).get();
+  if (!reverseContactsSnap.empty) {
+    for (let i = 0; i < reverseContactsSnap.docs.length; i += 500) {
+      const batch = db.batch();
+      reverseContactsSnap.docs.slice(i, i + 500).forEach(d => batch.delete(d.ref));
+      await batch.commit();
+    }
+  }
+
+  // d) Vriendschapsverzoeken
+  const [frFromSnap, frToSnap] = await Promise.all([
+    db.collection('friendRequests').where('fromUid', '==', uid).get(),
+    db.collection('friendRequests').where('toUid',   '==', uid).get(),
+  ]);
+  const frDocs = [...frFromSnap.docs, ...frToSnap.docs];
+  if (frDocs.length > 0) {
+    for (let i = 0; i < frDocs.length; i += 500) {
+      const batch = db.batch();
+      frDocs.slice(i, i + 500).forEach(d => batch.delete(d.ref));
+      await batch.commit();
+    }
+  }
+
+  // e) Gebruikerssessies (technische metadata)
+  const sessionsSnap = await db.collection('userSessions').where('uid', '==', uid).get();
+  if (!sessionsSnap.empty) {
+    for (let i = 0; i < sessionsSnap.docs.length; i += 500) {
+      const batch = db.batch();
+      sessionsSnap.docs.slice(i, i + 500).forEach(d => batch.delete(d.ref));
+      await batch.commit();
+    }
+  }
+
+  // f) Ouderactiviteiten (parentId of childUid verwijzing)
+  const [paParentSnap, paChildSnap] = await Promise.all([
+    db.collection('parentActivities').where('parentId', '==', uid).get(),
+    db.collection('parentActivities').where('childUid', '==', uid).get(),
+  ]);
+  const paDocs = [...paParentSnap.docs, ...paChildSnap.docs];
+  if (paDocs.length > 0) {
+    for (let i = 0; i < paDocs.length; i += 500) {
+      const batch = db.batch();
+      paDocs.slice(i, i + 500).forEach(d => batch.delete(d.ref));
+      await batch.commit();
+    }
+  }
+
+  // g) Firestore gebruikersdocument
+  await db.collection('users').doc(uid).delete();
+
+  // h) Firebase Storage profielfoto (geen fout als bestand niet bestaat)
+  try {
+    await storage.bucket().file(`users/${uid}/profilePhoto`).delete();
+  } catch (e) {
+    if (e.code !== 404) console.warn(`Storage verwijderen mislukt voor ${uid}:`, e.message);
+  }
 }
 
 module.exports = (io, onlineUsers) => {
@@ -249,37 +337,22 @@ module.exports = (io, onlineUsers) => {
       if (!uid) return res.status(400).json({ error: 'uid is verplicht' });
       if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
 
-      // 1. Verwijder alle gesprekken waarbij de gebruiker lid is
-      const convsSnap = await db.collection('conversations')
-        .where('members', 'array-contains', uid).get();
+      const userDoc = await db.collection('users').doc(uid).get();
+      const isParent = userDoc.exists && userDoc.data()?.role === 'parent';
 
-      for (const convDoc of convsSnap.docs) {
-        const convRef = convDoc.ref;
-        const { members = [] } = convDoc.data();
-        if (!Array.isArray(members)) continue;
-        const msgsSnap = await convRef.collection('messages').get();
-        const batch = db.batch();
-        msgsSnap.docs.forEach(d => batch.delete(d.ref));
-        if (members.length <= 2) {
-          // 1-op-1 gesprek → volledig verwijderen
-          batch.delete(convRef);
-        } else {
-          // Groepsgesprek → gebruiker verwijderen uit members
-          batch.update(convRef, { members: members.filter(m => m !== uid) });
+      // 1. Als ouder: verwijder gekoppelde kindaccounts eerst (cascade)
+      if (isParent) {
+        const childrenSnap = await db.collection('users').where('parentId', '==', uid).get();
+        for (const childDoc of childrenSnap.docs) {
+          await deleteAccountData(childDoc.id);
+          await admin.auth().deleteUser(childDoc.id).catch(e => console.warn(`Auth delete kind ${childDoc.id} mislukt:`, e.message));
         }
-        await batch.commit();
       }
 
-      // 2. Verwijder contacten-subcollectie
-      const contactsSnap = await db.collection('users').doc(uid).collection('contacts').get();
-      const contactBatch = db.batch();
-      contactsSnap.docs.forEach(d => contactBatch.delete(d.ref));
-      await contactBatch.commit();
+      // 2. Verwijder alle data van dit account
+      await deleteAccountData(uid);
 
-      // 3. Verwijder gebruikersdocument
-      await db.collection('users').doc(uid).delete();
-
-      // 4. Verwijder Firebase Auth account
+      // 3. Verwijder Firebase Auth account
       await admin.auth().deleteUser(uid);
 
       res.json({ success: true });

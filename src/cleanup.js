@@ -1,17 +1,18 @@
 // src/cleanup.js — Gecentraliseerde retentiecleanup voor alle communicatiegegevens
-// Beleid: 30 dagen voor alle categorieën
+// Beleid: communicatiedata 30 dagen, logbestanden/technische metadata 7 dagen
 // Schema: Firestore (geen SQL, geen PostgreSQL)
 // Uitvoering: dagelijks om 03:00, idempotent en batchgewijs
 
 const { admin, db } = require('./firebase');
 
-const RETENTION_DAYS = 30;
+const COMM_RETENTION_DAYS = 30; // berichten, oproepen, video, support, vriendschapsverzoeken
+const LOG_RETENTION_DAYS  = 7;  // technische metadata (sessies), OTP-codes
 
 // ─── Hulpfuncties ─────────────────────────────────────────────────────────────
 
-function cutoffTimestamp() {
+function cutoffTimestamp(days) {
   const d = new Date();
-  d.setDate(d.getDate() - RETENTION_DAYS);
+  d.setDate(d.getDate() - days);
   return admin.firestore.Timestamp.fromDate(d);
 }
 
@@ -32,7 +33,7 @@ async function deleteDocs(docs) {
 // Veld: createdAt (Firestore serverTimestamp)
 // Alle berichttypen (text, call, contact) worden verwijderd na 30 dagen.
 async function cleanMessages() {
-  const cutoff = cutoffTimestamp();
+  const cutoff = cutoffTimestamp(COMM_RETENTION_DAYS);
   let totalDeleted = 0;
 
   const convsSnap = await db.collection('conversations').get();
@@ -53,8 +54,9 @@ async function cleanMessages() {
 // ─── 2. Technische metadata (gebruikerssessies van kinderen) ──────────────────
 // Collection: userSessions
 // Veld: startTime (Firestore serverTimestamp)
+// Logbestanden → 7 dagen retentie
 async function cleanUserSessions() {
-  const cutoff = cutoffTimestamp();
+  const cutoff = cutoffTimestamp(LOG_RETENTION_DAYS);
 
   const snap = await db.collection('userSessions')
     .where('startTime', '<', cutoff)
@@ -67,8 +69,9 @@ async function cleanUserSessions() {
 // ─── 3. Support- en incidentdossiers (ouderactiviteiten) ──────────────────────
 // Collection: parentActivities
 // Veld: createdAt (Firestore serverTimestamp)
+// Support/incident → 30 dagen retentie
 async function cleanParentActivities() {
-  const cutoff = cutoffTimestamp();
+  const cutoff = cutoffTimestamp(COMM_RETENTION_DAYS);
 
   const snap = await db.collection('parentActivities')
     .where('createdAt', '<', cutoff)
@@ -83,8 +86,9 @@ async function cleanParentActivities() {
 // Veld: createdAt (Unix ms timestamp)
 // Codes worden verwijderd bij gebruik (otpDel), maar verlopen/geabandoneerde
 // codes kunnen blijven staan als Firestore-document.
+// Logbestanden → 7 dagen retentie
 async function cleanVerificationCodes() {
-  const cutoffMs = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  const cutoffMs = Date.now() - LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
   const snap = await db.collection('verificationCodes').get();
 
@@ -108,7 +112,7 @@ async function cleanVerificationCodes() {
 // los van friendRequests bestaan — die worden hier NIET geraakt.
 // Accounts (users collection) worden nooit aangeraakt.
 async function cleanFriendRequests() {
-  const cutoff = cutoffTimestamp();
+  const cutoff = cutoffTimestamp(COMM_RETENTION_DAYS);
 
   const snap = await db.collection('friendRequests')
     .where('createdAt', '<', cutoff)
@@ -124,7 +128,7 @@ async function cleanFriendRequests() {
 // Verwijder activiteiten waarvan de datum meer dan 30 dagen geleden was.
 async function cleanAgendaActivities() {
   const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - RETENTION_DAYS);
+  cutoff.setDate(cutoff.getDate() - COMM_RETENTION_DAYS);
   const cutoffStr = cutoff.toISOString().slice(0, 10); // YYYY-MM-DD
 
   const snap = await db.collectionGroup('activities')

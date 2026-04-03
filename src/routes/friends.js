@@ -223,5 +223,42 @@ module.exports = (io, onlineUsers) => {
     }
   });
 
+  // ─── REST: Contact verwijderen (bidirectioneel) ──────────────────────────────
+  // Verwijdert beide kanten van de contactrelatie direct en volledig.
+  // Geen grace period, geen buffer. Nieuw verzoek vereist voor herverbinding.
+  router.delete('/api/contacts/:uid/:targetUid', verifyAuth, async (req, res) => {
+    try {
+      const { uid, targetUid } = req.params;
+      if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (!targetUid || typeof targetUid !== 'string') return res.status(400).json({ error: 'targetUid is verplicht.' });
+      if (uid === targetUid) return res.status(400).json({ error: 'Ongeldig verzoek.' });
+
+      // Verwijder beide kanten van de contactrelatie
+      const batch = db.batch();
+      batch.delete(db.collection('users').doc(uid).collection('contacts').doc(targetUid));
+      batch.delete(db.collection('users').doc(targetUid).collection('contacts').doc(uid));
+      await batch.commit();
+
+      // Soft-delete gedeeld gesprek (berichten blijven maximaal 30 dagen bewaard)
+      const convsSnap = await db.collection('conversations')
+        .where('members', 'array-contains', uid)
+        .get();
+      for (const convDoc of convsSnap.docs) {
+        const data = convDoc.data();
+        if (!data.isGroup && (data.members || []).includes(targetUid)) {
+          await convDoc.ref.update({
+            deletedFor: admin.firestore.FieldValue.arrayUnion(uid, targetUid),
+          });
+          break;
+        }
+      }
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Contact verwijderen mislukt:', err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
   return router;
 };
