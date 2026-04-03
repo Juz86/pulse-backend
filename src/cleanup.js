@@ -100,7 +100,25 @@ async function cleanVerificationCodes() {
   return deleteDocs(expired);
 }
 
-// ─── 5. Agenda-activiteiten (verlopen items) ──────────────────────────────────
+// ─── 5. Vriendschapsverzoeken ─────────────────────────────────────────────────
+// Collection: friendRequests
+// Veld: createdAt (Firestore serverTimestamp)
+// Verwijder verzoeken ouder dan 30 dagen ongeacht status (pending/accepted/declined).
+// Geaccepteerde verzoeken resulteren in contacts-subcollectie-documenten die
+// los van friendRequests bestaan — die worden hier NIET geraakt.
+// Accounts (users collection) worden nooit aangeraakt.
+async function cleanFriendRequests() {
+  const cutoff = cutoffTimestamp();
+
+  const snap = await db.collection('friendRequests')
+    .where('createdAt', '<', cutoff)
+    .get();
+
+  if (snap.empty) return 0;
+  return deleteDocs(snap.docs);
+}
+
+// ─── 6. Agenda-activiteiten (verlopen items) ──────────────────────────────────
 // Collection: agenda/{uid}/activities
 // Veld: date (YYYY-MM-DD string)
 // Verwijder activiteiten waarvan de datum meer dan 30 dagen geleden was.
@@ -164,7 +182,15 @@ async function runCleanup() {
     results.agendaActivities = 'FOUT';
   }
 
-  console.log(`[Cleanup] Klaar. Totaal: berichten=${results.messages}, sessies=${results.userSessions}, activiteiten=${results.parentActivities}, otp=${results.verificationCodes}, agenda=${results.agendaActivities}`);
+  try {
+    results.friendRequests = await cleanFriendRequests();
+    console.log(`[Cleanup] Vriendschapsverzoeken: ${results.friendRequests} verwijderd`);
+  } catch (err) {
+    console.error('[Cleanup] Vriendschapsverzoeken mislukt:', err.message);
+    results.friendRequests = 'FOUT';
+  }
+
+  console.log(`[Cleanup] Klaar — berichten=${results.messages} sessies=${results.userSessions} parentActiviteiten=${results.parentActivities} otp=${results.verificationCodes} agenda=${results.agendaActivities} vriendschapsverzoeken=${results.friendRequests}`);
 }
 
 // ─── Dagelijkse planning om 03:00 (Railway-compatibel) ───────────────────────
