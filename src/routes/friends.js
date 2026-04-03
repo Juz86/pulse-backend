@@ -46,6 +46,7 @@ module.exports = (io, onlineUsers) => {
       if (toUser.uid === fromUid) return res.status(400).json({ error: 'Je kunt jezelf niet toevoegen' });
 
       // Check of contact verwijderd/geblokkeerd is door ouder (zowel bij verzender als ontvanger)
+      // en of de ontvanger de verzender persoonlijk heeft geblokkeerd.
       const [senderDoc, recipientDoc] = await Promise.all([
         db.collection('users').doc(fromUid).get(),
         db.collection('users').doc(toUser.uid).get(),
@@ -56,8 +57,13 @@ module.exports = (io, onlineUsers) => {
       }
       const recipientRemovedByParent = recipientDoc.data()?.removedByParent || [];
       const recipientBlockedByParent = recipientDoc.data()?.blockedByParent || [];
-      if (recipientRemovedByParent.includes(fromUid) || recipientBlockedByParent.includes(fromUid)) {
-        return res.status(403).json({ error: 'Gebruiker niet gevonden' });
+      const recipientBlockedUsers    = recipientDoc.data()?.blockedUsers    || [];
+      if (
+        recipientRemovedByParent.includes(fromUid) ||
+        recipientBlockedByParent.includes(fromUid) ||
+        recipientBlockedUsers.includes(fromUid)
+      ) {
+        return res.status(404).json({ error: 'Gebruiker niet gevonden' });
       }
 
       // Check of ze al contacten zijn
@@ -223,9 +229,10 @@ module.exports = (io, onlineUsers) => {
     }
   });
 
-  // ─── REST: Contact verwijderen (bidirectioneel) ──────────────────────────────
-  // Verwijdert beide kanten van de contactrelatie direct en volledig.
-  // Geen grace period, geen buffer. Nieuw verzoek vereist voor herverbinding.
+  // ─── REST: Contact verwijderen (eenzijdig) ───────────────────────────────────
+  // Verwijdert alleen de contactrelatie van de handelende gebruiker (uid → targetUid).
+  // De andere kant (targetUid → uid) blijft intact: de ander behoudt het contact
+  // en mag nog steeds berichten sturen. Blokkeren is nodig om communicatie te stoppen.
   router.delete('/api/contacts/:uid/:targetUid', verifyAuth, async (req, res) => {
     try {
       const { uid, targetUid } = req.params;
@@ -233,13 +240,11 @@ module.exports = (io, onlineUsers) => {
       if (!targetUid || typeof targetUid !== 'string') return res.status(400).json({ error: 'targetUid is verplicht.' });
       if (uid === targetUid) return res.status(400).json({ error: 'Ongeldig verzoek.' });
 
-      // Verwijder beide kanten van de contactrelatie
-      const batch = db.batch();
-      batch.delete(db.collection('users').doc(uid).collection('contacts').doc(targetUid));
-      batch.delete(db.collection('users').doc(targetUid).collection('contacts').doc(uid));
-      await batch.commit();
+      // Verwijder alleen de contactrelatie van de handelende gebruiker (eenzijdig)
+      await db.collection('users').doc(uid).collection('contacts').doc(targetUid).delete();
 
-      // Soft-delete gedeeld gesprek (berichten blijven maximaal 30 dagen bewaard)
+      // Verberg het gedeelde gesprek alleen voor de handelende gebruiker (uid).
+      // De ander (targetUid) behoudt het gesprek en mag nog berichten sturen.
       const convsSnap = await db.collection('conversations')
         .where('members', 'array-contains', uid)
         .get();
@@ -247,7 +252,7 @@ module.exports = (io, onlineUsers) => {
         const data = convDoc.data();
         if (!data.isGroup && (data.members || []).includes(targetUid)) {
           await convDoc.ref.update({
-            deletedFor: admin.firestore.FieldValue.arrayUnion(uid, targetUid),
+            deletedFor: admin.firestore.FieldValue.arrayUnion(uid),
           });
           break;
         }
