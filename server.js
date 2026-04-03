@@ -18,6 +18,9 @@ const { redisPub, redisSub, checkRateLimit } = require('./src/redis');
 const { onlineUsers, activeCalls, inactiveUsers, activeSessions } = require('./src/state');
 const { globalLimiter, securityHeaders, makeRateLimiter, makeSecondLimiter } = require('./src/middleware');
 
+// ─── Cleanup module ───────────────────────────────────────────────────────────
+const { runCleanup, scheduleDaily } = require('./src/cleanup');
+
 // ─── Route modules ────────────────────────────────────────────────────────────
 const authRouter    = require('./src/routes/auth');
 const miscRouter    = require('./src/routes/misc');
@@ -82,32 +85,6 @@ app.use(parentRouter(io, onlineUsers));
 app.use(friendsRouter(io, onlineUsers));
 app.use(agendaRouter(io));
 
-// ─── Agenda cleanup — verwijder activiteiten ouder dan 7 dagen ────────────────
-async function cleanupOldAgendaActivities() {
-  try {
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - 7);
-    const cutoffStr = cutoff.toISOString().slice(0, 10); // YYYY-MM-DD
-
-    const snap = await db.collectionGroup('activities')
-      .where('date', '<', cutoffStr)
-      .get();
-
-    if (snap.empty) return;
-
-    const batch = db.batch();
-    snap.docs.forEach(doc => batch.delete(doc.ref));
-    await batch.commit();
-
-    console.log(`🗑️  Agenda cleanup: ${snap.size} verlopen activiteite(n) verwijderd.`);
-  } catch (err) {
-    console.error('Agenda cleanup fout:', err);
-  }
-}
-
-// Direct uitvoeren bij opstarten, daarna elke 24 uur
-cleanupOldAgendaActivities();
-setInterval(cleanupOldAgendaActivities, 24 * 60 * 60 * 1000);
 
 // ─── Socket.IO auth middleware ────────────────────────────────────────────────
 io.use(async (socket, next) => {
@@ -212,45 +189,11 @@ io.on('connection', (socket) => {
   });
 });
 
-// ─── Automatisch opschonen: berichten ouder dan 30 dagen ─────────────────────
-async function cleanupOldMessages() {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 30);
-  const cutoffTs = admin.firestore.Timestamp.fromDate(cutoff);
-
-  try {
-    const convsSnap = await db.collection('conversations').get();
-    let totalDeleted = 0;
-
-    for (const convDoc of convsSnap.docs) {
-      const oldMsgs = await convDoc.ref.collection('messages')
-        .where('createdAt', '<', cutoffTs)
-        .get();
-
-      if (oldMsgs.empty) continue;
-
-      // Verwijder in batches van 500 (Firestore limiet)
-      const chunks = [];
-      for (let i = 0; i < oldMsgs.docs.length; i += 500) {
-        chunks.push(oldMsgs.docs.slice(i, i + 500));
-      }
-      for (const chunk of chunks) {
-        const batch = db.batch();
-        chunk.forEach(d => batch.delete(d.ref));
-        await batch.commit();
-        totalDeleted += chunk.length;
-      }
-    }
-
-    console.log(`🧹 Opschonen klaar: ${totalDeleted} berichten verwijderd`);
-  } catch (err) {
-    console.error('Opschonen mislukt:', err);
-  }
-}
-
-// Dagelijks uitvoeren (elke 24 uur), en direct bij opstarten
-cleanupOldMessages();
-setInterval(cleanupOldMessages, 24 * 60 * 60 * 1000);
+// ─── Retentiecleanup — 30 dagen voor alle communicatiegegevens ───────────────
+// Direct éénmalig uitvoeren bij opstarten (voor backfill van bestaande data),
+// daarna dagelijks om 03:00 via de scheduler in cleanup.js
+runCleanup();
+scheduleDaily();
 
 // ─── Reset online-status bij serverstart ──────────────────────────────────────
 (async () => {
