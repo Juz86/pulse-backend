@@ -24,22 +24,58 @@ async function findUserByIdentifier(identifier) {
   return null;
 }
 
-// ─── Gedeelde helper: verwijder alle Firestore-data van een account ───────────
-// Verwijdert geen Firebase Auth — dat doet de aanroepende route expliciet.
-// Veilig voor zowel parent- als child-accounts.
+// ─── Helper: verwijder Firebase Auth account met retry ────────────────────────
+// Gooit een fout als alle pogingen mislukken — aanroeper moet dit afhandelen.
+async function deleteAuthUser(uid, maxAttempts = 3) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await admin.auth().deleteUser(uid);
+      return; // gelukt
+    } catch (err) {
+      if (err.code === 'auth/user-not-found') return; // al verwijderd, ok
+      if (attempt === maxAttempts) throw err;
+      await new Promise(r => setTimeout(r, attempt * 1000)); // 1s, 2s backoff
+    }
+  }
+}
+
+// ─── Helper: verwijder Storage-bestand (gooit als het niet 404 is) ────────────
+async function deleteStorageFile(path) {
+  try {
+    await storage.bucket().file(path).delete();
+  } catch (e) {
+    if (e.code === 404 || (e.message && e.message.includes('No such object'))) return;
+    throw e;
+  }
+}
+
+// ─── Gedeelde helper: verwijder alle Firestore- en Storage-data van een account ─
+// Firebase Auth wordt ALTIJD eerst verwijderd door de aanroeper via deleteAuthUser.
+// Als Auth-verwijdering mislukt moet de aanroeper stoppen — Firestore niet aanraken.
 async function deleteAccountData(uid) {
   // a) Gesprekken + berichten
   const convsSnap = await db.collection('conversations')
     .where('members', 'array-contains', uid).get();
   for (const convDoc of convsSnap.docs) {
-    const { members = [] } = convDoc.data();
+    const convData = convDoc.data();
+    const { members = [], isGroup } = convData;
     const msgsSnap = await convDoc.ref.collection('messages').get();
     const batch = db.batch();
     msgsSnap.docs.forEach(d => batch.delete(d.ref));
     if (members.length <= 2) {
       batch.delete(convDoc.ref);
+      // Groepsfoto verwijderen als het een groep is
+      if (isGroup) {
+        deleteStorageFile(`groups/${convDoc.id}/photo`).catch(e =>
+          console.warn(`Groepsfoto verwijderen mislukt voor gesprek ${convDoc.id}:`, e.message)
+        );
+      }
     } else {
-      batch.update(convDoc.ref, { members: members.filter(m => m !== uid) });
+      // Verwijder member + memberNames-vermelding van verwijderde gebruiker
+      batch.update(convDoc.ref, {
+        members: members.filter(m => m !== uid),
+        [`memberNames.${uid}`]: admin.firestore.FieldValue.delete(),
+      });
     }
     await batch.commit();
   }
@@ -104,12 +140,9 @@ async function deleteAccountData(uid) {
   // g) Firestore gebruikersdocument
   await db.collection('users').doc(uid).delete();
 
-  // h) Firebase Storage profielfoto (geen fout als bestand niet bestaat)
-  try {
-    await storage.bucket().file(`users/${uid}/profilePhoto`).delete();
-  } catch (e) {
-    if (e.code !== 404) console.warn(`Storage verwijderen mislukt voor ${uid}:`, e.message);
-  }
+  // h) Firebase Storage: profielfoto + achtergrond
+  await deleteStorageFile(`users/${uid}/profilePhoto`);
+  await deleteStorageFile(`users/${uid}/chatBackground`);
 }
 
 module.exports = (io, onlineUsers) => {
@@ -341,19 +374,20 @@ module.exports = (io, onlineUsers) => {
       const isParent = userDoc.exists && userDoc.data()?.role === 'parent';
 
       // 1. Als ouder: verwijder gekoppelde kindaccounts eerst (cascade)
+      // Auth-verwijdering van elk kind eerst — als dat mislukt stoppen we.
       if (isParent) {
         const childrenSnap = await db.collection('users').where('parentId', '==', uid).get();
         for (const childDoc of childrenSnap.docs) {
+          await deleteAuthUser(childDoc.id); // gooit bij mislukking
           await deleteAccountData(childDoc.id);
-          await admin.auth().deleteUser(childDoc.id).catch(e => console.warn(`Auth delete kind ${childDoc.id} mislukt:`, e.message));
         }
       }
 
-      // 2. Verwijder alle data van dit account
-      await deleteAccountData(uid);
+      // 2. Verwijder Firebase Auth EERST — als dit mislukt, raken we Firestore niet aan.
+      await deleteAuthUser(uid);
 
-      // 3. Verwijder Firebase Auth account
-      await admin.auth().deleteUser(uid);
+      // 3. Verwijder alle Firestore- en Storage-data
+      await deleteAccountData(uid);
 
       res.json({ success: true });
     } catch (err) {

@@ -5,7 +5,7 @@ const serviceAccount = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSO
 // storageBucket: via env var of afgeleid van project_id (default Firebase bucket)
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  storageBucket: process.env.FIREBASE_STORAGE_BUCKET || `${serviceAccount.project_id}.appspot.com`,
+  storageBucket: process.env.FIREBASE_STORAGE_BUCKET || `${serviceAccount.project_id}.firebasestorage.app`,
 });
 
 const db      = admin.firestore();

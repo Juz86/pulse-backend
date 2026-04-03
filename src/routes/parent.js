@@ -175,19 +175,42 @@ module.exports = (io, onlineUsers) => {
       if (childData.parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
       if (childData.role !== 'child') return res.status(403).json({ error: 'Alleen kindaccounts kunnen worden verwijderd via dit endpoint.' });
 
-      // 1. Verwijder gesprekken + berichten
+      // 1. Firebase Auth EERST verwijderen — als dit mislukt stoppen we zonder Firestore aan te raken.
+      // Retry-logica: max 3 pogingen met exponentiële backoff.
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await admin.auth().deleteUser(childUid);
+          break;
+        } catch (err) {
+          if (err.code === 'auth/user-not-found') break; // al verwijderd, ok
+          if (attempt === 3) throw err;
+          await new Promise(r => setTimeout(r, attempt * 1000));
+        }
+      }
+
+      // 2. Gesprekken + berichten
       const convsSnap = await db.collection('conversations').where('members', 'array-contains', childUid).get();
       for (const convDoc of convsSnap.docs) {
-        const { members = [] } = convDoc.data();
+        const convData = convDoc.data();
+        const { members = [], isGroup } = convData;
         const msgsSnap = await convDoc.ref.collection('messages').get();
         const batch = db.batch();
         msgsSnap.docs.forEach(d => batch.delete(d.ref));
-        if (members.length <= 2) batch.delete(convDoc.ref);
-        else batch.update(convDoc.ref, { members: members.filter(m => m !== childUid) });
+        if (members.length <= 2) {
+          batch.delete(convDoc.ref);
+          if (isGroup) {
+            storage.bucket().file(`groups/${convDoc.id}/photo`).delete().catch(() => {});
+          }
+        } else {
+          batch.update(convDoc.ref, {
+            members: members.filter(m => m !== childUid),
+            [`memberNames.${childUid}`]: admin.firestore.FieldValue.delete(),
+          });
+        }
         await batch.commit();
       }
 
-      // 2. Eigen contacts-subcollectie
+      // 3. Eigen contacts-subcollectie
       const contactsSnap = await db.collection('users').doc(childUid).collection('contacts').get();
       if (!contactsSnap.empty) {
         const batch = db.batch();
@@ -195,7 +218,7 @@ module.exports = (io, onlineUsers) => {
         await batch.commit();
       }
 
-      // 3. Verwijder childUid uit contacts-subcollecties van andere gebruikers (ghost contacts)
+      // 4. Verwijder childUid uit contacts-subcollecties van andere gebruikers (ghost contacts)
       const reverseSnap = await db.collectionGroup('contacts').where('uid', '==', childUid).get();
       if (!reverseSnap.empty) {
         for (let i = 0; i < reverseSnap.docs.length; i += 500) {
@@ -205,7 +228,7 @@ module.exports = (io, onlineUsers) => {
         }
       }
 
-      // 4. Vriendschapsverzoeken
+      // 5. Vriendschapsverzoeken
       const [frFrom, frTo] = await Promise.all([
         db.collection('friendRequests').where('fromUid', '==', childUid).get(),
         db.collection('friendRequests').where('toUid',   '==', childUid).get(),
@@ -217,7 +240,7 @@ module.exports = (io, onlineUsers) => {
         await batch.commit();
       }
 
-      // 5. Gebruikerssessies (technische metadata)
+      // 6. Gebruikerssessies (technische metadata)
       const sessionsSnap = await db.collection('userSessions').where('uid', '==', childUid).get();
       if (!sessionsSnap.empty) {
         for (let i = 0; i < sessionsSnap.docs.length; i += 500) {
@@ -227,7 +250,7 @@ module.exports = (io, onlineUsers) => {
         }
       }
 
-      // 6. Ouderactiviteiten voor dit kind
+      // 7. Ouderactiviteiten voor dit kind
       const paSnap = await db.collection('parentActivities').where('childUid', '==', childUid).get();
       if (!paSnap.empty) {
         for (let i = 0; i < paSnap.docs.length; i += 500) {
@@ -237,18 +260,16 @@ module.exports = (io, onlineUsers) => {
         }
       }
 
-      // 7. Firestore gebruikersdocument
+      // 8. Firestore gebruikersdocument
       await db.collection('users').doc(childUid).delete();
 
-      // 8. Firebase Storage profielfoto
-      try {
-        await storage.bucket().file(`users/${childUid}/profilePhoto`).delete();
-      } catch (e) {
-        if (e.code !== 404) console.warn(`Storage verwijderen kind ${childUid} mislukt:`, e.message);
-      }
-
-      // 9. Firebase Auth account
-      await admin.auth().deleteUser(childUid);
+      // 9. Firebase Storage: profielfoto + chatachtergrond
+      const deleteFile = async (path) => {
+        try { await storage.bucket().file(path).delete(); }
+        catch (e) { if (e.code !== 404 && !e.message?.includes('No such object')) throw e; }
+      };
+      await deleteFile(`users/${childUid}/profilePhoto`);
+      await deleteFile(`users/${childUid}/chatBackground`);
 
       res.json({ success: true });
     } catch (err) { console.error('delete-child fout:', err); res.status(500).json({ error: 'Serverfout' }); }
