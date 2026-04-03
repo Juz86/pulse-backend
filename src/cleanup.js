@@ -100,6 +100,23 @@ async function cleanVerificationCodes() {
   return deleteDocs(expired);
 }
 
+// ─── 5. Agenda-activiteiten (verlopen items) ──────────────────────────────────
+// Collection: agenda/{uid}/activities
+// Veld: date (YYYY-MM-DD string)
+// Verwijder activiteiten waarvan de datum meer dan 30 dagen geleden was.
+async function cleanAgendaActivities() {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - RETENTION_DAYS);
+  const cutoffStr = cutoff.toISOString().slice(0, 10); // YYYY-MM-DD
+
+  const snap = await db.collectionGroup('activities')
+    .where('date', '<', cutoffStr)
+    .get();
+
+  if (snap.empty) return 0;
+  return deleteDocs(snap.docs);
+}
+
 // ─── Hoofdfunctie: voer alle cleanup-taken uit ────────────────────────────────
 async function runCleanup() {
   const started = new Date().toISOString();
@@ -139,7 +156,15 @@ async function runCleanup() {
     results.verificationCodes = 'FOUT';
   }
 
-  console.log(`[Cleanup] Klaar. Totaal: berichten=${results.messages}, sessies=${results.userSessions}, activiteiten=${results.parentActivities}, otp=${results.verificationCodes}`);
+  try {
+    results.agendaActivities = await cleanAgendaActivities();
+    console.log(`[Cleanup] Agenda-activiteiten: ${results.agendaActivities} verwijderd`);
+  } catch (err) {
+    console.error('[Cleanup] Agenda-activiteiten mislukt:', err.message);
+    results.agendaActivities = 'FOUT';
+  }
+
+  console.log(`[Cleanup] Klaar. Totaal: berichten=${results.messages}, sessies=${results.userSessions}, activiteiten=${results.parentActivities}, otp=${results.verificationCodes}, agenda=${results.agendaActivities}`);
 }
 
 // ─── Dagelijkse planning om 03:00 (Railway-compatibel) ───────────────────────
