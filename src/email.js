@@ -8,8 +8,12 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 // Nodemailer-compatibele wrapper zodat auth.js ongewijzigd blijft
 const transporter = {
   sendMail: async ({ from, to, subject, html }) => {
-    const { error } = await resend.emails.send({ from, to, subject, html });
-    if (error) throw new Error(error.message || 'Resend fout');
+    const { data, error } = await resend.emails.send({ from, to, subject, html });
+    if (error) {
+      console.error('[Pulse] Resend fout:', JSON.stringify(error));
+      throw new Error(error.message || 'Resend fout');
+    }
+    console.log('[Pulse] E-mail verstuurd, id:', data?.id);
   },
 };
 
