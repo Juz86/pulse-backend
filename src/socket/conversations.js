@@ -43,7 +43,27 @@ module.exports = function registerConversations(io, socket, uid) {
         lastMessage: null,
       });
 
-      callback({ convId: convRef.id, existing: false });
+      const convId = convRef.id;
+      const conversationPayload = {
+        id: convId,
+        members,
+        memberNames,
+        memberEmails: memberEmails || {},
+        isGroup: isGroup || false,
+        groupName: groupName || null,
+        creatorId: isGroup ? uid : null,
+        lastMessage: null,
+      };
+
+      // Notificeer alle andere leden zodat zij de conversation:join kunnen uitvoeren
+      const { onlineUsers } = require('../state');
+      members.forEach(memberUid => {
+        if (memberUid === uid) return;
+        const sockets = onlineUsers[memberUid];
+        if (sockets) sockets.forEach(sid => io.to(sid).emit('conversation:created', conversationPayload));
+      });
+
+      callback({ convId, existing: false });
     } catch (err) {
       console.error(err);
       callback({ error: 'Gesprek kon niet worden aangemaakt' });
