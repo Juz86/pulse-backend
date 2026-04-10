@@ -30,6 +30,15 @@ jest.mock('nodemailer', () => ({
   }),
 }));
 
+jest.mock('../src/email', () => ({
+  transporter: {
+    sendMail: jest.fn().mockResolvedValue({ messageId: 'test' }),
+  },
+  otpSet: jest.fn().mockResolvedValue(undefined),
+  otpGet: jest.fn().mockResolvedValue(null),
+  otpDel: jest.fn().mockResolvedValue(undefined),
+}));
+
 jest.mock('../src/redis', () => ({
   redisPub: null, redisSub: null,
   queueMessage: jest.fn(), flushQueue: jest.fn().mockResolvedValue([]),
@@ -48,6 +57,7 @@ jest.mock('../src/middleware', () => {
   const passThrough = (req, res, next) => next();
   return {
     sendCodeLimiter: passThrough, strictLimiter: passThrough,
+    verifyCodeLimiter: passThrough,
     globalLimiter: passThrough, friendReqLimiter: passThrough,
     verifyAuth: passThrough, securityHeaders: passThrough,
     makeRateLimiter: () => () => true,

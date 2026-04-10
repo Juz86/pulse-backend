@@ -4,6 +4,47 @@ const { sendPush } = require('../push');
 const { activeCalls } = require('../state');
 const { transporter } = require('../email');
 
+const HISTORY_RETENTION_OPTIONS_DAYS = [1, 7, 14, 30];
+const DEFAULT_HISTORY_RETENTION_DAYS = 30;
+
+function normalizeRetentionDays(value) {
+  const numeric = Number(value);
+  return HISTORY_RETENTION_OPTIONS_DAYS.includes(numeric) ? numeric : DEFAULT_HISTORY_RETENTION_DAYS;
+}
+
+async function getParentHistorySettings(parentUid) {
+  const doc = await db.collection('parent_settings').doc(parentUid).get();
+  const data = doc.exists ? doc.data() || {} : {};
+  return { retentionDays: normalizeRetentionDays(data.historyRules?.retentionDays) };
+}
+
+async function getChildHistorySettings(childUid) {
+  const doc = await db.collection('child_settings').doc(childUid).get();
+  const data = doc.exists ? doc.data() || {} : {};
+  return { retentionDays: normalizeRetentionDays(data.historyRules?.retentionDays) };
+}
+
+async function setParentHistorySettings(parentUid, retentionDays) {
+  const normalizedDays = normalizeRetentionDays(retentionDays);
+  await db.collection('parent_settings').doc(parentUid).set({
+    parentUid,
+    historyRules: { retentionDays: normalizedDays },
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+  return { retentionDays: normalizedDays };
+}
+
+async function setChildHistorySettings(childUid, retentionDays, parentUid) {
+  const normalizedDays = normalizeRetentionDays(retentionDays);
+  await db.collection('child_settings').doc(childUid).set({
+    childUid,
+    parentUid,
+    historyRules: { retentionDays: normalizedDays },
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+  return { retentionDays: normalizedDays };
+}
+
 module.exports = (io, onlineUsers) => {
   const router = require('express').Router();
 
@@ -14,24 +55,27 @@ module.exports = (io, onlineUsers) => {
     return false;
   }
 
+  async function listChildrenForParent(parentUid) {
+    const [snap1, snap2] = await Promise.all([
+      db.collection('users').where('parentId', '==', parentUid).get(),
+      db.collection('users').where('parentIds', 'array-contains', parentUid).get(),
+    ]);
+
+    const seen = new Set();
+    return [...snap1.docs, ...snap2.docs].filter(d => {
+      if (seen.has(d.id)) return false;
+      seen.add(d.id);
+      return true;
+    });
+  }
+
   // GET /api/parent/children — haal gekoppelde kinderen op
   router.get('/api/parent/children', verifyAuth, async (req, res) => {
     try {
       const parentDoc = await db.collection('users').doc(req.uid).get();
       if (!parentDoc.exists || parentDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
 
-      // Haal kinderen op via parentId (oude stijl) én parentIds array (nieuwe stijl)
-      const [snap1, snap2] = await Promise.all([
-        db.collection('users').where('parentId', '==', req.uid).get(),
-        db.collection('users').where('parentIds', 'array-contains', req.uid).get(),
-      ]);
-
-      const seen = new Set();
-      const allDocs = [...snap1.docs, ...snap2.docs].filter(d => {
-        if (seen.has(d.id)) return false;
-        seen.add(d.id);
-        return true;
-      });
+      const allDocs = await listChildrenForParent(req.uid);
 
       const children = allDocs.map(d => {
         const { uid, displayName, username, email, photoURL, online, lastSeen, paused, pausedFeatures } = d.data();
@@ -40,6 +84,83 @@ module.exports = (io, onlineUsers) => {
       });
       res.json(children);
     } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
+  });
+
+  router.get('/api/parent/settings', verifyAuth, async (req, res) => {
+    try {
+      const parentDoc = await db.collection('users').doc(req.uid).get();
+      if (!parentDoc.exists || parentDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
+
+      const historySettings = await getParentHistorySettings(req.uid);
+      const children = await listChildrenForParent(req.uid);
+      const childHistoryRules = await Promise.all(children.map(async (childDoc) => {
+        const childSettings = await getChildHistorySettings(childDoc.id);
+        return { childUid: childDoc.id, retentionDays: childSettings.retentionDays };
+      }));
+
+      res.json({
+        historyRules: {
+          retentionDays: historySettings.retentionDays,
+          options: HISTORY_RETENTION_OPTIONS_DAYS,
+          defaultRetentionDays: DEFAULT_HISTORY_RETENTION_DAYS,
+        },
+        childHistoryRules,
+      });
+    } catch (err) {
+      console.error('parent settings ophalen mislukt:', err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
+  router.post('/api/parent/settings/history', verifyAuth, async (req, res) => {
+    try {
+      const parentDoc = await db.collection('users').doc(req.uid).get();
+      if (!parentDoc.exists || parentDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
+
+      const retentionDays = Number(req.body?.retentionDays);
+      if (!HISTORY_RETENTION_OPTIONS_DAYS.includes(retentionDays)) return res.status(400).json({ error: 'Ongeldige bewaartermijn.' });
+
+      const historySettings = await setParentHistorySettings(req.uid, retentionDays);
+      res.json({
+        success: true,
+        ok: true,
+        historyRules: {
+          retentionDays: historySettings.retentionDays,
+          options: HISTORY_RETENTION_OPTIONS_DAYS,
+          defaultRetentionDays: DEFAULT_HISTORY_RETENTION_DAYS,
+        },
+      });
+    } catch (err) {
+      console.error('parent history settings opslaan mislukt:', err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
+  router.post('/api/parent/child/:childUid/settings/history', verifyAuth, async (req, res) => {
+    try {
+      const { childUid } = req.params;
+      const childDoc = await db.collection('users').doc(childUid).get();
+      if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
+      if (!isParentOf(req.uid, childDoc.data() || {})) return res.status(403).json({ error: 'Geen toegang tot dit kind.' });
+
+      const retentionDays = Number(req.body?.retentionDays);
+      if (!HISTORY_RETENTION_OPTIONS_DAYS.includes(retentionDays)) return res.status(400).json({ error: 'Ongeldige bewaartermijn.' });
+
+      const historySettings = await setChildHistorySettings(childUid, retentionDays, req.uid);
+      res.json({
+        success: true,
+        ok: true,
+        childUid,
+        historyRules: {
+          retentionDays: historySettings.retentionDays,
+          options: HISTORY_RETENTION_OPTIONS_DAYS,
+          defaultRetentionDays: DEFAULT_HISTORY_RETENTION_DAYS,
+        },
+      });
+    } catch (err) {
+      console.error('child history settings opslaan mislukt:', err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
   });
 
   // POST /api/parent/create-child — ouder maakt kindaccount direct aan

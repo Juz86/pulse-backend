@@ -151,6 +151,23 @@ module.exports = (io, onlineUsers) => {
     }
   });
 
+  router.get('/api/friend-requests/:uid/sent', verifyAuth, async (req, res) => {
+    try {
+      const { uid } = req.params;
+      if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
+      const snap = await db.collection('friendRequests')
+        .where('fromUid', '==', uid)
+        .where('status', '==', 'pending')
+        .get();
+      const requests = snap.docs.map(d => ({ id: d.id, requestId: d.id, ...d.data() }));
+      requests.sort((a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0));
+      res.json(requests);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
   // ─── REST: Vriendschapsverzoek accepteren ─────────────────────────────────────
   router.post('/api/friend-requests/:requestId/accept', verifyAuth, async (req, res) => {
     try {

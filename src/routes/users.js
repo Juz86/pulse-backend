@@ -7,6 +7,55 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
 function validEmail(e) { return typeof e === 'string' && EMAIL_REGEX.test(e.trim()); }
 function normalizeIdentifier(value) { return typeof value === 'string' ? value.trim().toLowerCase() : ''; }
+const HISTORY_RETENTION_OPTIONS_DAYS = [1, 7, 14, 30];
+const DEFAULT_HISTORY_RETENTION_DAYS = 30;
+
+function normalizeRetentionDays(value) {
+  const numeric = Number(value);
+  return HISTORY_RETENTION_OPTIONS_DAYS.includes(numeric) ? numeric : DEFAULT_HISTORY_RETENTION_DAYS;
+}
+
+async function getUserHistoryRetentionDays(uid) {
+  const userDoc = await db.collection('users').doc(uid).get();
+  const userData = userDoc.exists ? userDoc.data() || {} : {};
+  const isChild = userData.role === 'child';
+  const settingsCollection = isChild ? 'child_settings' : 'parent_settings';
+  const settingsDoc = await db.collection(settingsCollection).doc(uid).get();
+  const settings = settingsDoc.exists ? settingsDoc.data() || {} : {};
+  return normalizeRetentionDays(settings.historyRules?.retentionDays);
+}
+
+async function ensureParentChildContacts(userId, userData) {
+  const parentId = userData?.parentId || userData?.parentUid || userData?.managedByParentId || null;
+  if (!parentId || parentId === userId) return;
+
+  const parentDoc = await db.collection('users').doc(parentId).get();
+  if (!parentDoc.exists) return;
+  const parentData = parentDoc.data() || {};
+  const now = new Date().toISOString();
+
+  const batch = db.batch();
+  batch.set(db.collection('users').doc(userId).collection('contacts').doc(parentId), {
+    uid: parentId,
+    displayName: parentData.displayName || parentData.username || parentData.email || parentId,
+    email: parentData.email || null,
+    photoURL: parentData.photoURL || null,
+    username: parentData.username || null,
+    relation: 'familie',
+    addedAt: now,
+  }, { merge: true });
+  batch.set(db.collection('users').doc(parentId).collection('contacts').doc(userId), {
+    uid: userId,
+    displayName: userData.displayName || userData.username || userData.email || userId,
+    email: userData.email || null,
+    photoURL: userData.photoURL || null,
+    username: userData.username || null,
+    relation: 'familie',
+    addedAt: now,
+  }, { merge: true });
+  await batch.commit();
+}
+
 async function findUserByIdentifier(identifier) {
   const clean = normalizeIdentifier(identifier);
   if (!clean) return null;
@@ -176,6 +225,42 @@ module.exports = (io, onlineUsers) => {
       res.json({ success: true });
     } catch (err) {
       console.error(err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
+  router.post('/api/users/sync-self', verifyAuth, async (req, res) => {
+    try {
+      const uid = req.uid;
+      const { displayName, email, photoURL, username, role } = req.body || {};
+      const existingDoc = await db.collection('users').doc(uid).get();
+      const existing = existingDoc.exists ? existingDoc.data() || {} : {};
+      const cleanUsername = typeof username === 'string' ? username.trim().toLowerCase() : existing.username || null;
+      const safeRole = existing.role || (role === 'parent' ? 'parent' : 'user');
+      const nextUser = {
+        uid,
+        displayName: displayName || existing.displayName || email || existing.email || uid,
+        email: email || existing.email || null,
+        photoURL: photoURL || existing.photoURL || '',
+        username: cleanUsername || null,
+        role: safeRole,
+        status: existing.status || 'active',
+        parentId: existing.parentId || existing.parentUid || existing.managedByParentId || null,
+        parentIds: existing.parentIds || (existing.parentId ? [existing.parentId] : []),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        online: true,
+      };
+
+      if (!existingDoc.exists) {
+        nextUser.createdAt = admin.firestore.FieldValue.serverTimestamp();
+      }
+
+      await db.collection('users').doc(uid).set(nextUser, { merge: true });
+      await ensureParentChildContacts(uid, { ...existing, ...nextUser });
+
+      res.json({ success: true, ok: true, uid });
+    } catch (err) {
+      console.error('sync-self fout:', err);
       res.status(500).json({ error: 'Serverfout' });
     }
   });
@@ -537,6 +622,24 @@ module.exports = (io, onlineUsers) => {
       res.json({ contacts, parentBlockedUids });
     } catch (err) {
       console.error(err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
+  router.get('/api/users/:uid/history-settings', verifyAuth, async (req, res) => {
+    try {
+      const { uid } = req.params;
+      if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
+      const retentionDays = await getUserHistoryRetentionDays(uid);
+      res.json({
+        historyRules: {
+          retentionDays,
+          options: HISTORY_RETENTION_OPTIONS_DAYS,
+          defaultRetentionDays: DEFAULT_HISTORY_RETENTION_DAYS,
+        },
+      });
+    } catch (err) {
+      console.error('history-settings ophalen mislukt:', err);
       res.status(500).json({ error: 'Serverfout' });
     }
   });

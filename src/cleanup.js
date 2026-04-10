@@ -5,8 +5,9 @@
 
 const { admin, db } = require('./firebase');
 
-const COMM_RETENTION_DAYS = 30; // berichten, oproepen, video, support, vriendschapsverzoeken
+const COMM_RETENTION_DAYS = 30; // default voor communicatiegegevens
 const LOG_RETENTION_DAYS  = 7;  // technische metadata (sessies), OTP-codes
+const HISTORY_RETENTION_OPTIONS_DAYS = [1, 7, 14, 30];
 
 // ─── Hulpfuncties ─────────────────────────────────────────────────────────────
 
@@ -14,6 +15,32 @@ function cutoffTimestamp(days) {
   const d = new Date();
   d.setDate(d.getDate() - days);
   return admin.firestore.Timestamp.fromDate(d);
+}
+
+function normalizeRetentionDays(value) {
+  const numeric = Number(value);
+  return HISTORY_RETENTION_OPTIONS_DAYS.includes(numeric) ? numeric : COMM_RETENTION_DAYS;
+}
+
+async function getHistorySettings(collectionName, uid) {
+  const doc = await db.collection(collectionName).doc(uid).get();
+  const data = doc.exists ? doc.data() || {} : {};
+  return normalizeRetentionDays(data.historyRules?.retentionDays);
+}
+
+async function getUserRetentionDays(uid) {
+  if (!uid) return COMM_RETENTION_DAYS;
+  const userDoc = await db.collection('users').doc(uid).get();
+  const userData = userDoc.exists ? userDoc.data() || {} : {};
+  if (userData.role === 'child') return getHistorySettings('child_settings', uid);
+  return getHistorySettings('parent_settings', uid);
+}
+
+async function resolveConversationRetentionDays(members = []) {
+  const uniqueMembers = [...new Set((Array.isArray(members) ? members : []).filter(Boolean))];
+  if (uniqueMembers.length === 0) return COMM_RETENTION_DAYS;
+  const days = await Promise.all(uniqueMembers.map(uid => getUserRetentionDays(uid)));
+  return days.reduce((min, value) => Math.min(min, normalizeRetentionDays(value)), COMM_RETENTION_DAYS);
 }
 
 // Verwijder documenten in batches van max 500 (Firestore-limiet)
@@ -31,14 +58,17 @@ async function deleteDocs(docs) {
 // ─── 1. Berichten (inclusief oproepen en videogesprekken) ─────────────────────
 // Collection: conversations/{convId}/messages
 // Veld: createdAt (Firestore serverTimestamp)
-// Alle berichttypen (text, call, contact) worden verwijderd na 30 dagen.
+// Alle berichttypen (text, call, video, contact) worden verwijderd volgens de
+// kortste bewaartermijn van de deelnemers: 24 uur, 7, 14 of standaard 30 dagen.
 async function cleanMessages() {
-  const cutoff = cutoffTimestamp(COMM_RETENTION_DAYS);
   let totalDeleted = 0;
 
   const convsSnap = await db.collection('conversations').get();
 
   for (const convDoc of convsSnap.docs) {
+    const convData = convDoc.data() || {};
+    const retentionDays = await resolveConversationRetentionDays(convData.members || []);
+    const cutoff = cutoffTimestamp(retentionDays);
     const oldMsgs = await convDoc.ref
       .collection('messages')
       .where('createdAt', '<', cutoff)
