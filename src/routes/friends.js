@@ -246,6 +246,25 @@ module.exports = (io, onlineUsers) => {
     }
   });
 
+  router.get('/api/contacts/:uid', verifyAuth, async (req, res) => {
+    try {
+      const { uid } = req.params;
+      if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
+
+      const snap = await db.collection('users').doc(uid).collection('contacts').get();
+      const contacts = snap.docs.map(d => ({
+        id: d.id,
+        uid: d.data().uid || d.id,
+        ...d.data(),
+      }));
+
+      res.json(contacts);
+    } catch (err) {
+      console.error('Contacten ophalen mislukt:', err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
   // ─── REST: Contact verwijderen (eenzijdig) ───────────────────────────────────
   // Verwijdert alleen de contactrelatie van de handelende gebruiker (uid → targetUid).
   // De andere kant (targetUid → uid) blijft intact: de ander behoudt het contact
