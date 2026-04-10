@@ -52,17 +52,21 @@ module.exports = (io, onlineUsers) => {
   function isParentOf(uid, childData) {
     if (Array.isArray(childData.parentIds) && childData.parentIds.includes(uid)) return true;
     if (childData.parentId === uid) return true;
+    if (childData.parentUid === uid) return true;
+    if (childData.managedByParentId === uid) return true;
     return false;
   }
 
   async function listChildrenForParent(parentUid) {
-    const [snap1, snap2] = await Promise.all([
+    const [snap1, snap2, snap3, snap4] = await Promise.all([
       db.collection('users').where('parentId', '==', parentUid).get(),
       db.collection('users').where('parentIds', 'array-contains', parentUid).get(),
+      db.collection('users').where('parentUid', '==', parentUid).get(),
+      db.collection('users').where('managedByParentId', '==', parentUid).get(),
     ]);
 
     const seen = new Set();
-    return [...snap1.docs, ...snap2.docs].filter(d => {
+    return [...snap1.docs, ...snap2.docs, ...snap3.docs, ...snap4.docs].filter(d => {
       if (seen.has(d.id)) return false;
       seen.add(d.id);
       return true;
@@ -212,6 +216,8 @@ module.exports = (io, onlineUsers) => {
         photoURL:    '',
         role:        'child',
         parentId:    req.uid,
+        parentUid:   req.uid,
+        managedByParentId: req.uid,
         parentIds:   [req.uid],
         parentEmail: parentData.email,
         online:         false,

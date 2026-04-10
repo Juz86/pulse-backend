@@ -236,7 +236,10 @@ module.exports = (io, onlineUsers) => {
       const existingDoc = await db.collection('users').doc(uid).get();
       const existing = existingDoc.exists ? existingDoc.data() || {} : {};
       const cleanUsername = typeof username === 'string' ? username.trim().toLowerCase() : existing.username || null;
-      const safeRole = existing.role || (role === 'parent' ? 'parent' : 'user');
+      const existingRole = existing.role || null;
+      const safeRole = !existingRole || (existingRole === 'user' && role === 'parent')
+        ? (role === 'parent' ? 'parent' : 'user')
+        : existingRole;
       const nextUser = {
         uid,
         displayName: displayName || existing.displayName || email || existing.email || uid,
