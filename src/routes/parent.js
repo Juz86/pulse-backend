@@ -2,17 +2,38 @@ const { admin, db, storage } = require('../firebase');
 const { verifyAuth } = require('../middleware');
 const { sendPush } = require('../push');
 const { activeCalls } = require('../state');
+const { transporter } = require('../email');
 
 module.exports = (io, onlineUsers) => {
   const router = require('express').Router();
+
+  // ─── Helper: controleer of uid een ouder is van dit kind ─────────────────────
+  function isParentOf(uid, childData) {
+    if (Array.isArray(childData.parentIds) && childData.parentIds.includes(uid)) return true;
+    if (childData.parentId === uid) return true;
+    return false;
+  }
 
   // GET /api/parent/children — haal gekoppelde kinderen op
   router.get('/api/parent/children', verifyAuth, async (req, res) => {
     try {
       const parentDoc = await db.collection('users').doc(req.uid).get();
       if (!parentDoc.exists || parentDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
-      const snap = await db.collection('users').where('parentId', '==', req.uid).get();
-      const children = snap.docs.map(d => {
+
+      // Haal kinderen op via parentId (oude stijl) én parentIds array (nieuwe stijl)
+      const [snap1, snap2] = await Promise.all([
+        db.collection('users').where('parentId', '==', req.uid).get(),
+        db.collection('users').where('parentIds', 'array-contains', req.uid).get(),
+      ]);
+
+      const seen = new Set();
+      const allDocs = [...snap1.docs, ...snap2.docs].filter(d => {
+        if (seen.has(d.id)) return false;
+        seen.add(d.id);
+        return true;
+      });
+
+      const children = allDocs.map(d => {
         const { uid, displayName, username, email, photoURL, online, lastSeen, paused, pausedFeatures } = d.data();
         const pf = pausedFeatures || { chat: paused || false, call: paused || false, video: paused || false };
         return { uid, displayName, username: username || null, email, photoURL: photoURL || null, online: online || false, lastSeen: lastSeen || null, pausedFeatures: pf };
@@ -70,6 +91,7 @@ module.exports = (io, onlineUsers) => {
         photoURL:    '',
         role:        'child',
         parentId:    req.uid,
+        parentIds:   [req.uid],
         parentEmail: parentData.email,
         online:         false,
         pausedFeatures: { chat: false, call: false, video: false },
@@ -107,7 +129,7 @@ module.exports = (io, onlineUsers) => {
       const childDoc = await db.collection('users').doc(childUid).get();
       if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
       if (childDoc.data().role !== 'child') return res.status(403).json({ error: 'Alleen kindaccounts worden ondersteund.' });
-      if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
       await admin.auth().updateUser(childUid, { password });
       res.json({ success: true });
     } catch (err) { console.error('change-child-password fout:', err); res.status(500).json({ error: 'Serverfout' }); }
@@ -125,7 +147,7 @@ module.exports = (io, onlineUsers) => {
       if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
       const childData = childDoc.data();
       if (childData.role !== 'child') return res.status(403).json({ error: 'Alleen kindaccounts worden ondersteund.' });
-      if (childData.parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (!isParentOf(req.uid, childData)) return res.status(403).json({ error: 'Geen toegang.' });
 
       const cleanUsername = username.trim().toLowerCase();
       if (!/^[a-z0-9_]{3,20}$/.test(cleanUsername)) {
@@ -172,7 +194,7 @@ module.exports = (io, onlineUsers) => {
       const childDoc = await db.collection('users').doc(childUid).get();
       if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
       const childData = childDoc.data();
-      if (childData.parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (!isParentOf(req.uid, childData)) return res.status(403).json({ error: 'Geen toegang.' });
       if (childData.role !== 'child') return res.status(403).json({ error: 'Alleen kindaccounts kunnen worden verwijderd via dit endpoint.' });
 
       // 1. Firebase Auth EERST verwijderen — als dit mislukt stoppen we zonder Firestore aan te raken.
@@ -283,7 +305,7 @@ module.exports = (io, onlineUsers) => {
       const { childUid } = req.params;
       const childDoc = await db.collection('users').doc(childUid).get();
       if (!childDoc.exists) return res.status(404).json({ error: 'Niet gevonden.' });
-      if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
 
       const { feature } = req.body; // 'chat', 'call', 'video', or 'all' / undefined
       const current = childDoc.data().pausedFeatures || { chat: false, call: false, video: false };
@@ -323,7 +345,7 @@ module.exports = (io, onlineUsers) => {
       const { childUid } = req.params;
       const childDoc = await db.collection('users').doc(childUid).get();
       if (!childDoc.exists) return res.status(404).json({ error: 'Niet gevonden.' });
-      if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
 
       const { feature } = req.body;
       const current = childDoc.data().pausedFeatures || { chat: false, call: false, video: false };
@@ -365,7 +387,7 @@ module.exports = (io, onlineUsers) => {
       const { childUid } = req.params;
       const childDoc = await db.collection('users').doc(childUid).get();
       if (!childDoc.exists) return res.status(404).json({ error: 'Niet gevonden.' });
-      if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
 
       const childData = childDoc.data();
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
@@ -489,7 +511,7 @@ module.exports = (io, onlineUsers) => {
       const { childUid } = req.params;
       const childDoc = await db.collection('users').doc(childUid).get();
       if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
-      if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
 
       const childData = childDoc.data();
       const blockedByParent = childData.blockedByParent || [];
@@ -523,7 +545,7 @@ module.exports = (io, onlineUsers) => {
         db.collection('users').doc(targetUid).get(),
       ]);
       if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
-      if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
 
       const targetName = targetDoc.exists ? (targetDoc.data().displayName || targetUid) : targetUid;
       const childName  = childDoc.data().displayName || childUid;
@@ -569,7 +591,7 @@ module.exports = (io, onlineUsers) => {
         db.collection('users').doc(targetUid).get(),
       ]);
       if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
-      if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
 
       const targetName = targetDoc.exists ? (targetDoc.data().displayName || targetUid) : targetUid;
       const childName  = childDoc.data().displayName || childUid;
@@ -608,7 +630,7 @@ module.exports = (io, onlineUsers) => {
         db.collection('users').doc(targetUid).get(),
       ]);
       if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
-      if (childDoc.data().parentId !== req.uid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
 
       const targetName = targetDoc.exists ? (targetDoc.data().displayName || targetUid) : targetUid;
       const childName  = childDoc.data().displayName || childUid;
@@ -643,6 +665,197 @@ module.exports = (io, onlineUsers) => {
 
       res.json({ success: true });
     } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
+  });
+
+  // ─── CO-OUDERSCHAP ────────────────────────────────────────────────────────────
+
+  // POST /api/parent/invite-coparent — Ouder A nodigt Ouder B uit voor een kind
+  router.post('/api/parent/invite-coparent', verifyAuth, async (req, res) => {
+    try {
+      const { childUid, toEmail } = req.body;
+      if (!childUid || !toEmail) return res.status(400).json({ error: 'childUid en toEmail zijn verplicht.' });
+
+      const cleanEmail = toEmail.trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) return res.status(400).json({ error: 'Ongeldig e-mailadres.' });
+
+      // Controleer of de uitnodigende partij ouder is en toegang heeft tot het kind
+      const [callerDoc, childDoc] = await Promise.all([
+        db.collection('users').doc(req.uid).get(),
+        db.collection('users').doc(childUid).get(),
+      ]);
+      if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
+      if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
+      if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang tot dit kind.' });
+
+      const callerData = callerDoc.data();
+      const childData  = childDoc.data();
+
+      // Uitgenodigde mag niet zichzelf zijn
+      if (cleanEmail === (callerData.email || '').toLowerCase()) return res.status(400).json({ error: 'Je kunt jezelf niet uitnodigen.' });
+
+      // Controleer of uitgenodigde al co-ouder is
+      if (Array.isArray(childData.parentIds)) {
+        const existingParentDocs = await Promise.all(childData.parentIds.map(pid => db.collection('users').doc(pid).get()));
+        const alreadyCoparent = existingParentDocs.some(d => d.exists && (d.data().email || '').toLowerCase() === cleanEmail);
+        if (alreadyCoparent) return res.status(400).json({ error: 'Deze ouder heeft al toegang tot dit kind.' });
+      }
+
+      // Controleer of er al een openstaande uitnodiging is
+      const existing = await db.collection('coparentInvitations')
+        .where('childUid', '==', childUid)
+        .where('toEmail', '==', cleanEmail)
+        .where('status', '==', 'pending')
+        .limit(1).get();
+      if (!existing.empty) return res.status(400).json({ error: 'Er is al een openstaande uitnodiging voor dit e-mailadres.' });
+
+      // Sla uitnodiging op
+      const inviteRef = await db.collection('coparentInvitations').add({
+        childUid,
+        childName:      childData.displayName || childUid,
+        fromParentUid:  req.uid,
+        fromParentName: callerData.displayName || callerData.email,
+        fromParentEmail: callerData.email || '',
+        toEmail:        cleanEmail,
+        status:         'pending',
+        createdAt:      admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // Stuur uitnodigingsmail
+      try {
+        await transporter.sendMail({
+          from: '"Pulse" <info@pulse-messenger.com>',
+          to: cleanEmail,
+          subject: `${callerData.displayName || 'Een ouder'} nodigt je uit als co-ouder op Pulse`,
+          html: `
+            <div style="font-family:sans-serif;max-width:480px;margin:auto">
+              <h2 style="color:#7c4dff">Pulse — Co-ouder uitnodiging</h2>
+              <p><strong>${callerData.displayName || callerData.email}</strong> wil jou toegang geven tot het account van <strong>${childData.displayName}</strong> op Pulse.</p>
+              <p>Als je akkoord gaat, kun je ${childData.displayName} beheren in jouw Ouderlijk toezicht dashboard.</p>
+              <p>Log in op Pulse en ga naar <strong>Ouderlijk toezicht</strong> om de uitnodiging te accepteren of te weigeren.</p>
+              <p style="color:#888;font-size:13px">Heb je geen Pulse-account? Maak er gratis een aan op pulse-messenger.com.</p>
+            </div>
+          `,
+        });
+      } catch (mailErr) {
+        console.error('[Pulse] Co-ouder uitnodigingsmail mislukt:', mailErr.message);
+        // Uitnodiging is wel opgeslagen, mail fout is niet fataal
+      }
+
+      res.json({ success: true, inviteId: inviteRef.id });
+    } catch (err) { console.error('invite-coparent fout:', err); res.status(500).json({ error: 'Serverfout' }); }
+  });
+
+  // GET /api/parent/coparent-invitations — openstaande uitnodigingen voor ingelogde ouder
+  router.get('/api/parent/coparent-invitations', verifyAuth, async (req, res) => {
+    try {
+      const callerDoc = await db.collection('users').doc(req.uid).get();
+      if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
+
+      const email = (callerDoc.data().email || '').toLowerCase();
+      if (!email) return res.json([]);
+
+      const snap = await db.collection('coparentInvitations')
+        .where('toEmail', '==', email)
+        .where('status', '==', 'pending')
+        .get();
+
+      const invitations = snap.docs.map(d => ({ id: d.id, ...d.data(), createdAt: d.data().createdAt || null }));
+      res.json(invitations);
+    } catch (err) { console.error('coparent-invitations fout:', err); res.status(500).json({ error: 'Serverfout' }); }
+  });
+
+  // POST /api/parent/coparent-invitations/:inviteId/accept — Ouder B accepteert
+  router.post('/api/parent/coparent-invitations/:inviteId/accept', verifyAuth, async (req, res) => {
+    try {
+      const callerDoc = await db.collection('users').doc(req.uid).get();
+      if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
+
+      const callerEmail = (callerDoc.data().email || '').toLowerCase();
+      const inviteRef  = db.collection('coparentInvitations').doc(req.params.inviteId);
+      const inviteDoc  = await inviteRef.get();
+
+      if (!inviteDoc.exists) return res.status(404).json({ error: 'Uitnodiging niet gevonden.' });
+      const invite = inviteDoc.data();
+      if (invite.status !== 'pending') return res.status(400).json({ error: 'Uitnodiging is al verwerkt.' });
+      if (invite.toEmail !== callerEmail) return res.status(403).json({ error: 'Deze uitnodiging is niet voor jou.' });
+
+      const childRef = db.collection('users').doc(invite.childUid);
+      const childDoc = await childRef.get();
+      if (!childDoc.exists) {
+        await inviteRef.update({ status: 'expired' });
+        return res.status(404).json({ error: 'Kindaccount bestaat niet meer.' });
+      }
+
+      const callerData = callerDoc.data();
+
+      // Voeg req.uid toe aan parentIds van het kind
+      await childRef.update({
+        parentIds: admin.firestore.FieldValue.arrayUnion(req.uid),
+      });
+
+      // Voeg kind toe als contact van nieuwe ouder (en andersom)
+      const childData = childDoc.data();
+      const batch = db.batch();
+      batch.set(db.collection('users').doc(req.uid).collection('contacts').doc(invite.childUid), {
+        uid: invite.childUid,
+        displayName: childData.displayName || invite.childName,
+        email: childData.email || '',
+        photoURL: childData.photoURL || null,
+        addedAt: new Date().toISOString(),
+        relation: 'familie',
+      });
+      batch.set(db.collection('users').doc(invite.childUid).collection('contacts').doc(req.uid), {
+        uid: req.uid,
+        displayName: callerData.displayName || callerData.email,
+        email: callerData.email || '',
+        photoURL: callerData.photoURL || null,
+        addedAt: new Date().toISOString(),
+        relation: 'familie',
+      });
+      await batch.commit();
+
+      // Markeer uitnodiging als geaccepteerd
+      await inviteRef.update({ status: 'accepted', acceptedAt: admin.firestore.FieldValue.serverTimestamp(), acceptedByUid: req.uid });
+
+      // Notificeer Ouder A via push
+      sendPush(invite.fromParentUid,
+        { title: 'Pulse', body: `${callerData.displayName || callerEmail} heeft de uitnodiging voor ${invite.childName} geaccepteerd.` },
+        { type: 'coparent_accepted' }
+      ).catch(() => {});
+
+      // Real-time naar Ouder A als online
+      const parentASockets = onlineUsers[invite.fromParentUid];
+      if (parentASockets) parentASockets.forEach(sid => io.to(sid).emit('coparent:accepted', { childUid: invite.childUid, childName: invite.childName, coparentName: callerData.displayName || callerEmail }));
+
+      res.json({ success: true });
+    } catch (err) { console.error('accept-coparent fout:', err); res.status(500).json({ error: 'Serverfout' }); }
+  });
+
+  // POST /api/parent/coparent-invitations/:inviteId/decline — Ouder B weigert
+  router.post('/api/parent/coparent-invitations/:inviteId/decline', verifyAuth, async (req, res) => {
+    try {
+      const callerDoc = await db.collection('users').doc(req.uid).get();
+      if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
+
+      const callerEmail = (callerDoc.data().email || '').toLowerCase();
+      const inviteRef   = db.collection('coparentInvitations').doc(req.params.inviteId);
+      const inviteDoc   = await inviteRef.get();
+
+      if (!inviteDoc.exists) return res.status(404).json({ error: 'Uitnodiging niet gevonden.' });
+      const invite = inviteDoc.data();
+      if (invite.status !== 'pending') return res.status(400).json({ error: 'Uitnodiging is al verwerkt.' });
+      if (invite.toEmail !== callerEmail) return res.status(403).json({ error: 'Deze uitnodiging is niet voor jou.' });
+
+      await inviteRef.update({ status: 'declined', declinedAt: admin.firestore.FieldValue.serverTimestamp() });
+
+      // Notificeer Ouder A
+      sendPush(invite.fromParentUid,
+        { title: 'Pulse', body: `De uitnodiging voor ${invite.childName} is geweigerd.` },
+        { type: 'coparent_declined' }
+      ).catch(() => {});
+
+      res.json({ success: true });
+    } catch (err) { console.error('decline-coparent fout:', err); res.status(500).json({ error: 'Serverfout' }); }
   });
 
   return router;
