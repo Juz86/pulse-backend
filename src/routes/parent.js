@@ -752,14 +752,6 @@ module.exports = (io, onlineUsers) => {
       ]);
       if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
       if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
-      if (
-        (Array.isArray(childDoc.data().parentIds) && childDoc.data().parentIds.includes(targetUid)) ||
-        childDoc.data().parentId === targetUid ||
-        childDoc.data().parentUid === targetUid ||
-        childDoc.data().managedByParentId === targetUid
-      ) {
-        return res.status(400).json({ error: 'Co-ouders kunnen niet worden verwijderd via dit kindaccount.' });
-      }
 
       const targetName = targetDoc.exists ? (targetDoc.data().displayName || targetUid) : targetUid;
       const childName  = childDoc.data().displayName || childUid;
@@ -799,6 +791,14 @@ module.exports = (io, onlineUsers) => {
       ]);
       if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
       if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
+      if (
+        (Array.isArray(childDoc.data().parentIds) && childDoc.data().parentIds.includes(targetUid)) ||
+        childDoc.data().parentId === targetUid ||
+        childDoc.data().parentUid === targetUid ||
+        childDoc.data().managedByParentId === targetUid
+      ) {
+        return res.status(400).json({ error: 'Co-ouders kunnen niet worden verwijderd via dit kindaccount.' });
+      }
 
       const targetName = targetDoc.exists ? (targetDoc.data().displayName || targetUid) : targetUid;
       const childName  = childDoc.data().displayName || childUid;
