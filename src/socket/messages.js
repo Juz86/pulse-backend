@@ -3,6 +3,20 @@ const { queueMessage } = require('../redis');
 const { sendPush } = require('../push');
 const { schemas, validate } = require('../validate');
 
+function emitToOnlineMembersOutsideConversation(io, convId, members, senderId, eventName, payload, onlineUsers) {
+  const roomSockets = io.sockets.adapter.rooms.get(convId) || new Set();
+
+  members.forEach(memberUid => {
+    if (memberUid === senderId) return;
+    const sockets = onlineUsers[memberUid];
+    if (!sockets) return;
+    sockets.forEach(sid => {
+      if (roomSockets.has(sid)) return;
+      io.to(sid).emit(eventName, payload);
+    });
+  });
+}
+
 module.exports = function registerMessages(io, socket, uid) {
   // ── Gesprek / kamer joinen ──
   socket.on('conversation:join', async ({ convId }) => {
@@ -94,15 +108,17 @@ module.exports = function registerMessages(io, socket, uid) {
           const senderName = verifiedMessage.senderName || 'Iemand';
 
           // Stuur ook rechtstreeks naar elk lid (ook als ze de chat niet open hebben)
-          let anyReceiverOnline = false;
-          members.forEach(memberUid => {
-            if (memberUid === verifiedMessage.senderId) return;
-            const sockets = onlineUsers[memberUid];
-            if (sockets) {
-              anyReceiverOnline = true;
-              sockets.forEach(sid => io.to(sid).emit('message:received', savedMsg));
-            }
-          });
+          const receiverUids = members.filter(memberUid => memberUid !== verifiedMessage.senderId);
+          const anyReceiverOnline = receiverUids.some(memberUid => onlineUsers[memberUid]?.size);
+          emitToOnlineMembersOutsideConversation(
+            io,
+            convId,
+            members,
+            verifiedMessage.senderId,
+            'message:received',
+            savedMsg,
+            onlineUsers,
+          );
 
           // Als ontvanger online is → markeer als bezorgd in Firestore en notificeer verzender
           if (anyReceiverOnline) {
@@ -181,10 +197,15 @@ module.exports = function registerMessages(io, socket, uid) {
       const payload = { convId, msgId, reactions: updatedReactions };
       io.to(convId).emit('message:reaction', payload);
       const members = convDoc.data().members || [];
-      members.forEach(memberUid => {
-        const sockets = onlineUsers[memberUid];
-        if (sockets) sockets.forEach(sid => io.to(sid).emit('message:reaction', payload));
-      });
+      emitToOnlineMembersOutsideConversation(
+        io,
+        convId,
+        members,
+        null,
+        'message:reaction',
+        payload,
+        onlineUsers,
+      );
       callback?.({ success: true });
     } catch (err) {
       console.error('Fout bij reactie:', err);
@@ -215,10 +236,15 @@ module.exports = function registerMessages(io, socket, uid) {
       io.to(convId).emit('message:edited', payload);
       const convDoc = await db.collection('conversations').doc(convId).get();
       const members = convDoc.exists ? (convDoc.data().members || []) : [];
-      members.forEach(memberUid => {
-        const sockets = onlineUsers[memberUid];
-        if (sockets) sockets.forEach(sid => io.to(sid).emit('message:edited', payload));
-      });
+      emitToOnlineMembersOutsideConversation(
+        io,
+        convId,
+        members,
+        null,
+        'message:edited',
+        payload,
+        onlineUsers,
+      );
 
       callback?.({ success: true });
     } catch (err) {

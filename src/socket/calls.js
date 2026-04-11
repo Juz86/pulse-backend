@@ -2,6 +2,20 @@ const { admin, db } = require('../firebase');
 const { sendPush } = require('../push');
 const { activeCalls, pendingCalls, getSocketId } = require('../state');
 
+function emitCallLogOutsideConversation(io, convId, members, senderId, payload, onlineUsers) {
+  const roomSockets = io.sockets.adapter.rooms.get(convId) || new Set();
+
+  members.forEach(memberUid => {
+    if (memberUid === senderId) return;
+    const sockets = onlineUsers[memberUid];
+    if (!sockets) return;
+    sockets.forEach(sid => {
+      if (roomSockets.has(sid)) return;
+      io.to(sid).emit('message:received', payload);
+    });
+  });
+}
+
 module.exports = function registerCalls(io, socket, uid) {
   // ── Video upgrade doorsturen naar de andere kant ──
   socket.on('call:video-upgrade', ({ to }) => {
@@ -46,11 +60,7 @@ module.exports = function registerCalls(io, socket, uid) {
       // Stuur ook rechtstreeks naar elk lid — ook als ze de chat niet open hebben
       const convDoc = await db.collection('conversations').doc(convId).get();
       const members = convDoc.exists ? (convDoc.data().members || []) : [];
-      members.forEach(memberUid => {
-        if (memberUid === senderId) return; // beller heeft al optimistisch bericht
-        const sockets = onlineUsers[memberUid];
-        if (sockets) sockets.forEach(sid => io.to(sid).emit('message:received', savedMsg));
-      });
+      emitCallLogOutsideConversation(io, convId, members, senderId, savedMsg, onlineUsers);
     } catch (e) {
       console.error('call:log fout:', e);
     }
