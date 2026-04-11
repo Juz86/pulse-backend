@@ -56,6 +56,10 @@ async function ensureParentChildContacts(userId, userData) {
   await batch.commit();
 }
 
+function isChildTryingToManageParent(userData, targetData) {
+  return userData?.role === 'child' && targetData?.role === 'parent';
+}
+
 async function findUserByIdentifier(identifier) {
   const clean = normalizeIdentifier(identifier);
   if (!clean) return null;
@@ -522,17 +526,22 @@ module.exports = (io, onlineUsers) => {
       if (!targetUid || typeof targetUid !== 'string') return res.status(400).json({ error: 'targetUid is verplicht.' });
       if (targetUid === uid) return res.status(400).json({ error: 'Je kunt jezelf niet blokkeren.' });
 
-      await db.collection('users').doc(uid).update({
-        blockedUsers: admin.firestore.FieldValue.arrayUnion(targetUid),
-      });
-
-      // Parent notificatie
       const [userDoc, targetDoc] = await Promise.all([
         db.collection('users').doc(uid).get(),
         db.collection('users').doc(targetUid).get(),
       ]);
       const userData = userDoc.data() || {};
-      const targetName = targetDoc.exists ? (targetDoc.data().displayName || targetUid) : targetUid;
+      const targetData = targetDoc.data() || {};
+      if (isChildTryingToManageParent(userData, targetData)) {
+        return res.status(403).json({ error: 'Een kindaccount kan geen ouderaccount blokkeren.' });
+      }
+
+      await db.collection('users').doc(uid).update({
+        blockedUsers: admin.firestore.FieldValue.arrayUnion(targetUid),
+      });
+
+      // Parent notificatie
+      const targetName = targetDoc.exists ? (targetData.displayName || targetUid) : targetUid;
       const parentId = userData.parentId;
       const childName = userData.displayName || uid;
 

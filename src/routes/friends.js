@@ -7,6 +7,9 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
 function validEmail(e) { return typeof e === 'string' && EMAIL_REGEX.test(e.trim()); }
 function normalizeIdentifier(value) { return typeof value === 'string' ? value.trim().toLowerCase() : ''; }
+function isChildTryingToManageParent(userData, targetData) {
+  return userData?.role === 'child' && targetData?.role === 'parent';
+}
 async function findUserByIdentifier(identifier) {
   const clean = normalizeIdentifier(identifier);
   if (!clean) return null;
@@ -251,12 +254,25 @@ module.exports = (io, onlineUsers) => {
       const { uid } = req.params;
       if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
 
-      const snap = await db.collection('users').doc(uid).collection('contacts').get();
-      const contacts = snap.docs.map(d => ({
+      const [userDoc, snap] = await Promise.all([
+        db.collection('users').doc(uid).get(),
+        db.collection('users').doc(uid).collection('contacts').get(),
+      ]);
+      const userData = userDoc.exists ? (userDoc.data() || {}) : {};
+      const rawContacts = snap.docs.map(d => ({
         id: d.id,
         uid: d.data().uid || d.id,
         ...d.data(),
       }));
+      const targetDocs = await Promise.all(rawContacts.map((contact) => db.collection('users').doc(contact.uid).get()));
+      const contacts = rawContacts.map((contact, index) => {
+        const targetData = targetDocs[index]?.exists ? (targetDocs[index].data() || {}) : {};
+        return {
+          ...contact,
+          role: contact.role || targetData.role || null,
+          protectedParent: isChildTryingToManageParent(userData, targetData),
+        };
+      });
 
       res.json(contacts);
     } catch (err) {
@@ -275,6 +291,16 @@ module.exports = (io, onlineUsers) => {
       if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
       if (!targetUid || typeof targetUid !== 'string') return res.status(400).json({ error: 'targetUid is verplicht.' });
       if (uid === targetUid) return res.status(400).json({ error: 'Ongeldig verzoek.' });
+
+      const [userDoc, targetDoc] = await Promise.all([
+        db.collection('users').doc(uid).get(),
+        db.collection('users').doc(targetUid).get(),
+      ]);
+      const userData = userDoc.exists ? (userDoc.data() || {}) : {};
+      const targetData = targetDoc.exists ? (targetDoc.data() || {}) : {};
+      if (isChildTryingToManageParent(userData, targetData)) {
+        return res.status(403).json({ error: 'Een kindaccount kan geen ouderaccount verwijderen.' });
+      }
 
       // Verwijder alleen de contactrelatie van de handelende gebruiker (eenzijdig)
       await db.collection('users').doc(uid).collection('contacts').doc(targetUid).delete();
