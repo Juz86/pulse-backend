@@ -57,6 +57,13 @@ module.exports = (io, onlineUsers) => {
     return false;
   }
 
+  function isPrimaryParentOf(uid, childData) {
+    if (childData.managedByParentId === uid) return true;
+    if (childData.parentId === uid) return true;
+    if (childData.parentUid === uid) return true;
+    return false;
+  }
+
   async function listChildrenForParent(parentUid) {
     const [snap1, snap2, snap3, snap4] = await Promise.all([
       db.collection('users').where('parentId', '==', parentUid).get(),
@@ -84,7 +91,17 @@ module.exports = (io, onlineUsers) => {
       const children = allDocs.map(d => {
         const { uid, displayName, username, email, photoURL, online, lastSeen, paused, pausedFeatures } = d.data();
         const pf = pausedFeatures || { chat: paused || false, call: paused || false, video: paused || false };
-        return { uid, displayName, username: username || null, email, photoURL: photoURL || null, online: online || false, lastSeen: lastSeen || null, pausedFeatures: pf };
+        return {
+          uid,
+          displayName,
+          username: username || null,
+          email,
+          photoURL: photoURL || null,
+          online: online || false,
+          lastSeen: lastSeen || null,
+          pausedFeatures: pf,
+          canInviteCoparent: isPrimaryParentOf(req.uid, d.data()),
+        };
       });
       res.json(children);
     } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
@@ -643,6 +660,12 @@ module.exports = (io, onlineUsers) => {
       const childData = childDoc.data();
       const blockedByParent = childData.blockedByParent || [];
       const blockedUsers    = childData.blockedUsers    || [];
+      const parentContactUids = new Set([
+        ...(Array.isArray(childData.parentIds) ? childData.parentIds : []),
+        childData.parentId,
+        childData.parentUid,
+        childData.managedByParentId,
+      ].filter(Boolean));
 
       const contactsSnap = await db.collection('users').doc(childUid).collection('contacts').get();
       const contacts = contactsSnap.docs.map(d => ({
@@ -651,8 +674,10 @@ module.exports = (io, onlineUsers) => {
         email:            d.data().email,
         photoURL:         d.data().photoURL || null,
         username:         d.data().username || null,
+        relation:         d.data().relation || null,
         isBlocked:        blockedUsers.includes(d.id),
         isBlockedByParent: blockedByParent.includes(d.id),
+        isParentContact:  parentContactUids.has(d.id),
       }));
       res.json(contacts);
     } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
@@ -673,6 +698,14 @@ module.exports = (io, onlineUsers) => {
       ]);
       if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
       if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
+      if (
+        (Array.isArray(childDoc.data().parentIds) && childDoc.data().parentIds.includes(targetUid)) ||
+        childDoc.data().parentId === targetUid ||
+        childDoc.data().parentUid === targetUid ||
+        childDoc.data().managedByParentId === targetUid
+      ) {
+        return res.status(400).json({ error: 'Co-ouders kunnen niet worden geblokkeerd via dit kindaccount.' });
+      }
 
       const targetName = targetDoc.exists ? (targetDoc.data().displayName || targetUid) : targetUid;
       const childName  = childDoc.data().displayName || childUid;
@@ -719,6 +752,14 @@ module.exports = (io, onlineUsers) => {
       ]);
       if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
       if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
+      if (
+        (Array.isArray(childDoc.data().parentIds) && childDoc.data().parentIds.includes(targetUid)) ||
+        childDoc.data().parentId === targetUid ||
+        childDoc.data().parentUid === targetUid ||
+        childDoc.data().managedByParentId === targetUid
+      ) {
+        return res.status(400).json({ error: 'Co-ouders kunnen niet worden verwijderd via dit kindaccount.' });
+      }
 
       const targetName = targetDoc.exists ? (targetDoc.data().displayName || targetUid) : targetUid;
       const childName  = childDoc.data().displayName || childUid;
@@ -813,6 +854,9 @@ module.exports = (io, onlineUsers) => {
       if (!callerDoc.exists || callerDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
       if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
       if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang tot dit kind.' });
+      if (!isPrimaryParentOf(req.uid, childDoc.data())) {
+        return res.status(403).json({ error: 'Alleen de oorspronkelijke ouder kan een andere ouder uitnodigen.' });
+      }
 
       const callerData = callerDoc.data();
       const childData  = childDoc.data();
@@ -944,6 +988,16 @@ module.exports = (io, onlineUsers) => {
       // Markeer uitnodiging als geaccepteerd
       await inviteRef.update({ status: 'accepted', acceptedAt: admin.firestore.FieldValue.serverTimestamp(), acceptedByUid: req.uid });
 
+      db.collection('parentActivities').add({
+        parentId: invite.fromParentUid,
+        childUid: invite.childUid,
+        childName: invite.childName,
+        targetName: callerData.displayName || callerEmail,
+        type: 'coparent_accepted',
+        description: `${callerData.displayName || callerEmail} heeft de co-ouderuitnodiging voor ${invite.childName} geaccepteerd.`,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      }).catch(() => {});
+
       // Notificeer Ouder A via push
       sendPush(invite.fromParentUid,
         { title: 'Pulse', body: `${callerData.displayName || callerEmail} heeft de uitnodiging voor ${invite.childName} geaccepteerd.` },
@@ -975,11 +1029,31 @@ module.exports = (io, onlineUsers) => {
 
       await inviteRef.update({ status: 'declined', declinedAt: admin.firestore.FieldValue.serverTimestamp() });
 
+      db.collection('parentActivities').add({
+        parentId: invite.fromParentUid,
+        childUid: invite.childUid,
+        childName: invite.childName,
+        targetName: callerDoc.data().displayName || callerEmail,
+        type: 'coparent_declined',
+        description: `${callerDoc.data().displayName || callerEmail} heeft de co-ouderuitnodiging voor ${invite.childName} geweigerd.`,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      }).catch(() => {});
+
       // Notificeer Ouder A
       sendPush(invite.fromParentUid,
         { title: 'Pulse', body: `De uitnodiging voor ${invite.childName} is geweigerd.` },
         { type: 'coparent_declined' }
       ).catch(() => {});
+
+      const parentASockets = onlineUsers[invite.fromParentUid];
+      if (parentASockets) {
+        const coparentName = callerDoc.data().displayName || callerEmail;
+        parentASockets.forEach(sid => io.to(sid).emit('coparent:declined', {
+          childUid: invite.childUid,
+          childName: invite.childName,
+          coparentName,
+        }));
+      }
 
       res.json({ success: true });
     } catch (err) { console.error('decline-coparent fout:', err); res.status(500).json({ error: 'Serverfout' }); }
