@@ -604,7 +604,18 @@ module.exports = (io, onlineUsers) => {
         if (sentMsgs > 0 || calls > 0) {
           if (!topContactsMap[key]) {
             const contactInfo = contactList.find(cl => cl.uid === otherUid) || {};
-            topContactsMap[key] = { uid: otherUid, name: otherName, email: contactInfo.email || null, isGroup: !!convData.isGroup, messagesSent: 0, callCount: 0, videoCalls: 0, totalCallSecs: 0 };
+            topContactsMap[key] = {
+              uid: otherUid,
+              name: otherName,
+              email: contactInfo.email || null,
+              photoURL: contactInfo.photoURL || null,
+              relation: contactInfo.relation || null,
+              isGroup: !!convData.isGroup,
+              messagesSent: 0,
+              callCount: 0,
+              videoCalls: 0,
+              totalCallSecs: 0,
+            };
           }
           topContactsMap[key].messagesSent += sentMsgs;
           topContactsMap[key].callCount += calls;
@@ -643,7 +654,7 @@ module.exports = (io, onlineUsers) => {
 
       const messaging = { totalMessagesSent, totalCallSecs, totalVideoSecs, topContacts };
 
-      res.json({ profile, contacts: { total: contactsSnap.size, list: contactList.slice(0, 10) }, friendRequests, sessions, messaging });
+      res.json({ profile, contacts: { total: contactsSnap.size, list: contactList }, friendRequests, sessions, messaging });
     } catch (err) { console.error('Analytics error:', err); res.status(500).json({ error: 'Serverfout' }); }
   });
 
