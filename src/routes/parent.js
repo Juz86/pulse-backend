@@ -3,6 +3,7 @@ const { verifyAuth } = require('../middleware');
 const { sendPush } = require('../push');
 const { activeCalls } = require('../state');
 const { transporter } = require('../email');
+const { cleanupCommunicationsForUser } = require('../cleanup');
 
 const HISTORY_RETENTION_OPTIONS_DAYS = [1, 7, 14, 30];
 const DEFAULT_HISTORY_RETENTION_DAYS = 30;
@@ -142,6 +143,7 @@ module.exports = (io, onlineUsers) => {
       if (!HISTORY_RETENTION_OPTIONS_DAYS.includes(retentionDays)) return res.status(400).json({ error: 'Ongeldige bewaartermijn.' });
 
       const historySettings = await setParentHistorySettings(req.uid, retentionDays);
+      await cleanupCommunicationsForUser(req.uid);
       res.json({
         success: true,
         ok: true,
@@ -153,7 +155,7 @@ module.exports = (io, onlineUsers) => {
       });
     } catch (err) {
       console.error('parent history settings opslaan mislukt:', err);
-      res.status(500).json({ error: 'Serverfout' });
+      res.status(500).json({ error: 'Bewaartermijn opgeslagen of bijgewerkt, maar directe opschoning is mislukt.' });
     }
   });
 
@@ -168,6 +170,7 @@ module.exports = (io, onlineUsers) => {
       if (!HISTORY_RETENTION_OPTIONS_DAYS.includes(retentionDays)) return res.status(400).json({ error: 'Ongeldige bewaartermijn.' });
 
       const historySettings = await setChildHistorySettings(childUid, retentionDays, req.uid);
+      await cleanupCommunicationsForUser(childUid);
       res.json({
         success: true,
         ok: true,
@@ -180,7 +183,7 @@ module.exports = (io, onlineUsers) => {
       });
     } catch (err) {
       console.error('child history settings opslaan mislukt:', err);
-      res.status(500).json({ error: 'Serverfout' });
+      res.status(500).json({ error: 'Bewaartermijn opgeslagen of bijgewerkt, maar directe opschoning is mislukt.' });
     }
   });
 

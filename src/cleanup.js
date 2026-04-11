@@ -22,6 +22,22 @@ function normalizeRetentionDays(value) {
   return HISTORY_RETENTION_OPTIONS_DAYS.includes(numeric) ? numeric : COMM_RETENTION_DAYS;
 }
 
+function summarizeMessageForConversation(data = {}) {
+  if (data.type === 'contact') return `Contactpersoon: ${data.sharedContact?.name || ''}`;
+  if (data.type === 'call') {
+    const safeDuration = (typeof data.duration === 'number' && Number.isFinite(data.duration) && data.duration >= 0)
+      ? Math.round(data.duration)
+      : 0;
+    const dur = safeDuration > 0
+      ? (safeDuration >= 60 ? `${Math.floor(safeDuration / 60)} min` : `${safeDuration} sec`)
+      : '';
+    if (data.direction === 'completed') return `${data.isVideo ? 'Video-oproep' : 'Spraakoproep'}${dur ? ` · ${dur}` : ''}`;
+    if (data.direction === 'declined') return data.isVideo ? 'Video-oproep geweigerd' : 'Oproep geweigerd';
+    return data.isVideo ? 'Gemiste video-oproep' : 'Gemiste oproep';
+  }
+  return data.text || '';
+}
+
 async function getHistorySettings(collectionName, uid) {
   const doc = await db.collection(collectionName).doc(uid).get();
   const data = doc.exists ? doc.data() || {} : {};
@@ -55,6 +71,60 @@ async function deleteDocs(docs) {
   return deleted;
 }
 
+async function syncConversationSummary(convDoc, convData = {}) {
+  const latestSnap = await convDoc.ref.collection('messages')
+    .orderBy('createdAt', 'desc')
+    .limit(1)
+    .get();
+
+  if (latestSnap.empty) {
+    await convDoc.ref.update({
+      lastMessage: null,
+      lastMessageAt: null,
+      updatedAt: convData.createdAt || null,
+      lastCallSenderId: admin.firestore.FieldValue.delete(),
+      lastCallDirection: admin.firestore.FieldValue.delete(),
+      lastCallIsVideo: admin.firestore.FieldValue.delete(),
+    });
+    return;
+  }
+
+  const latestData = latestSnap.docs[0].data() || {};
+  const latestCreatedAt = latestData.createdAt || convData.updatedAt || convData.createdAt || null;
+  const update = {
+    lastMessage: summarizeMessageForConversation(latestData),
+    lastMessageAt: latestCreatedAt,
+    updatedAt: latestCreatedAt,
+  };
+
+  if (latestData.type === 'call') {
+    update.lastCallSenderId = latestData.senderId || null;
+    update.lastCallDirection = latestData.direction || null;
+    update.lastCallIsVideo = !!latestData.isVideo;
+  } else {
+    update.lastCallSenderId = admin.firestore.FieldValue.delete();
+    update.lastCallDirection = admin.firestore.FieldValue.delete();
+    update.lastCallIsVideo = admin.firestore.FieldValue.delete();
+  }
+
+  await convDoc.ref.update(update);
+}
+
+async function cleanConversation(convDoc) {
+  const convData = convDoc.data() || {};
+  const retentionDays = await resolveConversationRetentionDays(convData.members || []);
+  const cutoff = cutoffTimestamp(retentionDays);
+  const oldMsgs = await convDoc.ref
+    .collection('messages')
+    .where('createdAt', '<', cutoff)
+    .get();
+
+  if (oldMsgs.empty) return 0;
+  const deleted = await deleteDocs(oldMsgs.docs);
+  await syncConversationSummary(convDoc, convData);
+  return deleted;
+}
+
 // ─── 1. Berichten (inclusief oproepen en videogesprekken) ─────────────────────
 // Collection: conversations/{convId}/messages
 // Veld: createdAt (Firestore serverTimestamp)
@@ -66,18 +136,22 @@ async function cleanMessages() {
   const convsSnap = await db.collection('conversations').get();
 
   for (const convDoc of convsSnap.docs) {
-    const convData = convDoc.data() || {};
-    const retentionDays = await resolveConversationRetentionDays(convData.members || []);
-    const cutoff = cutoffTimestamp(retentionDays);
-    const oldMsgs = await convDoc.ref
-      .collection('messages')
-      .where('createdAt', '<', cutoff)
-      .get();
-
-    if (oldMsgs.empty) continue;
-    totalDeleted += await deleteDocs(oldMsgs.docs);
+    totalDeleted += await cleanConversation(convDoc);
   }
 
+  return totalDeleted;
+}
+
+async function cleanupCommunicationsForUser(uid) {
+  if (!uid) return 0;
+  const convsSnap = await db.collection('conversations')
+    .where('members', 'array-contains', uid)
+    .get();
+
+  let totalDeleted = 0;
+  for (const convDoc of convsSnap.docs) {
+    totalDeleted += await cleanConversation(convDoc);
+  }
   return totalDeleted;
 }
 
@@ -250,4 +324,4 @@ function scheduleDaily() {
   }, delay);
 }
 
-module.exports = { runCleanup, scheduleDaily };
+module.exports = { runCleanup, scheduleDaily, cleanupCommunicationsForUser };
