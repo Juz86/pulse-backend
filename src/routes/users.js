@@ -6,6 +6,7 @@ const {
   normalizeHistoryRules,
   HISTORY_RETENTION_OPTIONS_DAYS,
   COMM_RETENTION_DAYS,
+  resolveConversationHistoryRules,
 } = require('../cleanup');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -317,6 +318,37 @@ module.exports = (io, onlineUsers) => {
       const convs = snap.docs
         .filter(d => !(d.data().deletedFor || []).includes(uid))
         .map(d => ({ id: d.id, ...d.data() }));
+
+      const staleSummaryUpdates = [];
+      await Promise.all(convs.map(async (conv) => {
+        if (conv.isGroup) return;
+        const historyRules = await resolveConversationHistoryRules(conv.members || []);
+        const shouldHideChatPreview = Number(historyRules?.chatRetentionDays ?? COMM_RETENTION_DAYS) === 0;
+        if (!shouldHideChatPreview) return;
+
+        const isCallSummary = Boolean(conv.lastCallDirection) || conv.lastMessageType === 'call';
+        const isAttachmentSummary = conv.lastMessageType === 'attachment';
+        const isContactSummary = conv.lastMessageType === 'contact';
+        if (isCallSummary || isAttachmentSummary || isContactSummary) return;
+
+        if (conv.lastMessage || conv.lastMessageAt || conv.lastMessageType) {
+          staleSummaryUpdates.push(
+            db.collection('conversations').doc(conv.id).update({
+              lastMessage: admin.firestore.FieldValue.delete(),
+              lastMessageAt: admin.firestore.FieldValue.delete(),
+              lastMessageType: admin.firestore.FieldValue.delete(),
+            }).catch(() => {})
+          );
+        }
+
+        conv.lastMessage = '';
+        delete conv.lastMessageAt;
+        delete conv.lastMessageType;
+      }));
+
+      if (staleSummaryUpdates.length > 0) {
+        await Promise.all(staleSummaryUpdates);
+      }
 
       // Vul memberEmails aan voor gesprekken die het nog niet hebben
       const uidsNeeded = new Set();

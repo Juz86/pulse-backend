@@ -2,7 +2,7 @@ const { admin, db } = require('../firebase');
 const { queueMessage } = require('../redis');
 const { sendPush } = require('../push');
 const { schemas, validate } = require('../validate');
-const { cleanupCommunicationsForUser, getMessageHistoryType, resolveConversationHistoryRules } = require('../cleanup');
+const { getMessageHistoryType, resolveConversationHistoryRules } = require('../cleanup');
 
 function emitToOnlineMembersOutsideConversation(io, convId, members, senderId, eventName, payload, onlineUsers) {
   const roomSockets = io.sockets.adapter.rooms.get(convId) || new Set();
@@ -72,10 +72,47 @@ module.exports = function registerMessages(io, socket, uid) {
       }
 
       const verifiedMessage = { ...message, senderId: socket.userId };
+      const convMembers = convMemberDoc.data().members || [];
+      const historyRules = await resolveConversationHistoryRules(convMembers);
+      const isEphemeralDirectChat =
+        !convDataCheck.isGroup &&
+        getMessageHistoryType(verifiedMessage) === 'chat' &&
+        Number(historyRules?.chatRetentionDays ?? 30) === 0;
       const lastMessage = verifiedMessage.type === 'contact'
         ? `Contactpersoon: ${verifiedMessage.sharedContact?.name || ''}`
         : verifiedMessage.type === 'call' ? (verifiedMessage.isVideo ? 'Video-oproep' : 'Spraakoproep')
         : verifiedMessage.text;
+
+      if (isEphemeralDirectChat) {
+        const transientMsg = {
+          id: `transient_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+          convId,
+          ...verifiedMessage,
+          status: 'verstuurd',
+          createdAt: new Date().toISOString(),
+          transient: true,
+        };
+        const { onlineUsers } = require('../state');
+        const receiverUids = convMembers.filter(memberUid => memberUid !== verifiedMessage.senderId);
+        const anyReceiverOnline = receiverUids.some(memberUid => onlineUsers[memberUid]?.size);
+
+        io.to(convId).emit('message:received', transientMsg);
+        emitToOnlineMembersOutsideConversation(
+          io,
+          convId,
+          convMembers,
+          verifiedMessage.senderId,
+          'message:received',
+          transientMsg,
+          onlineUsers,
+        );
+
+        if (typeof callback === 'function') callback(transientMsg);
+        if (anyReceiverOnline) {
+          socket.emit('message:status', { convId, msgId: transientMsg.id, status: 'bezorgd' });
+        }
+        return;
+      }
 
       // Sla bericht op en update gesprek tegelijk (parallel)
       const [msgRef] = await Promise.all([
@@ -93,20 +130,12 @@ module.exports = function registerMessages(io, socket, uid) {
       ]);
 
       const savedMsg = { id: msgRef.id, ...verifiedMessage, status: 'verstuurd' };
-      const historyRules = await resolveConversationHistoryRules(convMemberDoc.data().members || []);
-      const retentionKey = getMessageHistoryType(verifiedMessage) === 'chat' ? 'chatRetentionDays' : 'chatRetentionDays';
-      const shouldDeleteImmediately = Number(historyRules?.[retentionKey] ?? 30) === 0;
 
       // Stuur bericht naar iedereen in de kamer (inclusief afzender)
       io.to(convId).emit('message:received', savedMsg);
 
       // Bevestig aan afzender zodat optimistic bericht vervangen kan worden
       if (typeof callback === 'function') callback(savedMsg);
-
-      if (shouldDeleteImmediately) {
-        await msgRef.delete();
-        await cleanupCommunicationsForUser(verifiedMessage.senderId);
-      }
 
       // Push notificaties + bezorgstatus asynchroon — blokkeert de socket handler niet
       (async () => {
