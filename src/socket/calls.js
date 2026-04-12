@@ -1,6 +1,7 @@
 const { admin, db } = require('../firebase');
 const { sendPush } = require('../push');
 const { activeCalls, pendingCalls, getSocketId } = require('../state');
+const { cleanupCommunicationsForUser, resolveConversationHistoryRules } = require('../cleanup');
 
 function emitCallLogOutsideConversation(io, convId, members, senderId, payload, onlineUsers) {
   const roomSockets = io.sockets.adapter.rooms.get(convId) || new Set();
@@ -54,13 +55,20 @@ module.exports = function registerCalls(io, socket, uid) {
         lastCallDirection: direction,
         lastCallIsVideo:   !!isVideo,
       });
+      const convDoc = await db.collection('conversations').doc(convId).get();
+      const members = convDoc.exists ? (convDoc.data().members || []) : [];
       const savedMsg = { id: msgRef.id, convId, type: 'call', isVideo: !!isVideo, direction, duration: safeDuration, senderId, senderName };
+      const historyRules = await resolveConversationHistoryRules(members);
+      const retentionKey = isVideo ? 'videoRetentionDays' : 'callRetentionDays';
+      const shouldDeleteImmediately = Number(historyRules?.[retentionKey] ?? 30) === 0;
       // Stuur naar iedereen in de room (als ze de chat open hebben)
       io.to(convId).emit('message:received', savedMsg);
       // Stuur ook rechtstreeks naar elk lid — ook als ze de chat niet open hebben
-      const convDoc = await db.collection('conversations').doc(convId).get();
-      const members = convDoc.exists ? (convDoc.data().members || []) : [];
       emitCallLogOutsideConversation(io, convId, members, senderId, savedMsg, onlineUsers);
+      if (shouldDeleteImmediately) {
+        await msgRef.delete();
+        await cleanupCommunicationsForUser(senderId);
+      }
     } catch (e) {
       console.error('call:log fout:', e);
     }

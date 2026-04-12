@@ -2,27 +2,26 @@ const { admin, db, storage } = require('../firebase');
 const { verifyAuth, strictLimiter, lookupUsernameLimiter } = require('../middleware');
 const { getSocketId } = require('../state');
 const { sendPush } = require('../push');
+const {
+  normalizeHistoryRules,
+  HISTORY_RETENTION_OPTIONS_DAYS,
+  COMM_RETENTION_DAYS,
+} = require('../cleanup');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
 function validEmail(e) { return typeof e === 'string' && EMAIL_REGEX.test(e.trim()); }
 function normalizeIdentifier(value) { return typeof value === 'string' ? value.trim().toLowerCase() : ''; }
-const HISTORY_RETENTION_OPTIONS_DAYS = [1, 7, 14, 30];
-const DEFAULT_HISTORY_RETENTION_DAYS = 30;
+const DEFAULT_HISTORY_RETENTION_DAYS = COMM_RETENTION_DAYS;
 
-function normalizeRetentionDays(value) {
-  const numeric = Number(value);
-  return HISTORY_RETENTION_OPTIONS_DAYS.includes(numeric) ? numeric : DEFAULT_HISTORY_RETENTION_DAYS;
-}
-
-async function getUserHistoryRetentionDays(uid) {
+async function getUserHistoryRules(uid) {
   const userDoc = await db.collection('users').doc(uid).get();
   const userData = userDoc.exists ? userDoc.data() || {} : {};
   const isChild = userData.role === 'child';
   const settingsCollection = isChild ? 'child_settings' : 'parent_settings';
   const settingsDoc = await db.collection(settingsCollection).doc(uid).get();
   const settings = settingsDoc.exists ? settingsDoc.data() || {} : {};
-  return normalizeRetentionDays(settings.historyRules?.retentionDays);
+  return normalizeHistoryRules(settings.historyRules);
 }
 
 async function ensureParentChildContacts(userId, userData) {
@@ -642,10 +641,10 @@ module.exports = (io, onlineUsers) => {
     try {
       const { uid } = req.params;
       if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
-      const retentionDays = await getUserHistoryRetentionDays(uid);
+      const historyRules = await getUserHistoryRules(uid);
       res.json({
         historyRules: {
-          retentionDays,
+          ...historyRules,
           options: HISTORY_RETENTION_OPTIONS_DAYS,
           defaultRetentionDays: DEFAULT_HISTORY_RETENTION_DAYS,
         },

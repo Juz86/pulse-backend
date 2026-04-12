@@ -2,6 +2,7 @@ const { admin, db } = require('../firebase');
 const { queueMessage } = require('../redis');
 const { sendPush } = require('../push');
 const { schemas, validate } = require('../validate');
+const { cleanupCommunicationsForUser, getMessageHistoryType, resolveConversationHistoryRules } = require('../cleanup');
 
 function emitToOnlineMembersOutsideConversation(io, convId, members, senderId, eventName, payload, onlineUsers) {
   const roomSockets = io.sockets.adapter.rooms.get(convId) || new Set();
@@ -92,12 +93,20 @@ module.exports = function registerMessages(io, socket, uid) {
       ]);
 
       const savedMsg = { id: msgRef.id, ...verifiedMessage, status: 'verstuurd' };
+      const historyRules = await resolveConversationHistoryRules(convMemberDoc.data().members || []);
+      const retentionKey = getMessageHistoryType(verifiedMessage) === 'chat' ? 'chatRetentionDays' : 'chatRetentionDays';
+      const shouldDeleteImmediately = Number(historyRules?.[retentionKey] ?? 30) === 0;
 
       // Stuur bericht naar iedereen in de kamer (inclusief afzender)
       io.to(convId).emit('message:received', savedMsg);
 
       // Bevestig aan afzender zodat optimistic bericht vervangen kan worden
       if (typeof callback === 'function') callback(savedMsg);
+
+      if (shouldDeleteImmediately) {
+        await msgRef.delete();
+        await cleanupCommunicationsForUser(verifiedMessage.senderId);
+      }
 
       // Push notificaties + bezorgstatus asynchroon — blokkeert de socket handler niet
       (async () => {

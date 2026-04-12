@@ -7,7 +7,12 @@ const { admin, db } = require('./firebase');
 
 const COMM_RETENTION_DAYS = 30; // default voor communicatiegegevens
 const LOG_RETENTION_DAYS  = 7;  // technische metadata (sessies), OTP-codes
-const HISTORY_RETENTION_OPTIONS_DAYS = [1, 7, 14, 30];
+const HISTORY_RETENTION_OPTIONS_DAYS = [0, 1, 7, 30];
+const HISTORY_RULE_KEYS = {
+  chat: 'chatRetentionDays',
+  call: 'callRetentionDays',
+  video: 'videoRetentionDays',
+};
 
 // ─── Hulpfuncties ─────────────────────────────────────────────────────────────
 
@@ -20,6 +25,19 @@ function cutoffTimestamp(days) {
 function normalizeRetentionDays(value) {
   const numeric = Number(value);
   return HISTORY_RETENTION_OPTIONS_DAYS.includes(numeric) ? numeric : COMM_RETENTION_DAYS;
+}
+
+function normalizeHistoryRules(rules = {}) {
+  return {
+    chatRetentionDays: normalizeRetentionDays(rules?.chatRetentionDays),
+    callRetentionDays: normalizeRetentionDays(rules?.callRetentionDays),
+    videoRetentionDays: normalizeRetentionDays(rules?.videoRetentionDays),
+  };
+}
+
+function getMessageHistoryType(message = {}) {
+  if (message.type === 'call') return message.isVideo ? 'video' : 'call';
+  return 'chat';
 }
 
 function summarizeMessageForConversation(data = {}) {
@@ -41,22 +59,26 @@ function summarizeMessageForConversation(data = {}) {
 async function getHistorySettings(collectionName, uid) {
   const doc = await db.collection(collectionName).doc(uid).get();
   const data = doc.exists ? doc.data() || {} : {};
-  return normalizeRetentionDays(data.historyRules?.retentionDays);
+  return normalizeHistoryRules(data.historyRules);
 }
 
-async function getUserRetentionDays(uid) {
-  if (!uid) return COMM_RETENTION_DAYS;
+async function getUserHistoryRules(uid) {
+  if (!uid) return normalizeHistoryRules();
   const userDoc = await db.collection('users').doc(uid).get();
   const userData = userDoc.exists ? userDoc.data() || {} : {};
   if (userData.role === 'child') return getHistorySettings('child_settings', uid);
   return getHistorySettings('parent_settings', uid);
 }
 
-async function resolveConversationRetentionDays(members = []) {
+async function resolveConversationHistoryRules(members = []) {
   const uniqueMembers = [...new Set((Array.isArray(members) ? members : []).filter(Boolean))];
-  if (uniqueMembers.length === 0) return COMM_RETENTION_DAYS;
-  const days = await Promise.all(uniqueMembers.map(uid => getUserRetentionDays(uid)));
-  return days.reduce((min, value) => Math.min(min, normalizeRetentionDays(value)), COMM_RETENTION_DAYS);
+  if (uniqueMembers.length === 0) return normalizeHistoryRules();
+  const rulesList = await Promise.all(uniqueMembers.map(uid => getUserHistoryRules(uid)));
+  return rulesList.reduce((acc, rules) => ({
+    chatRetentionDays: Math.min(acc.chatRetentionDays, normalizeRetentionDays(rules.chatRetentionDays)),
+    callRetentionDays: Math.min(acc.callRetentionDays, normalizeRetentionDays(rules.callRetentionDays)),
+    videoRetentionDays: Math.min(acc.videoRetentionDays, normalizeRetentionDays(rules.videoRetentionDays)),
+  }), normalizeHistoryRules());
 }
 
 // Verwijder documenten in batches van max 500 (Firestore-limiet)
@@ -72,7 +94,9 @@ async function deleteDocs(docs) {
 }
 
 async function syncConversationSummary(convDoc, convData = {}) {
-  const latestSnap = await convDoc.ref.collection('messages')
+  const messagesRef = convDoc.ref.collection('messages');
+  if (typeof messagesRef.orderBy !== 'function') return;
+  const latestSnap = await messagesRef
     .orderBy('createdAt', 'desc')
     .limit(1)
     .get();
@@ -112,15 +136,23 @@ async function syncConversationSummary(convDoc, convData = {}) {
 
 async function cleanConversation(convDoc) {
   const convData = convDoc.data() || {};
-  const retentionDays = await resolveConversationRetentionDays(convData.members || []);
-  const cutoff = cutoffTimestamp(retentionDays);
-  const oldMsgs = await convDoc.ref
-    .collection('messages')
-    .where('createdAt', '<', cutoff)
-    .get();
+  const historyRules = await resolveConversationHistoryRules(convData.members || []);
+  const messagesSnap = await convDoc.ref.collection('messages').get();
+  if (messagesSnap.empty) return 0;
 
-  if (oldMsgs.empty) return 0;
-  const deleted = await deleteDocs(oldMsgs.docs);
+  const nowMs = Date.now();
+  const docsToDelete = messagesSnap.docs.filter((doc) => {
+    const data = doc.data() || {};
+    const historyType = getMessageHistoryType(data);
+    const days = normalizeRetentionDays(historyRules[HISTORY_RULE_KEYS[historyType]]);
+    if (days === 0) return true;
+    const createdAt = data.createdAt?.toDate ? data.createdAt.toDate().getTime() : data.createdAt?._seconds ? data.createdAt._seconds * 1000 : new Date(data.createdAt || 0).getTime();
+    if (!createdAt) return false;
+    return createdAt < (nowMs - days * 24 * 60 * 60 * 1000);
+  });
+
+  if (docsToDelete.length === 0) return 0;
+  const deleted = await deleteDocs(docsToDelete);
   await syncConversationSummary(convDoc, convData);
   return deleted;
 }
@@ -324,4 +356,15 @@ function scheduleDaily() {
   }, delay);
 }
 
-module.exports = { runCleanup, scheduleDaily, cleanupCommunicationsForUser };
+module.exports = {
+  runCleanup,
+  scheduleDaily,
+  cleanupCommunicationsForUser,
+  normalizeRetentionDays,
+  normalizeHistoryRules,
+  getMessageHistoryType,
+  getUserHistoryRules,
+  resolveConversationHistoryRules,
+  HISTORY_RETENTION_OPTIONS_DAYS,
+  COMM_RETENTION_DAYS,
+};

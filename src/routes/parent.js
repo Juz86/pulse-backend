@@ -3,47 +3,69 @@ const { verifyAuth } = require('../middleware');
 const { sendPush } = require('../push');
 const { activeCalls } = require('../state');
 const { transporter } = require('../email');
-const { cleanupCommunicationsForUser } = require('../cleanup');
+const {
+  cleanupCommunicationsForUser,
+  normalizeHistoryRules,
+  HISTORY_RETENTION_OPTIONS_DAYS,
+  COMM_RETENTION_DAYS,
+} = require('../cleanup');
 
-const HISTORY_RETENTION_OPTIONS_DAYS = [1, 7, 14, 30];
-const DEFAULT_HISTORY_RETENTION_DAYS = 30;
-
-function normalizeRetentionDays(value) {
-  const numeric = Number(value);
-  return HISTORY_RETENTION_OPTIONS_DAYS.includes(numeric) ? numeric : DEFAULT_HISTORY_RETENTION_DAYS;
-}
+const DEFAULT_HISTORY_RETENTION_DAYS = COMM_RETENTION_DAYS;
 
 async function getParentHistorySettings(parentUid) {
   const doc = await db.collection('parent_settings').doc(parentUid).get();
   const data = doc.exists ? doc.data() || {} : {};
-  return { retentionDays: normalizeRetentionDays(data.historyRules?.retentionDays) };
+  return normalizeHistoryRules(data.historyRules);
 }
 
 async function getChildHistorySettings(childUid) {
   const doc = await db.collection('child_settings').doc(childUid).get();
   const data = doc.exists ? doc.data() || {} : {};
-  return { retentionDays: normalizeRetentionDays(data.historyRules?.retentionDays) };
+  return normalizeHistoryRules(data.historyRules);
 }
 
-async function setParentHistorySettings(parentUid, retentionDays) {
-  const normalizedDays = normalizeRetentionDays(retentionDays);
+function parseHistoryRulesFromBody(body = {}) {
+  return normalizeHistoryRules({
+    chatRetentionDays: body.chatRetentionDays,
+    callRetentionDays: body.callRetentionDays,
+    videoRetentionDays: body.videoRetentionDays,
+  });
+}
+
+function hasOnlySupportedHistoryRules(body = {}) {
+  return ['chatRetentionDays', 'callRetentionDays', 'videoRetentionDays'].every((key) => {
+    if (body[key] === undefined || body[key] === null || body[key] === '') return true;
+    return HISTORY_RETENTION_OPTIONS_DAYS.includes(Number(body[key]));
+  });
+}
+
+function buildHistoryRulesResponse(historyRules) {
+  return {
+    ...normalizeHistoryRules(historyRules),
+    options: HISTORY_RETENTION_OPTIONS_DAYS,
+    defaultRetentionDays: DEFAULT_HISTORY_RETENTION_DAYS,
+  };
+}
+
+async function setParentHistorySettings(parentUid, historyRules) {
+  const normalizedRules = normalizeHistoryRules(historyRules);
   await db.collection('parent_settings').doc(parentUid).set({
     parentUid,
-    historyRules: { retentionDays: normalizedDays },
+    historyRules: normalizedRules,
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   }, { merge: true });
-  return { retentionDays: normalizedDays };
+  return normalizedRules;
 }
 
-async function setChildHistorySettings(childUid, retentionDays, parentUid) {
-  const normalizedDays = normalizeRetentionDays(retentionDays);
+async function setChildHistorySettings(childUid, historyRules, parentUid) {
+  const normalizedRules = normalizeHistoryRules(historyRules);
   await db.collection('child_settings').doc(childUid).set({
     childUid,
     parentUid,
-    historyRules: { retentionDays: normalizedDays },
+    historyRules: normalizedRules,
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   }, { merge: true });
-  return { retentionDays: normalizedDays };
+  return normalizedRules;
 }
 
 module.exports = (io, onlineUsers) => {
@@ -119,15 +141,11 @@ module.exports = (io, onlineUsers) => {
       const children = await listChildrenForParent(req.uid);
       const childHistoryRules = await Promise.all(children.map(async (childDoc) => {
         const childSettings = await getChildHistorySettings(childDoc.id);
-        return { childUid: childDoc.id, retentionDays: childSettings.retentionDays };
+        return { childUid: childDoc.id, ...childSettings };
       }));
 
       res.json({
-        historyRules: {
-          retentionDays: historySettings.retentionDays,
-          options: HISTORY_RETENTION_OPTIONS_DAYS,
-          defaultRetentionDays: DEFAULT_HISTORY_RETENTION_DAYS,
-        },
+        historyRules: buildHistoryRulesResponse(historySettings),
         childHistoryRules,
       });
     } catch (err) {
@@ -141,19 +159,14 @@ module.exports = (io, onlineUsers) => {
       const parentDoc = await db.collection('users').doc(req.uid).get();
       if (!parentDoc.exists || parentDoc.data().role !== 'parent') return res.status(403).json({ error: 'Geen ouderaccount.' });
 
-      const retentionDays = Number(req.body?.retentionDays);
-      if (!HISTORY_RETENTION_OPTIONS_DAYS.includes(retentionDays)) return res.status(400).json({ error: 'Ongeldige bewaartermijn.' });
-
-      const historySettings = await setParentHistorySettings(req.uid, retentionDays);
+      if (!hasOnlySupportedHistoryRules(req.body)) return res.status(400).json({ error: 'Ongeldige bewaartermijn.' });
+      const historyRules = parseHistoryRulesFromBody(req.body);
+      const historySettings = await setParentHistorySettings(req.uid, historyRules);
       await cleanupCommunicationsForUser(req.uid);
       res.json({
         success: true,
         ok: true,
-        historyRules: {
-          retentionDays: historySettings.retentionDays,
-          options: HISTORY_RETENTION_OPTIONS_DAYS,
-          defaultRetentionDays: DEFAULT_HISTORY_RETENTION_DAYS,
-        },
+        historyRules: buildHistoryRulesResponse(historySettings),
       });
     } catch (err) {
       console.error('parent history settings opslaan mislukt:', err);
@@ -168,20 +181,15 @@ module.exports = (io, onlineUsers) => {
       if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
       if (!isPrimaryParentOf(req.uid, childDoc.data() || {})) return res.status(403).json({ error: 'Alleen de primaire ouder kan de bewaartermijn van dit kind aanpassen.' });
 
-      const retentionDays = Number(req.body?.retentionDays);
-      if (!HISTORY_RETENTION_OPTIONS_DAYS.includes(retentionDays)) return res.status(400).json({ error: 'Ongeldige bewaartermijn.' });
-
-      const historySettings = await setChildHistorySettings(childUid, retentionDays, req.uid);
+      if (!hasOnlySupportedHistoryRules(req.body)) return res.status(400).json({ error: 'Ongeldige bewaartermijn.' });
+      const historyRules = parseHistoryRulesFromBody(req.body);
+      const historySettings = await setChildHistorySettings(childUid, historyRules, req.uid);
       await cleanupCommunicationsForUser(childUid);
       res.json({
         success: true,
         ok: true,
         childUid,
-        historyRules: {
-          retentionDays: historySettings.retentionDays,
-          options: HISTORY_RETENTION_OPTIONS_DAYS,
-          defaultRetentionDays: DEFAULT_HISTORY_RETENTION_DAYS,
-        },
+        historyRules: buildHistoryRulesResponse(historySettings),
       });
     } catch (err) {
       console.error('child history settings opslaan mislukt:', err);
