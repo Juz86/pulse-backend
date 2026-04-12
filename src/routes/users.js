@@ -323,27 +323,44 @@ module.exports = (io, onlineUsers) => {
       await Promise.all(convs.map(async (conv) => {
         if (conv.isGroup) return;
         const historyRules = await resolveConversationHistoryRules(conv.members || []);
-        const shouldHideChatPreview = Number(historyRules?.chatRetentionDays ?? COMM_RETENTION_DAYS) === 0;
-        if (!shouldHideChatPreview) return;
-
         const isCallSummary = Boolean(conv.lastCallDirection) || conv.lastMessageType === 'call';
+        const isVideoCallSummary = isCallSummary && !!conv.lastCallIsVideo;
         const isAttachmentSummary = conv.lastMessageType === 'attachment';
         const isContactSummary = conv.lastMessageType === 'contact';
-        if (isCallSummary || isAttachmentSummary || isContactSummary) return;
+
+        const shouldHidePreview = isCallSummary
+          ? Number(
+              historyRules?.[isVideoCallSummary ? 'videoRetentionDays' : 'callRetentionDays']
+                ?? COMM_RETENTION_DAYS
+            ) === 0
+          : Number(historyRules?.chatRetentionDays ?? COMM_RETENTION_DAYS) === 0;
+
+        if (!shouldHidePreview || isAttachmentSummary || isContactSummary) return;
 
         if (conv.lastMessage || conv.lastMessageAt || conv.lastMessageType) {
+          const update = {
+            lastMessage: admin.firestore.FieldValue.delete(),
+            lastMessageAt: admin.firestore.FieldValue.delete(),
+            lastMessageType: admin.firestore.FieldValue.delete(),
+          };
+          if (isCallSummary) {
+            update.lastCallSenderId = admin.firestore.FieldValue.delete();
+            update.lastCallDirection = admin.firestore.FieldValue.delete();
+            update.lastCallIsVideo = admin.firestore.FieldValue.delete();
+          }
           staleSummaryUpdates.push(
-            db.collection('conversations').doc(conv.id).update({
-              lastMessage: admin.firestore.FieldValue.delete(),
-              lastMessageAt: admin.firestore.FieldValue.delete(),
-              lastMessageType: admin.firestore.FieldValue.delete(),
-            }).catch(() => {})
+            db.collection('conversations').doc(conv.id).update(update).catch(() => {})
           );
         }
 
         conv.lastMessage = '';
         delete conv.lastMessageAt;
         delete conv.lastMessageType;
+        if (isCallSummary) {
+          delete conv.lastCallSenderId;
+          delete conv.lastCallDirection;
+          delete conv.lastCallIsVideo;
+        }
       }));
 
       if (staleSummaryUpdates.length > 0) {
