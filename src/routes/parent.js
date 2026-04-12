@@ -91,6 +91,7 @@ module.exports = (io, onlineUsers) => {
 
       const children = allDocs.map(d => {
         const { uid, displayName, username, email, photoURL, online, lastSeen, paused, pausedFeatures } = d.data();
+        const canManageHistory = isPrimaryParentOf(req.uid, d.data());
         const pf = pausedFeatures || { chat: paused || false, call: paused || false, video: paused || false };
         return {
           uid,
@@ -102,6 +103,7 @@ module.exports = (io, onlineUsers) => {
           lastSeen: lastSeen || null,
           pausedFeatures: pf,
           canInviteCoparent: isPrimaryParentOf(req.uid, d.data()),
+          canManageHistory,
         };
       });
       res.json(children);
@@ -164,7 +166,7 @@ module.exports = (io, onlineUsers) => {
       const { childUid } = req.params;
       const childDoc = await db.collection('users').doc(childUid).get();
       if (!childDoc.exists) return res.status(404).json({ error: 'Kind niet gevonden.' });
-      if (!isParentOf(req.uid, childDoc.data() || {})) return res.status(403).json({ error: 'Geen toegang tot dit kind.' });
+      if (!isPrimaryParentOf(req.uid, childDoc.data() || {})) return res.status(403).json({ error: 'Alleen de primaire ouder kan de bewaartermijn van dit kind aanpassen.' });
 
       const retentionDays = Number(req.body?.retentionDays);
       if (!HISTORY_RETENTION_OPTIONS_DAYS.includes(retentionDays)) return res.status(400).json({ error: 'Ongeldige bewaartermijn.' });
