@@ -503,6 +503,56 @@ module.exports = (io, onlineUsers) => {
     }
   });
 
+  router.delete('/api/conversations/:convId/hard', verifyAuth, async (req, res) => {
+    try {
+      const { convId } = req.params;
+      const mode = req.query.mode === 'delete' ? 'delete' : 'clear';
+      const uid = req.uid;
+
+      const convRef = db.collection('conversations').doc(convId);
+      const convDoc = await convRef.get();
+      if (!convDoc.exists) return res.status(404).json({ error: 'Niet gevonden' });
+
+      const convData = convDoc.data() || {};
+      const members = convData.members || [];
+      if (!members.includes(uid)) return res.status(403).json({ error: 'Geen toegang.' });
+      if (convData.isGroup) {
+        return res.status(400).json({ error: 'Alleen 1-op-1 gesprekken kunnen volledig worden gewist.' });
+      }
+
+      const msgsSnap = await convRef.collection('messages').get();
+      const batch = db.batch();
+      msgsSnap.docs.forEach((doc) => batch.delete(doc.ref));
+
+      if (mode === 'delete') {
+        batch.delete(convRef);
+      } else {
+        batch.set(convRef, {
+          lastMessage: '',
+          lastMessageAt: null,
+          lastCallDirection: null,
+          lastCallIsVideo: false,
+          lastCallSenderId: null,
+          deletedFor: admin.firestore.FieldValue.delete(),
+          clearedAt: admin.firestore.FieldValue.delete(),
+        }, { merge: true });
+      }
+
+      await batch.commit();
+
+      io.to(convId).emit('conversation:hardCleared', { convId, mode });
+      members.forEach((memberUid) => {
+        const sockets = onlineUsers[memberUid];
+        if (sockets) sockets.forEach((sid) => io.to(sid).emit('conversation:hardCleared', { convId, mode }));
+      });
+
+      res.json({ success: true, mode });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Serverfout bij volledig verwijderen' });
+    }
+  });
+
   // ─── REST: Account verwijderen ───────────────────────────────────────────────
   router.delete('/api/account/:uid', verifyAuth, strictLimiter, async (req, res) => {
     try {
