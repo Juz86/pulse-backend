@@ -90,9 +90,18 @@ module.exports = function registerConversations(io, socket, uid) {
     try {
       const convDoc = await db.collection('conversations').doc(convId).get();
       if (!convDoc.exists || !(convDoc.data().members || []).includes(uid)) { cb?.({ error: 'Geen toegang.' }); return; }
-      if (convDoc.data().isGroup && convDoc.data().creatorId && convDoc.data().creatorId !== uid) { cb?.({ error: 'Alleen de groepsbeheerder kan leden verwijderen.' }); return; }
+      const convData = convDoc.data() || {};
+      const members = convData.members || [];
+      const isSelfLeave = targetUid === uid;
+      if (!members.includes(targetUid)) { cb?.({ error: 'Geen toegang.' }); return; }
+      if (convData.isGroup && convData.creatorId && convData.creatorId !== uid && !isSelfLeave) { cb?.({ error: 'Alleen de groepsbeheerder kan leden verwijderen.' }); return; }
       const update = { members: admin.firestore.FieldValue.arrayRemove(targetUid) };
       update[`memberNames.${targetUid}`] = admin.firestore.FieldValue.delete();
+      if (convData.isGroup && convData.creatorId === targetUid) {
+        const nextCreatorId = members.find(memberUid => memberUid !== targetUid);
+        if (nextCreatorId) update.creatorId = nextCreatorId;
+        else update.creatorId = admin.firestore.FieldValue.delete();
+      }
       await db.collection('conversations').doc(convId).update(update);
       io.to(convId).emit('conversation:memberRemoved', { convId, uid: targetUid });
       cb?.({});
