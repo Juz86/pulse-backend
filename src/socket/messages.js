@@ -74,10 +74,14 @@ module.exports = function registerMessages(io, socket, uid) {
       const verifiedMessage = { ...message, senderId: socket.userId };
       const convMembers = convMemberDoc.data().members || [];
       const historyRules = await resolveConversationHistoryRules(convMembers);
+      const { onlineUsers } = require('../state');
+      const receiverUids = convMembers.filter(memberUid => memberUid !== verifiedMessage.senderId);
+      const allReceiversOnline = receiverUids.every(memberUid => onlineUsers[memberUid]?.size);
       const isEphemeralDirectChat =
         !convDataCheck.isGroup &&
         getMessageHistoryType(verifiedMessage) === 'chat' &&
-        Number(historyRules?.chatRetentionDays ?? 30) === 0;
+        Number(historyRules?.chatRetentionDays ?? 30) === 0 &&
+        allReceiversOnline;
       const lastMessage = verifiedMessage.type === 'contact'
         ? `Contactpersoon: ${verifiedMessage.sharedContact?.name || ''}`
         : verifiedMessage.type === 'call' ? (verifiedMessage.isVideo ? 'Video-oproep' : 'Spraakoproep')
@@ -92,8 +96,6 @@ module.exports = function registerMessages(io, socket, uid) {
           createdAt: new Date().toISOString(),
           transient: true,
         };
-        const { onlineUsers } = require('../state');
-        const receiverUids = convMembers.filter(memberUid => memberUid !== verifiedMessage.senderId);
         const anyReceiverOnline = receiverUids.some(memberUid => onlineUsers[memberUid]?.size);
 
         io.to(convId).emit('message:received', transientMsg);
