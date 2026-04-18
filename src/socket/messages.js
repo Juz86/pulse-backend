@@ -246,7 +246,7 @@ module.exports = function registerMessages(io, socket, uid) {
         payload,
         onlineUsers,
       );
-      callback?.({ success: true });
+      callback?.({ success: true, reactions: updatedReactions });
     } catch (err) {
       console.error('Fout bij reactie:', err);
       callback?.({ error: 'Serverfout' });

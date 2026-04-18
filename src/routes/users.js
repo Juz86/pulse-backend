@@ -431,6 +431,53 @@ module.exports = (io, onlineUsers) => {
     }
   });
 
+  // ─── REST: Emoji-reactie op bericht ───────────────────────────────────────
+  router.post('/api/messages/:convId/:msgId/react', verifyAuth, async (req, res) => {
+    try {
+      const { convId, msgId } = req.params;
+      const { emoji } = req.body || {};
+      const uid = req.uid;
+
+      if (!emoji || typeof emoji !== 'string') {
+        return res.status(400).json({ error: 'Ongeldige reactie.' });
+      }
+
+      const convDoc = await db.collection('conversations').doc(convId).get();
+      if (!convDoc.exists) return res.status(404).json({ error: 'Gesprek niet gevonden.' });
+      const convData = convDoc.data() || {};
+      const members = convData.members || [];
+      if (!members.includes(uid)) return res.status(403).json({ error: 'Geen toegang tot dit gesprek.' });
+
+      const msgRef = db.collection('conversations').doc(convId).collection('messages').doc(msgId);
+      const msgDoc = await msgRef.get();
+      if (!msgDoc.exists) return res.status(404).json({ error: 'Bericht niet gevonden.' });
+
+      const currentReactors = (msgDoc.data().reactions || {})[emoji] || [];
+      const hasReacted = currentReactors.includes(uid);
+      const field = `reactions.${emoji}`;
+
+      await msgRef.update({
+        [field]: hasReacted
+          ? admin.firestore.FieldValue.arrayRemove(uid)
+          : admin.firestore.FieldValue.arrayUnion(uid),
+      });
+
+      const reactions = (await msgRef.get()).data().reactions || {};
+      const payload = { convId, msgId, reactions };
+
+      io.to(convId).emit('message:reaction', payload);
+      members.forEach(memberUid => {
+        const sockets = onlineUsers[memberUid];
+        if (sockets) sockets.forEach(sid => io.to(sid).emit('message:reaction', payload));
+      });
+
+      res.json({ success: true, reactions });
+    } catch (err) {
+      console.error('Fout bij reactie:', err);
+      res.status(500).json({ error: 'Serverfout bij reactie' });
+    }
+  });
+
   // ─── REST: Bericht verwijderen ───────────────────────────────────────────────
   router.delete('/api/messages/:convId/:msgId', verifyAuth, async (req, res) => {
     try {
