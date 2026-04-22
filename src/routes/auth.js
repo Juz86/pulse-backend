@@ -6,6 +6,7 @@ const { transporter, otpSet, otpGet, otpDel } = require('../email');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function validEmail(e) { return typeof e === 'string' && EMAIL_REGEX.test(e.trim()); }
+const DEFAULT_WEB_APP_URL = process.env.WEB_APP_URL || process.env.APP_URL || 'http://localhost:3000';
 
 // ─── OTP: Stuur verificatiecode ──────────────────────────────────────────────
 router.post('/api/send-code', sendCodeLimiter, async (req, res) => {
@@ -59,7 +60,7 @@ router.post('/api/send-reset', sendCodeLimiter, async (req, res) => {
   if (!validEmail(email)) return res.status(400).json({ error: 'Ongeldig e-mailadres.' });
   try {
     const resetLink = await admin.auth().generatePasswordResetLink(email, {
-      url: actionUrl || process.env.APP_URL || 'http://localhost:3000',
+      url: actionUrl || DEFAULT_WEB_APP_URL,
     });
     await transporter.sendMail({
       from: '"Pulse" <info@pulse-messenger.com>',

@@ -10,7 +10,6 @@ Sentry.init({
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const cors = require('cors');
 
 // ─── Core modules ─────────────────────────────────────────────────────────────
 const { admin, db } = require('./src/firebase');
@@ -36,27 +35,82 @@ const registerCalls         = require('./src/socket/calls');
 const registerConversations = require('./src/socket/conversations');
 
 // ─── App URL ──────────────────────────────────────────────────────────────────
-const APP_URL = process.env.APP_URL;
-if (!APP_URL) console.warn('⚠️ APP_URL niet ingesteld — stel dit in als de Cloudflare Pages URL in de Railway omgevingsvariabelen.');
+const APP_URL = process.env.APP_URL || '';
+const WEB_APP_URL = process.env.WEB_APP_URL || '';
+const CORS_ORIGINS = process.env.CORS_ORIGINS || '';
+const CORS_ORIGIN_SUFFIXES = process.env.CORS_ORIGIN_SUFFIXES || '';
+if (!APP_URL) console.warn('⚠️ APP_URL niet ingesteld — stel dit in als de marketing URL in de Railway omgevingsvariabelen.');
+if (!WEB_APP_URL) console.warn('⚠️ WEB_APP_URL niet ingesteld — stel dit in als de webapp URL in de Railway omgevingsvariabelen.');
+
+function parseOriginList(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => item.replace(/\/+$/, ''));
+}
+
+function parseHostSuffixes(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean)
+    .map((item) => item.startsWith('.') ? item : `.${item}`);
+}
+
+function normalizeOrigin(value) {
+  return String(value || '').trim().replace(/\/+$/, '');
+}
+
+const marketingOrigins = new Set(parseOriginList(APP_URL));
+const appOrigins = new Set([
+  ...parseOriginList(WEB_APP_URL),
+  ...parseOriginList(CORS_ORIGINS),
+  'http://localhost:3000',
+  'http://localhost:5173',
+]);
+const allowedHostSuffixes = new Set(parseHostSuffixes(CORS_ORIGIN_SUFFIXES));
+
+function isAllowedOrigin(origin) {
+  const cleanOrigin = normalizeOrigin(origin);
+  if (!cleanOrigin) return true;
+
+  try {
+    const url = new URL(cleanOrigin);
+    if (['localhost', '127.0.0.1', '0.0.0.0'].includes(url.hostname)) return true;
+    if (marketingOrigins.has(url.origin)) return true;
+    if (appOrigins.has(url.origin)) return true;
+    const hostname = String(url.hostname || '').toLowerCase();
+    for (const suffix of allowedHostSuffixes) {
+      if (hostname.endsWith(suffix)) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function applyCorsHeaders(res, origin) {
+  if (!origin) return;
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  res.setHeader('Access-Control-Max-Age', '86400');
+}
 
 // ─── Express + HTTP + Socket.IO ──────────────────────────────────────────────
 const app = express();
 const server = http.createServer(app);
 
-// CORS: sta alleen bekende origins toe. Primaire beveiliging = Firebase-token
-// verificatie in de Socket.IO auth middleware.
-const allowedOrigins = APP_URL
-  ? [...APP_URL.split(',').map(s => s.trim()), 'http://localhost:3000', 'http://localhost:5173']
-  : null;
-const corsOrigin = allowedOrigins
-  ? (origin, cb) => {
-      if (!origin || allowedOrigins.includes(origin)) cb(null, true);
-      else cb(new Error('CORS: origin niet toegestaan'));
-    }
-  : true; // fallback voor development zonder APP_URL
-
 const io = new Server(server, {
-  cors: { origin: corsOrigin, methods: ['GET', 'POST'], credentials: true },
+  cors: {
+    origin(origin, cb) {
+      cb(null, isAllowedOrigin(origin));
+    },
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
 });
 
 // Redis adapter: synchroniseert Socket.IO events tussen meerdere server-instanties
@@ -72,12 +126,44 @@ if (redisPub && redisSub) {
 
 // ─── Express middleware ───────────────────────────────────────────────────────
 app.set('trust proxy', 1);
-app.use(cors({ origin: corsOrigin, credentials: true }));
+app.use((req, res, next) => {
+  const requestOrigin = normalizeOrigin(req.headers.origin);
+
+  if (!requestOrigin) {
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    return next();
+  }
+
+  if (!isAllowedOrigin(requestOrigin)) {
+    return res.status(403).json({ error: 'origin_not_allowed' });
+  }
+
+  applyCorsHeaders(res, requestOrigin);
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
+  return next();
+});
 app.use(express.json());
 app.use(globalLimiter);
 app.use(securityHeaders);
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
+app.get('/', (_req, res) => {
+  res.json({ ok: true, service: 'pulse-backend' });
+});
+
+app.get('/health', (_req, res) => {
+  res.json({
+    ok: true,
+    service: 'pulse-backend',
+    appOrigins: Array.from(appOrigins),
+    marketingOrigins: Array.from(marketingOrigins),
+  });
+});
+
 app.use(authRouter);
 app.use(miscRouter);
 app.use(usersRouter(io, onlineUsers));
@@ -215,6 +301,10 @@ Sentry.setupExpressErrorHandler(app);
 // Generieke Express error handler
 app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   console.error('[Pulse] Server error:', err.message);
+  const requestOrigin = normalizeOrigin(req.headers.origin);
+  if (isAllowedOrigin(requestOrigin)) {
+    applyCorsHeaders(res, requestOrigin);
+  }
   res.status(500).json({ error: 'Interne serverfout' });
 });
 
