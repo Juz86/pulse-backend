@@ -10,6 +10,7 @@ Sentry.init({
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const jwt = require('jsonwebtoken');
 
 // ─── Core modules ─────────────────────────────────────────────────────────────
 const { admin, db } = require('./src/firebase');
@@ -183,7 +184,15 @@ io.use(async (socket, next) => {
     socket.userId = decoded.uid;
     next();
   } catch {
-    next(new Error('Ongeldig token.'));
+    try {
+      const nativeSecret = process.env.NATIVE_AUTH_JWT_SECRET || process.env.JWT_SECRET || 'dev-native-secret-change-me';
+      const decodedNative = jwt.verify(token, nativeSecret);
+      if (!decodedNative?.sub) return next(new Error('Ongeldig token.'));
+      socket.userId = String(decodedNative.sub);
+      next();
+    } catch {
+      next(new Error('Ongeldig token.'));
+    }
   }
 });
 
