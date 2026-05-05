@@ -765,5 +765,5 @@ router.post('/native/auth/refresh', (req, res) => {
   }
 });
 
-module.exports = router;
+return router;
 };
