@@ -22,6 +22,7 @@ const { runCleanup, scheduleDaily } = require('./src/cleanup');
 
 // ─── Route modules ────────────────────────────────────────────────────────────
 const authRouter    = require('./src/routes/auth');
+const nativeAuthRouter = require('./src/routes/auth.native');
 const miscRouter    = require('./src/routes/misc');
 const usersRouter   = require('./src/routes/users');
 const parentRouter  = require('./src/routes/parent');
@@ -165,6 +166,7 @@ app.get('/health', (_req, res) => {
 });
 
 app.use(authRouter);
+app.use(nativeAuthRouter);
 app.use(miscRouter);
 app.use(usersRouter(io, onlineUsers));
 app.use(parentRouter(io, onlineUsers));
