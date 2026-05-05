@@ -1,3 +1,4 @@
+module.exports = (io) => {
 const router = require('express').Router();
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
@@ -481,6 +482,15 @@ router.post('/contacts/request', async (req, res) => {
       [requestId, auth.sub, target.id]
     );
 
+    io?.to(target.id).emit('friend:request', {
+      requestId,
+      fromUserId: auth.sub,
+      toUserId: target.id,
+      status: 'pending',
+    });
+    io?.to(auth.sub).emit('contact-requests:updated', { reason: 'request_sent' });
+    io?.to(target.id).emit('contact-requests:updated', { reason: 'request_received' });
+
     return res.json({ success: true, message: 'Contactverzoek verstuurd' });
   } catch (err) {
     console.error('Native contactverzoek fout:', err);
@@ -569,6 +579,16 @@ router.post('/contact-requests/:requestId/accept', async (req, res) => {
     );
     await pool.query('COMMIT');
 
+    io?.to(row.from_user_id).emit('friend:accepted', {
+      requestId,
+      byUserId: row.to_user_id,
+      status: 'accepted',
+    });
+    io?.to(row.to_user_id).emit('contacts:updated', { reason: 'request_accepted' });
+    io?.to(row.from_user_id).emit('contacts:updated', { reason: 'request_accepted' });
+    io?.to(row.to_user_id).emit('contact-requests:updated', { reason: 'request_accepted' });
+    io?.to(row.from_user_id).emit('contact-requests:updated', { reason: 'request_accepted' });
+
     return res.json({ success: true, message: 'Verzoek geaccepteerd' });
   } catch (err) {
     try { await pool.query('ROLLBACK'); } catch {}
@@ -594,10 +614,22 @@ router.post('/contact-requests/:requestId/decline', async (req, res) => {
     if (!found.rows.length) return res.status(404).json({ error: 'Verzoek niet gevonden' });
     if (found.rows[0].to_user_id !== auth.sub) return res.status(403).json({ error: 'Geen toegang.' });
 
+    const ownerFrom = await pool.query(
+      `SELECT from_user_id, to_user_id FROM native_friend_requests WHERE id = $1 LIMIT 1`,
+      [requestId]
+    );
     await pool.query(
       `UPDATE native_friend_requests SET status = 'declined', updated_at = NOW() WHERE id = $1`,
       [requestId]
     );
+    const eventRow = ownerFrom.rows[0];
+    io?.to(eventRow.from_user_id).emit('friend:declined', {
+      requestId,
+      byUserId: eventRow.to_user_id,
+      status: 'declined',
+    });
+    io?.to(eventRow.from_user_id).emit('contact-requests:updated', { reason: 'request_declined' });
+    io?.to(eventRow.to_user_id).emit('contact-requests:updated', { reason: 'request_declined' });
     return res.json({ success: true, message: 'Verzoek geweigerd' });
   } catch (err) {
     console.error('Native decline contact request fout:', err);
@@ -622,10 +654,22 @@ router.delete('/contact-requests/:requestId/cancel', async (req, res) => {
     if (!found.rows.length) return res.status(404).json({ error: 'Verzoek niet gevonden' });
     if (found.rows[0].from_user_id !== auth.sub) return res.status(403).json({ error: 'Geen toegang.' });
 
+    const ownerTo = await pool.query(
+      `SELECT from_user_id, to_user_id FROM native_friend_requests WHERE id = $1 LIMIT 1`,
+      [requestId]
+    );
     await pool.query(
       `UPDATE native_friend_requests SET status = 'cancelled', updated_at = NOW() WHERE id = $1`,
       [requestId]
     );
+    const eventRow = ownerTo.rows[0];
+    io?.to(eventRow.to_user_id).emit('friend:cancelled', {
+      requestId,
+      byUserId: eventRow.from_user_id,
+      status: 'cancelled',
+    });
+    io?.to(eventRow.from_user_id).emit('contact-requests:updated', { reason: 'request_cancelled' });
+    io?.to(eventRow.to_user_id).emit('contact-requests:updated', { reason: 'request_cancelled' });
     return res.json({ success: true, message: 'Verzoek geannuleerd' });
   } catch (err) {
     console.error('Native cancel contact request fout:', err);
@@ -648,6 +692,9 @@ router.delete('/contacts/:contactId', async (req, res) => {
       `DELETE FROM native_contacts WHERE owner_id = $1 AND contact_id = $2`,
       [auth.sub, contactId]
     );
+    io?.to(auth.sub).emit('contacts:updated', { reason: 'contact_removed' });
+    io?.to(contactId).emit('contacts:updated', { reason: 'contact_removed_by_other' });
+    io?.to(contactId).emit('contact:removed', { byUserId: auth.sub, contactId });
     return res.json({ success: true });
   } catch (err) {
     console.error('Native contact verwijderen fout:', err);
@@ -702,3 +749,4 @@ router.post('/native/auth/refresh', (req, res) => {
 });
 
 module.exports = router;
+};

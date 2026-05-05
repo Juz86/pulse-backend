@@ -166,7 +166,7 @@ app.get('/health', (_req, res) => {
 });
 
 app.use(authRouter);
-app.use(nativeAuthRouter);
+app.use(nativeAuthRouter(io));
 app.use(miscRouter);
 app.use(usersRouter(io, onlineUsers));
 app.use(parentRouter(io, onlineUsers));
