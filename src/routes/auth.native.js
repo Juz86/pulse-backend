@@ -475,6 +475,11 @@ router.post('/contacts/request', async (req, res) => {
     );
     if (existingPending.rows.length) return res.status(409).json({ error: 'Verzoek al verzonden' });
 
+    const fromUser = await pool.query(
+      `SELECT id, email, display_name FROM native_users WHERE id = $1 LIMIT 1`,
+      [auth.sub]
+    );
+    const sender = fromUser.rows[0];
     const requestId = crypto.randomUUID();
     await pool.query(
       `INSERT INTO native_friend_requests (id, from_user_id, to_user_id, status)
@@ -483,9 +488,15 @@ router.post('/contacts/request', async (req, res) => {
     );
 
     io?.to(target.id).emit('friend:request', {
+      id: requestId,
       requestId,
-      fromUserId: auth.sub,
-      toUserId: target.id,
+      fromUid: sender.id,
+      fromName: sender.display_name,
+      fromEmail: sender.email,
+      fromPhoto: null,
+      toUid: target.id,
+      toName: target.display_name,
+      toEmail: target.email,
       status: 'pending',
     });
     io?.to(auth.sub).emit('contact-requests:updated', { reason: 'request_sent' });
@@ -578,10 +589,16 @@ router.post('/contact-requests/:requestId/accept', async (req, res) => {
       [requestId]
     );
     await pool.query('COMMIT');
+    const acceptor = await pool.query(
+      `SELECT display_name FROM native_users WHERE id = $1 LIMIT 1`,
+      [row.to_user_id]
+    );
+    const byName = acceptor.rows[0]?.display_name || 'Contact';
 
     io?.to(row.from_user_id).emit('friend:accepted', {
       requestId,
-      byUserId: row.to_user_id,
+      byUid: row.to_user_id,
+      byName,
       status: 'accepted',
     });
     io?.to(row.to_user_id).emit('contacts:updated', { reason: 'request_accepted' });
@@ -663,7 +680,7 @@ router.delete('/contact-requests/:requestId/cancel', async (req, res) => {
       [requestId]
     );
     const eventRow = ownerTo.rows[0];
-    io?.to(eventRow.to_user_id).emit('friend:cancelled', {
+    io?.to(eventRow.to_user_id).emit('friend:request:cancelled', {
       requestId,
       byUserId: eventRow.from_user_id,
       status: 'cancelled',
