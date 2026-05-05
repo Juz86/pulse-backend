@@ -17,12 +17,16 @@ const transporter = {
   },
 };
 
-// ─── OTP store: Redis (snel) + Firestore (persistent, multi-instance safe) ────
+// ─── OTP store: Redis (snel) + Firestore (persistent) + Memory fallback ──────
 const OTP_TTL_SECONDS = 15 * 60;
-const OTP_COLLECTION  = 'verificationCodes';
+const OTP_COLLECTION = 'verificationCodes';
+const otpMemoryStore = new Map();
 
 async function otpSet(email, code, expiresAt) {
   const r = getRedis();
+
+  // Always store in memory fallback so verify works even without Redis/Firebase.
+  otpMemoryStore.set(email, { code, expiresAt });
 
   await db.collection(OTP_COLLECTION).doc(email).set({
     code, expiresAt, createdAt: Date.now(),
@@ -40,16 +44,27 @@ async function otpGet(email) {
     try {
       const val = await r.get(`otp:${email}`);
       if (val) return JSON.parse(val);
-    } catch { /* doorvallen naar Firestore */ }
+    } catch {
+      // fall through
+    }
   }
 
   const snap = await db.collection(OTP_COLLECTION).doc(email).get().catch(() => null);
-  if (!snap?.exists) return null;
-  return snap.data();
+  if (snap?.exists) return snap.data();
+
+  const mem = otpMemoryStore.get(email);
+  if (!mem) return null;
+  if (Date.now() > mem.expiresAt) {
+    otpMemoryStore.delete(email);
+    return null;
+  }
+  return mem;
 }
 
 async function otpDel(email) {
   const r = getRedis();
+
+  otpMemoryStore.delete(email);
 
   await db.collection(OTP_COLLECTION).doc(email).delete()
     .catch(e => console.warn('[Pulse] OTP Firestore delete mislukt:', e.message));
