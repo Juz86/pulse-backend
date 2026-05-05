@@ -2,7 +2,6 @@ const router = require('express').Router();
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
-const { strictLimiter } = require('../middleware');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const JWT_SECRET = process.env.NATIVE_AUTH_JWT_SECRET || process.env.JWT_SECRET || 'dev-native-secret-change-me';
@@ -41,13 +40,20 @@ function hashPassword(password) {
 }
 
 function verifyPassword(password, encoded) {
-  const [salt, hash] = String(encoded || '').split(':');
-  if (!salt || !hash) return false;
+  const raw = String(encoded || '');
+  // Legacy fallback: old rows may still contain plaintext password.
+  if (!raw.includes(':')) {
+    return { ok: raw === password, needsRehash: raw === password };
+  }
+
+  const [salt, hash] = raw.split(':');
+  if (!salt || !hash) return { ok: false, needsRehash: false };
+
   const candidate = crypto.scryptSync(password, salt, 64).toString('hex');
   const a = Buffer.from(hash, 'hex');
   const b = Buffer.from(candidate, 'hex');
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
+  if (a.length !== b.length) return { ok: false, needsRehash: false };
+  return { ok: crypto.timingSafeEqual(a, b), needsRehash: false };
 }
 
 function makeToken(user) {
@@ -73,7 +79,7 @@ function extractToken(req) {
   return auth.slice('Bearer '.length).trim();
 }
 
-router.post('/native/auth/register', strictLimiter, async (req, res) => {
+router.post('/native/auth/register', async (req, res) => {
   const email = String(req.body?.email || '').trim().toLowerCase();
   const password = String(req.body?.password || '');
   const displayName = String(req.body?.displayName || '').trim();
@@ -105,7 +111,7 @@ router.post('/native/auth/register', strictLimiter, async (req, res) => {
   }
 });
 
-router.post('/native/auth/login', strictLimiter, async (req, res) => {
+router.post('/native/auth/login', async (req, res) => {
   const email = String(req.body?.email || '').trim().toLowerCase();
   const password = String(req.body?.password || '');
 
@@ -128,8 +134,17 @@ router.post('/native/auth/login', strictLimiter, async (req, res) => {
     }
 
     const row = found.rows[0];
-    if (!verifyPassword(password, row.password_hash)) {
+    const passwordCheck = verifyPassword(password, row.password_hash);
+    if (!passwordCheck.ok) {
       return res.status(401).json({ error: 'Onjuiste e-mail of wachtwoord.' });
+    }
+
+    if (passwordCheck.needsRehash) {
+      const upgradedHash = hashPassword(password);
+      await pool.query(
+        `UPDATE native_users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+        [upgradedHash, row.id]
+      );
     }
 
     const user = toUserDto(row);
