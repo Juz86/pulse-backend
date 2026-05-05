@@ -34,6 +34,16 @@ async function ensureSchema() {
     ON native_users (LOWER(username))
     WHERE username IS NOT NULL;
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS native_parent_children (
+      parent_id TEXT NOT NULL,
+      child_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (parent_id, child_id),
+      FOREIGN KEY (parent_id) REFERENCES native_users(id) ON DELETE CASCADE,
+      FOREIGN KEY (child_id) REFERENCES native_users(id) ON DELETE CASCADE
+    );
+  `);
   schemaReady = true;
 }
 
@@ -87,6 +97,18 @@ function extractToken(req) {
   const auth = req.headers.authorization || '';
   if (!auth.startsWith('Bearer ')) return null;
   return auth.slice('Bearer '.length).trim();
+}
+
+function decodeAccessToken(req) {
+  const token = extractToken(req);
+  if (!token) return { error: 'Niet geautoriseerd.' };
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (!decoded?.sub) return { error: 'Ongeldig token.' };
+    return { sub: String(decoded.sub), role: String(decoded.role || '') };
+  } catch {
+    return { error: 'Ongeldig token.' };
+  }
 }
 
 router.post('/native/auth/register', async (req, res) => {
@@ -201,6 +223,125 @@ router.post('/native/auth/login', async (req, res) => {
   } catch (err) {
     console.error('Native login fout:', err);
     return res.status(500).json({ error: 'Inloggen mislukt.' });
+  }
+});
+
+router.get('/native/parent/children', async (req, res) => {
+  const auth = decodeAccessToken(req);
+  if (auth.error) return res.status(401).json({ error: auth.error });
+  if (auth.role !== 'parent') return res.status(403).json({ error: 'Alleen ouderaccounts hebben toegang.' });
+  if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL ontbreekt.' });
+
+  try {
+    await ensureSchema();
+    const result = await pool.query(
+      `SELECT c.id AS uid, c.display_name, c.username, c.email, c.created_at
+       FROM native_parent_children pc
+       JOIN native_users c ON c.id = pc.child_id
+       WHERE pc.parent_id = $1 AND c.role = 'child'
+       ORDER BY c.created_at DESC`,
+      [auth.sub]
+    );
+
+    const children = result.rows.map((row) => ({
+      uid: row.uid,
+      displayName: row.display_name,
+      username: row.username || null,
+      email: row.email || null,
+      photoURL: null,
+      online: false,
+      lastSeen: null,
+      pausedFeatures: { chat: false, call: false, video: false },
+    }));
+
+    return res.json(children);
+  } catch (err) {
+    console.error('Native parent children fout:', err);
+    return res.status(500).json({ error: 'Kinderen ophalen mislukt.' });
+  }
+});
+
+router.post('/native/parent/create-child', async (req, res) => {
+  const auth = decodeAccessToken(req);
+  if (auth.error) return res.status(401).json({ error: auth.error });
+  if (auth.role !== 'parent') return res.status(403).json({ error: 'Alleen ouderaccounts kunnen kindaccounts maken.' });
+  if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL ontbreekt.' });
+
+  const name = String(req.body?.name || '').trim();
+  const username = String(req.body?.username || '').trim().toLowerCase();
+  const password = String(req.body?.password || '');
+
+  if (!validDisplayName(name)) return res.status(400).json({ error: 'Naam moet minimaal 2 tekens bevatten.' });
+  if (!validUsername(username)) return res.status(400).json({ error: 'Gebruikersnaam: 3-32 tekens, alleen a-z 0-9 . _ -' });
+  if (!validPassword(password)) return res.status(400).json({ error: 'Wachtwoord moet minimaal 8 tekens bevatten.' });
+
+  const syntheticEmail = `${username}@child.native`;
+
+  try {
+    await ensureSchema();
+    await pool.query('BEGIN');
+
+    const existingUsername = await pool.query(
+      `SELECT id FROM native_users WHERE LOWER(username) = LOWER($1) LIMIT 1`,
+      [username]
+    );
+    if (existingUsername.rows.length) {
+      await pool.query('ROLLBACK');
+      return res.status(409).json({ error: 'Gebruikersnaam is al in gebruik.' });
+    }
+
+    const existingEmail = await pool.query(
+      `SELECT id FROM native_users WHERE email = $1 LIMIT 1`,
+      [syntheticEmail]
+    );
+    if (existingEmail.rows.length) {
+      await pool.query('ROLLBACK');
+      return res.status(409).json({ error: 'Gebruikersnaam is al in gebruik.' });
+    }
+
+    const childId = crypto.randomUUID();
+    const passwordHash = hashPassword(password);
+
+    const createdChild = await pool.query(
+      `INSERT INTO native_users (id, email, username, password_hash, display_name, role)
+       VALUES ($1, $2, $3, $4, $5, 'child')
+       RETURNING id, email, username, display_name, role`,
+      [childId, syntheticEmail, username, passwordHash, name]
+    );
+
+    await pool.query(
+      `INSERT INTO native_parent_children (parent_id, child_id)
+       VALUES ($1, $2)
+       ON CONFLICT (parent_id, child_id) DO NOTHING`,
+      [auth.sub, childId]
+    );
+
+    await pool.query('COMMIT');
+
+    const row = createdChild.rows[0];
+    const child = {
+      uid: row.id,
+      displayName: row.display_name,
+      username: row.username,
+      email: row.email,
+      photoURL: null,
+      online: false,
+      lastSeen: null,
+      pausedFeatures: { chat: false, call: false, video: false },
+    };
+
+    return res.status(201).json({
+      success: true,
+      message: 'Kindaccount aangemaakt',
+      child,
+    });
+  } catch (err) {
+    try { await pool.query('ROLLBACK'); } catch {}
+    if (err && err.code === '23505') {
+      return res.status(409).json({ error: 'Gebruikersnaam is al in gebruik.' });
+    }
+    console.error('Native parent create-child fout:', err);
+    return res.status(500).json({ error: 'Kindaccount aanmaken mislukt.' });
   }
 });
 
