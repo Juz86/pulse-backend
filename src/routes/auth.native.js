@@ -44,6 +44,36 @@ async function ensureSchema() {
       FOREIGN KEY (child_id) REFERENCES native_users(id) ON DELETE CASCADE
     );
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS native_contacts (
+      owner_id TEXT NOT NULL,
+      contact_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (owner_id, contact_id),
+      FOREIGN KEY (owner_id) REFERENCES native_users(id) ON DELETE CASCADE,
+      FOREIGN KEY (contact_id) REFERENCES native_users(id) ON DELETE CASCADE
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS native_friend_requests (
+      id TEXT PRIMARY KEY,
+      from_user_id TEXT NOT NULL,
+      to_user_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      FOREIGN KEY (from_user_id) REFERENCES native_users(id) ON DELETE CASCADE,
+      FOREIGN KEY (to_user_id) REFERENCES native_users(id) ON DELETE CASCADE
+    );
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS native_friend_requests_to_idx
+    ON native_friend_requests (to_user_id, status, created_at DESC);
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS native_friend_requests_from_idx
+    ON native_friend_requests (from_user_id, status, created_at DESC);
+  `);
   schemaReady = true;
 }
 
@@ -109,6 +139,43 @@ function decodeAccessToken(req) {
   } catch {
     return { error: 'Ongeldig token.' };
   }
+}
+
+async function findNativeUserByIdentifier(identifier) {
+  const clean = String(identifier || '').trim().toLowerCase();
+  if (!clean) return null;
+
+  if (clean.includes('@') && validEmail(clean)) {
+    const byEmail = await pool.query(
+      `SELECT id, email, username, display_name, role FROM native_users WHERE email = $1 LIMIT 1`,
+      [clean]
+    );
+    if (byEmail.rows.length) return byEmail.rows[0];
+  }
+
+  if (validUsername(clean)) {
+    const byUsername = await pool.query(
+      `SELECT id, email, username, display_name, role FROM native_users WHERE LOWER(username) = LOWER($1) LIMIT 1`,
+      [clean]
+    );
+    if (byUsername.rows.length) return byUsername.rows[0];
+  }
+
+  return null;
+}
+
+function contactDtoFromUser(row) {
+  return {
+    userId: row.id,
+    displayName: row.display_name,
+    avatarUrl: null,
+    profilePhotoUrl: null,
+    phoneNumber: null,
+    email: row.email || null,
+    status: 'offline',
+    isOnline: false,
+    lastSeen: null,
+  };
 }
 
 router.post('/native/auth/register', async (req, res) => {
@@ -342,6 +409,249 @@ router.post('/native/parent/create-child', async (req, res) => {
     }
     console.error('Native parent create-child fout:', err);
     return res.status(500).json({ error: 'Kindaccount aanmaken mislukt.' });
+  }
+});
+
+router.get('/contacts', async (req, res) => {
+  const auth = decodeAccessToken(req);
+  if (auth.error) return res.status(401).json({ error: auth.error });
+  if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL ontbreekt.' });
+
+  try {
+    await ensureSchema();
+    const result = await pool.query(
+      `SELECT u.id, u.email, u.username, u.display_name, c.created_at
+       FROM native_contacts c
+       JOIN native_users u ON u.id = c.contact_id
+       WHERE c.owner_id = $1
+       ORDER BY c.created_at DESC`,
+      [auth.sub]
+    );
+    return res.json(result.rows.map(contactDtoFromUser));
+  } catch (err) {
+    console.error('Native contacts ophalen fout:', err);
+    return res.status(500).json({ error: 'Contacten ophalen mislukt.' });
+  }
+});
+
+router.post('/contacts/request', async (req, res) => {
+  const auth = decodeAccessToken(req);
+  if (auth.error) return res.status(401).json({ error: auth.error });
+  if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL ontbreekt.' });
+
+  const query = String(req.body?.query || '').trim();
+  if (!query) return res.status(400).json({ error: 'Zoekterm ontbreekt.' });
+
+  try {
+    await ensureSchema();
+    const target = await findNativeUserByIdentifier(query);
+    if (!target) return res.status(404).json({ error: 'Gebruiker niet gevonden' });
+    if (target.id === auth.sub) return res.status(400).json({ error: 'Je kunt jezelf niet toevoegen' });
+
+    const already = await pool.query(
+      `SELECT 1 FROM native_contacts WHERE owner_id = $1 AND contact_id = $2 LIMIT 1`,
+      [auth.sub, target.id]
+    );
+    if (already.rows.length) return res.status(409).json({ error: 'Deze gebruiker is al contact' });
+
+    const reverse = await pool.query(
+      `SELECT 1 FROM native_contacts WHERE owner_id = $1 AND contact_id = $2 LIMIT 1`,
+      [target.id, auth.sub]
+    );
+    if (reverse.rows.length) {
+      await pool.query(
+        `INSERT INTO native_contacts (owner_id, contact_id) VALUES ($1, $2) ON CONFLICT (owner_id, contact_id) DO NOTHING`,
+        [auth.sub, target.id]
+      );
+      return res.json({ success: true, message: 'Contact toegevoegd' });
+    }
+
+    const existingPending = await pool.query(
+      `SELECT id FROM native_friend_requests
+       WHERE from_user_id = $1 AND to_user_id = $2 AND status = 'pending'
+       LIMIT 1`,
+      [auth.sub, target.id]
+    );
+    if (existingPending.rows.length) return res.status(409).json({ error: 'Verzoek al verzonden' });
+
+    const requestId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO native_friend_requests (id, from_user_id, to_user_id, status)
+       VALUES ($1, $2, $3, 'pending')`,
+      [requestId, auth.sub, target.id]
+    );
+
+    return res.json({ success: true, message: 'Contactverzoek verstuurd' });
+  } catch (err) {
+    console.error('Native contactverzoek fout:', err);
+    return res.status(500).json({ error: 'Contact toevoegen mislukt.' });
+  }
+});
+
+router.get('/contact-requests', async (req, res) => {
+  const auth = decodeAccessToken(req);
+  if (auth.error) return res.status(401).json({ error: auth.error });
+  if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL ontbreekt.' });
+
+  try {
+    await ensureSchema();
+    const result = await pool.query(
+      `SELECT r.id AS request_id, r.status, r.created_at,
+              fu.id AS from_id, fu.display_name AS from_name,
+              tu.id AS to_id, tu.display_name AS to_name
+       FROM native_friend_requests r
+       JOIN native_users fu ON fu.id = r.from_user_id
+       JOIN native_users tu ON tu.id = r.to_user_id
+       WHERE r.status = 'pending' AND (r.from_user_id = $1 OR r.to_user_id = $1)
+       ORDER BY r.created_at DESC`,
+      [auth.sub]
+    );
+
+    const items = result.rows.map((row) => ({
+      requestId: row.request_id,
+      fromUser: {
+        userId: row.from_id,
+        displayName: row.from_name,
+        avatarUrl: null,
+        profilePhotoUrl: null,
+      },
+      toUser: {
+        userId: row.to_id,
+        displayName: row.to_name,
+        avatarUrl: null,
+        profilePhotoUrl: null,
+      },
+      status: row.status,
+      createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+    }));
+
+    return res.json(items);
+  } catch (err) {
+    console.error('Native contact requests ophalen fout:', err);
+    return res.status(500).json({ error: 'Verzoeken ophalen mislukt.' });
+  }
+});
+
+router.post('/contact-requests/:requestId/accept', async (req, res) => {
+  const auth = decodeAccessToken(req);
+  if (auth.error) return res.status(401).json({ error: auth.error });
+  if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL ontbreekt.' });
+
+  const requestId = String(req.params?.requestId || '').trim();
+  if (!requestId) return res.status(400).json({ error: 'requestId ontbreekt.' });
+
+  try {
+    await ensureSchema();
+    const found = await pool.query(
+      `SELECT id, from_user_id, to_user_id, status
+       FROM native_friend_requests
+       WHERE id = $1
+       LIMIT 1`,
+      [requestId]
+    );
+    if (!found.rows.length) return res.status(404).json({ error: 'Verzoek niet gevonden' });
+    const row = found.rows[0];
+    if (row.to_user_id !== auth.sub) return res.status(403).json({ error: 'Geen toegang.' });
+    if (row.status !== 'pending') return res.json({ success: true, message: 'Actie uitgevoerd' });
+
+    await pool.query('BEGIN');
+    await pool.query(
+      `INSERT INTO native_contacts (owner_id, contact_id) VALUES ($1, $2) ON CONFLICT (owner_id, contact_id) DO NOTHING`,
+      [row.to_user_id, row.from_user_id]
+    );
+    await pool.query(
+      `INSERT INTO native_contacts (owner_id, contact_id) VALUES ($1, $2) ON CONFLICT (owner_id, contact_id) DO NOTHING`,
+      [row.from_user_id, row.to_user_id]
+    );
+    await pool.query(
+      `UPDATE native_friend_requests SET status = 'accepted', updated_at = NOW() WHERE id = $1`,
+      [requestId]
+    );
+    await pool.query('COMMIT');
+
+    return res.json({ success: true, message: 'Verzoek geaccepteerd' });
+  } catch (err) {
+    try { await pool.query('ROLLBACK'); } catch {}
+    console.error('Native accept contact request fout:', err);
+    return res.status(500).json({ error: 'Actie mislukt.' });
+  }
+});
+
+router.post('/contact-requests/:requestId/decline', async (req, res) => {
+  const auth = decodeAccessToken(req);
+  if (auth.error) return res.status(401).json({ error: auth.error });
+  if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL ontbreekt.' });
+
+  const requestId = String(req.params?.requestId || '').trim();
+  if (!requestId) return res.status(400).json({ error: 'requestId ontbreekt.' });
+
+  try {
+    await ensureSchema();
+    const found = await pool.query(
+      `SELECT id, to_user_id FROM native_friend_requests WHERE id = $1 AND status = 'pending' LIMIT 1`,
+      [requestId]
+    );
+    if (!found.rows.length) return res.status(404).json({ error: 'Verzoek niet gevonden' });
+    if (found.rows[0].to_user_id !== auth.sub) return res.status(403).json({ error: 'Geen toegang.' });
+
+    await pool.query(
+      `UPDATE native_friend_requests SET status = 'declined', updated_at = NOW() WHERE id = $1`,
+      [requestId]
+    );
+    return res.json({ success: true, message: 'Verzoek geweigerd' });
+  } catch (err) {
+    console.error('Native decline contact request fout:', err);
+    return res.status(500).json({ error: 'Actie mislukt.' });
+  }
+});
+
+router.delete('/contact-requests/:requestId/cancel', async (req, res) => {
+  const auth = decodeAccessToken(req);
+  if (auth.error) return res.status(401).json({ error: auth.error });
+  if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL ontbreekt.' });
+
+  const requestId = String(req.params?.requestId || '').trim();
+  if (!requestId) return res.status(400).json({ error: 'requestId ontbreekt.' });
+
+  try {
+    await ensureSchema();
+    const found = await pool.query(
+      `SELECT id, from_user_id FROM native_friend_requests WHERE id = $1 AND status = 'pending' LIMIT 1`,
+      [requestId]
+    );
+    if (!found.rows.length) return res.status(404).json({ error: 'Verzoek niet gevonden' });
+    if (found.rows[0].from_user_id !== auth.sub) return res.status(403).json({ error: 'Geen toegang.' });
+
+    await pool.query(
+      `UPDATE native_friend_requests SET status = 'cancelled', updated_at = NOW() WHERE id = $1`,
+      [requestId]
+    );
+    return res.json({ success: true, message: 'Verzoek geannuleerd' });
+  } catch (err) {
+    console.error('Native cancel contact request fout:', err);
+    return res.status(500).json({ error: 'Actie mislukt.' });
+  }
+});
+
+router.delete('/contacts/:contactId', async (req, res) => {
+  const auth = decodeAccessToken(req);
+  if (auth.error) return res.status(401).json({ error: auth.error });
+  if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL ontbreekt.' });
+
+  const contactId = String(req.params?.contactId || '').trim();
+  if (!contactId) return res.status(400).json({ error: 'contactId ontbreekt.' });
+  if (contactId === auth.sub) return res.status(400).json({ error: 'Ongeldig verzoek.' });
+
+  try {
+    await ensureSchema();
+    await pool.query(
+      `DELETE FROM native_contacts WHERE owner_id = $1 AND contact_id = $2`,
+      [auth.sub, contactId]
+    );
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Native contact verwijderen fout:', err);
+    return res.status(500).json({ error: 'Contact verwijderen mislukt.' });
   }
 });
 
