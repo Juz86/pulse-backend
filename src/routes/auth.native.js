@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const USERNAME_REGEX = /^[a-z0-9._-]{3,32}$/;
 const JWT_SECRET = process.env.NATIVE_AUTH_JWT_SECRET || process.env.JWT_SECRET || 'dev-native-secret-change-me';
 const JWT_EXPIRES_IN = process.env.NATIVE_AUTH_JWT_EXPIRES_IN || '7d';
 
@@ -19,6 +20,7 @@ async function ensureSchema() {
     CREATE TABLE IF NOT EXISTS native_users (
       id TEXT PRIMARY KEY,
       email TEXT UNIQUE NOT NULL,
+      username TEXT,
       password_hash TEXT NOT NULL,
       display_name TEXT NOT NULL,
       role TEXT NOT NULL DEFAULT 'child',
@@ -26,10 +28,17 @@ async function ensureSchema() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  await pool.query(`ALTER TABLE native_users ADD COLUMN IF NOT EXISTS username TEXT;`);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS native_users_username_unique_idx
+    ON native_users (LOWER(username))
+    WHERE username IS NOT NULL;
+  `);
   schemaReady = true;
 }
 
 function validEmail(e) { return typeof e === 'string' && EMAIL_REGEX.test(e.trim()); }
+function validUsername(u) { return typeof u === 'string' && USERNAME_REGEX.test(u.trim().toLowerCase()); }
 function validDisplayName(name) { return typeof name === 'string' && name.trim().length >= 2; }
 function validPassword(password) { return typeof password === 'string' && password.length >= 8; }
 
@@ -70,6 +79,7 @@ function toUserDto(row) {
     email: row.email,
     displayName: row.display_name,
     role: row.role,
+    username: row.username || null,
   };
 }
 
@@ -85,20 +95,26 @@ router.post('/native/auth/register', async (req, res) => {
   const displayName = String(req.body?.displayName || '').trim();
   const role = req.body?.role === 'parent' ? 'parent' : 'child';
 
+  if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL ontbreekt.' });
+
+  // Child accounts must be created by parent flow.
+  if (role === 'child') {
+    return res.status(403).json({ error: 'Kindaccounts worden aangemaakt door ouderaccounts.' });
+  }
+
   if (!validEmail(email)) return res.status(400).json({ error: 'Ongeldig e-mailadres.' });
   if (!validPassword(password)) return res.status(400).json({ error: 'Wachtwoord moet minimaal 8 tekens bevatten.' });
   if (!validDisplayName(displayName)) return res.status(400).json({ error: 'Naam moet minimaal 2 tekens bevatten.' });
-  if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL ontbreekt.' });
 
   try {
     await ensureSchema();
     const id = crypto.randomUUID();
     const passwordHash = hashPassword(password);
     const inserted = await pool.query(
-      `INSERT INTO native_users (id, email, password_hash, display_name, role)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, email, display_name, role`,
-      [id, email, passwordHash, displayName, role]
+      `INSERT INTO native_users (id, email, username, password_hash, display_name, role)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, email, username, display_name, role`,
+      [id, email, null, passwordHash, displayName, role]
     );
 
     return res.status(201).json({ ok: true, user: toUserDto(inserted.rows[0]) });
@@ -112,31 +128,61 @@ router.post('/native/auth/register', async (req, res) => {
 });
 
 router.post('/native/auth/login', async (req, res) => {
-  const email = String(req.body?.email || '').trim().toLowerCase();
+  const identifier = String(req.body?.email || req.body?.username || '').trim();
   const password = String(req.body?.password || '');
 
-  if (!validEmail(email) || !password) {
-    return res.status(400).json({ error: 'Onjuiste e-mail of wachtwoord.' });
+  if (!identifier || !password) {
+    return res.status(400).json({ error: 'Onjuiste logingegevens.' });
   }
   if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL ontbreekt.' });
 
+  const byEmail = identifier.includes('@');
+
   try {
     await ensureSchema();
-    const found = await pool.query(
-      `SELECT id, email, password_hash, display_name, role
-       FROM native_users
-       WHERE email = $1
-       LIMIT 1`,
-      [email]
-    );
+
+    let found;
+    if (byEmail) {
+      const email = identifier.toLowerCase();
+      if (!validEmail(email)) return res.status(400).json({ error: 'Onjuiste logingegevens.' });
+      found = await pool.query(
+        `SELECT id, email, username, password_hash, display_name, role
+         FROM native_users
+         WHERE email = $1
+         LIMIT 1`,
+        [email]
+      );
+    } else {
+      const username = identifier.toLowerCase();
+      if (!validUsername(username)) return res.status(400).json({ error: 'Onjuiste logingegevens.' });
+      found = await pool.query(
+        `SELECT id, email, username, password_hash, display_name, role
+         FROM native_users
+         WHERE LOWER(username) = LOWER($1)
+         LIMIT 1`,
+        [username]
+      );
+    }
+
     if (!found.rows.length) {
-      return res.status(401).json({ error: 'Onjuiste e-mail of wachtwoord.' });
+      return res.status(401).json({ error: 'Onjuiste logingegevens.' });
     }
 
     const row = found.rows[0];
+
+    // Contract guard:
+    // - parent logs in with email
+    // - child logs in with username
+    if (byEmail && row.role !== 'parent') {
+      return res.status(403).json({ error: 'Kindaccount moet inloggen met gebruikersnaam en wachtwoord.' });
+    }
+    if (!byEmail && row.role !== 'child') {
+      return res.status(403).json({ error: 'Ouderaccount moet inloggen met e-mailadres en wachtwoord.' });
+    }
+
     const passwordCheck = verifyPassword(password, row.password_hash);
     if (!passwordCheck.ok) {
-      return res.status(401).json({ error: 'Onjuiste e-mail of wachtwoord.' });
+      return res.status(401).json({ error: 'Onjuiste logingegevens.' });
     }
 
     if (passwordCheck.needsRehash) {
@@ -170,7 +216,7 @@ router.get('/native/auth/me', async (req, res) => {
 
     await ensureSchema();
     const found = await pool.query(
-      `SELECT id, email, display_name, role FROM native_users WHERE id = $1 LIMIT 1`,
+      `SELECT id, email, username, display_name, role FROM native_users WHERE id = $1 LIMIT 1`,
       [id]
     );
     if (!found.rows.length) {
