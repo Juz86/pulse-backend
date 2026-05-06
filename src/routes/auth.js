@@ -10,6 +10,7 @@ function validDisplayName(name) { return typeof name === 'string' && name.trim()
 function validPassword(password) { return typeof password === 'string' && password.length >= 8; }
 const DEFAULT_WEB_APP_URL = process.env.WEB_APP_URL || process.env.APP_URL || 'http://localhost:3000';
 const MAIL_FROM = process.env.EMAIL_FROM || process.env.RESEND_FROM || '"Pulse" <onboarding@resend.dev>';
+const OTP_SOFT_FAIL = String(process.env.OTP_SOFT_FAIL || 'true').toLowerCase() === 'true';
 
 // ─── Native Auth: Register ───────────────────────────────────────────────────
 router.post('/auth/register', strictLimiter, async (req, res) => {
@@ -97,6 +98,11 @@ router.post('/api/send-code', sendCodeLimiter, async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('E-mail fout:', err);
+    if (OTP_SOFT_FAIL) {
+      console.warn(`[OTP] Soft-fail actief: maildelivery mislukt, OTP blijft geldig voor ${email}.`);
+      console.warn(`[OTP] Fallback-code voor ${email}: ${code}`);
+      return res.json({ ok: true, warning: 'mail_delivery_failed' });
+    }
     await otpDel(email); // code opruimen — gebruiker heeft hem niet ontvangen
     res.status(500).json({ error: 'E-mail versturen mislukt.' });
   }
