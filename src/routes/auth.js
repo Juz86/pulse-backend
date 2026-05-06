@@ -1,12 +1,74 @@
 const router = require('express').Router();
 const crypto = require('crypto');
-const { admin } = require('../firebase');
+const { admin, db } = require('../firebase');
 const { sendCodeLimiter, verifyCodeLimiter, strictLimiter } = require('../middleware');
 const { transporter, otpSet, otpGet, otpDel } = require('../email');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function validEmail(e) { return typeof e === 'string' && EMAIL_REGEX.test(e.trim()); }
+function validDisplayName(name) { return typeof name === 'string' && name.trim().length >= 2; }
+function validPassword(password) { return typeof password === 'string' && password.length >= 8; }
 const DEFAULT_WEB_APP_URL = process.env.WEB_APP_URL || process.env.APP_URL || 'http://localhost:3000';
+const MAIL_FROM = process.env.EMAIL_FROM || process.env.RESEND_FROM || '"Pulse" <onboarding@resend.dev>';
+
+// ─── Native Auth: Register ───────────────────────────────────────────────────
+router.post('/auth/register', strictLimiter, async (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const password = String(req.body?.password || '');
+  const displayName = String(req.body?.displayName || '').trim();
+  const role = req.body?.role === 'parent' ? 'parent' : 'child';
+
+  if (!validEmail(email)) {
+    return res.status(400).json({ error: 'Ongeldig e-mailadres.' });
+  }
+  if (!validPassword(password)) {
+    return res.status(400).json({ error: 'Wachtwoord moet minimaal 8 tekens bevatten.' });
+  }
+  if (!validDisplayName(displayName)) {
+    return res.status(400).json({ error: 'Naam moet minimaal 2 tekens bevatten.' });
+  }
+
+  try {
+    const authUser = await admin.auth().createUser({
+      email,
+      password,
+      displayName,
+      emailVerified: false,
+      disabled: false,
+    });
+
+    await db.collection('users').doc(authUser.uid).set({
+      uid: authUser.uid,
+      email,
+      displayName,
+      role,
+      photoURL: '',
+      online: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    return res.status(201).json({
+      ok: true,
+      user: {
+        id: authUser.uid,
+        email,
+        displayName,
+        role,
+      },
+    });
+  } catch (err) {
+    const code = err?.code || '';
+    if (code === 'auth/email-already-exists') {
+      return res.status(409).json({ error: 'E-mailadres bestaat al.' });
+    }
+    if (code === 'auth/invalid-password') {
+      return res.status(400).json({ error: 'Ongeldig wachtwoord.' });
+    }
+    console.error('Register fout:', err);
+    return res.status(500).json({ error: 'Registratie mislukt.' });
+  }
+});
 
 // ─── OTP: Stuur verificatiecode ──────────────────────────────────────────────
 router.post('/api/send-code', sendCodeLimiter, async (req, res) => {
@@ -18,7 +80,7 @@ router.post('/api/send-code', sendCodeLimiter, async (req, res) => {
 
   try {
     await transporter.sendMail({
-      from: '"Pulse" <info@pulse-messenger.com>',
+      from: MAIL_FROM,
       to: email,
       subject: 'Jouw verificatiecode voor Pulse',
       html: `
@@ -63,7 +125,7 @@ router.post('/api/send-reset', sendCodeLimiter, async (req, res) => {
       url: actionUrl || DEFAULT_WEB_APP_URL,
     });
     await transporter.sendMail({
-      from: '"Pulse" <info@pulse-messenger.com>',
+      from: MAIL_FROM,
       to: email,
       subject: 'Wachtwoord opnieuw instellen — Pulse',
       html: `
