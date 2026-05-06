@@ -3,11 +3,23 @@ const { getRedis } = require('./redis');
 const { db } = require('./firebase');
 
 // ─── Resend HTTP API (betrouwbaarder dan SMTP op cloud hosting) ───────────────
-const resend = new Resend(process.env.RESEND_API_KEY);
+const resendApiKey =
+  process.env.RESEND_API_KEY ||
+  process.env.resend_api_key ||
+  process.env.RESEND_KEY ||
+  process.env.resend_key ||
+  '';
+const resend = new Resend(resendApiKey);
+if (!resendApiKey) {
+  console.warn('⚠️ RESEND_API_KEY ontbreekt (ook lowercase varianten niet gevonden). OTP e-mail kan niet worden verstuurd.');
+}
 
 // Nodemailer-compatibele wrapper zodat auth.js ongewijzigd blijft
 const transporter = {
   sendMail: async ({ from, to, subject, html }) => {
+    if (!resendApiKey) {
+      throw new Error('RESEND_API_KEY ontbreekt in environment variables');
+    }
     const { data, error } = await resend.emails.send({ from, to, subject, html });
     if (error) {
       console.error('[Pulse] Resend fout:', JSON.stringify(error));
