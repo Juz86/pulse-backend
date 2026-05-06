@@ -4,6 +4,7 @@
 // Uitvoering: dagelijks om 03:00, idempotent en batchgewijs
 
 const { admin, db } = require('./firebase');
+const FIREBASE_ENABLED = String(process.env.FIREBASE_ENABLED || '').toLowerCase() === 'true';
 
 const COMM_RETENTION_DAYS = 30; // default voor communicatiegegevens
 const LOG_RETENTION_DAYS  = 7;  // technische metadata (sessies), OTP-codes
@@ -13,6 +14,13 @@ const HISTORY_RULE_KEYS = {
   call: 'callRetentionDays',
   video: 'videoRetentionDays',
 };
+
+function firestoreCleanupEnabled() {
+  return FIREBASE_ENABLED &&
+    !!db &&
+    typeof db.collection === 'function' &&
+    typeof db.collectionGroup === 'function';
+}
 
 // ─── Hulpfuncties ─────────────────────────────────────────────────────────────
 
@@ -175,6 +183,7 @@ async function cleanMessages() {
 }
 
 async function cleanupCommunicationsForUser(uid) {
+  if (!firestoreCleanupEnabled()) return 0;
   if (!uid) return 0;
   const convsSnap = await db.collection('conversations')
     .where('members', 'array-contains', uid)
@@ -279,6 +288,11 @@ async function cleanAgendaActivities() {
 async function runCleanup() {
   const started = new Date().toISOString();
   console.log(`[Cleanup] Gestart om ${started}`);
+
+  if (!firestoreCleanupEnabled()) {
+    console.log('[Cleanup] Overgeslagen: Firebase/Firestore staat uit (native/postgres mode).');
+    return;
+  }
 
   const results = {};
 
