@@ -68,6 +68,16 @@ async function ensureSchema() {
     );
   `);
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS native_blocked_contacts (
+      owner_id TEXT NOT NULL,
+      blocked_user_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (owner_id, blocked_user_id),
+      FOREIGN KEY (owner_id) REFERENCES native_users(id) ON DELETE CASCADE,
+      FOREIGN KEY (blocked_user_id) REFERENCES native_users(id) ON DELETE CASCADE
+    );
+  `);
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS native_friend_requests_to_idx
     ON native_friend_requests (to_user_id, status, created_at DESC);
   `);
@@ -449,6 +459,18 @@ router.post('/contacts/request', async (req, res) => {
     if (!target) return res.status(404).json({ error: 'Gebruiker niet gevonden' });
     if (target.id === auth.sub) return res.status(400).json({ error: 'Je kunt jezelf niet toevoegen' });
 
+    const blockState = await pool.query(
+      `SELECT owner_id, blocked_user_id
+       FROM native_blocked_contacts
+       WHERE (owner_id = $1 AND blocked_user_id = $2)
+          OR (owner_id = $2 AND blocked_user_id = $1)
+       LIMIT 1`,
+      [auth.sub, target.id]
+    );
+    if (blockState.rows.length) {
+      return res.status(403).json({ error: 'Deze gebruiker kan niet worden toegevoegd.' });
+    }
+
     const already = await pool.query(
       `SELECT 1 FROM native_contacts WHERE owner_id = $1 AND contact_id = $2 LIMIT 1`,
       [auth.sub, target.id]
@@ -716,6 +738,99 @@ router.delete('/contacts/:contactId', async (req, res) => {
   } catch (err) {
     console.error('Native contact verwijderen fout:', err);
     return res.status(500).json({ error: 'Contact verwijderen mislukt.' });
+  }
+});
+
+router.post('/contacts/:contactId/block', async (req, res) => {
+  const auth = decodeAccessToken(req);
+  if (auth.error) return res.status(401).json({ error: auth.error });
+  if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL ontbreekt.' });
+
+  const contactId = String(req.params?.contactId || '').trim();
+  if (!contactId) return res.status(400).json({ error: 'contactId ontbreekt.' });
+  if (contactId === auth.sub) return res.status(400).json({ error: 'Ongeldig verzoek.' });
+
+  try {
+    await ensureSchema();
+
+    const target = await pool.query(
+      `SELECT id FROM native_users WHERE id = $1 LIMIT 1`,
+      [contactId]
+    );
+    if (!target.rows.length) return res.status(404).json({ error: 'Contact niet gevonden' });
+
+    const existing = await pool.query(
+      `SELECT 1 FROM native_blocked_contacts WHERE owner_id = $1 AND blocked_user_id = $2 LIMIT 1`,
+      [auth.sub, contactId]
+    );
+    if (existing.rows.length) return res.status(409).json({ error: 'Contact is al geblokkeerd' });
+
+    await pool.query('BEGIN');
+    await pool.query(
+      `INSERT INTO native_blocked_contacts (owner_id, blocked_user_id)
+       VALUES ($1, $2)
+       ON CONFLICT (owner_id, blocked_user_id) DO NOTHING`,
+      [auth.sub, contactId]
+    );
+    await pool.query(
+      `DELETE FROM native_contacts WHERE owner_id = $1 AND contact_id = $2`,
+      [auth.sub, contactId]
+    );
+    await pool.query(
+      `UPDATE native_friend_requests
+       SET status = 'cancelled', updated_at = NOW()
+       WHERE status = 'pending'
+         AND ((from_user_id = $1 AND to_user_id = $2) OR (from_user_id = $2 AND to_user_id = $1))`,
+      [auth.sub, contactId]
+    );
+    await pool.query('COMMIT');
+
+    io?.to(auth.sub).emit('contacts:updated', { reason: 'contact_blocked' });
+    io?.to(contactId).emit('contacts:updated', { reason: 'blocked_by_other' });
+    io?.to(auth.sub).emit('contact-requests:updated', { reason: 'contact_blocked' });
+    io?.to(contactId).emit('contact-requests:updated', { reason: 'contact_blocked' });
+
+    return res.json({ success: true, message: 'Contact geblokkeerd' });
+  } catch (err) {
+    try { await pool.query('ROLLBACK'); } catch {}
+    console.error('Native contact blokkeren fout:', err);
+    return res.status(500).json({ error: 'Contact blokkeren mislukt.' });
+  }
+});
+
+router.post('/contacts/:contactId/unblock', async (req, res) => {
+  const auth = decodeAccessToken(req);
+  if (auth.error) return res.status(401).json({ error: auth.error });
+  if (!process.env.DATABASE_URL) return res.status(500).json({ error: 'DATABASE_URL ontbreekt.' });
+
+  const contactId = String(req.params?.contactId || '').trim();
+  if (!contactId) return res.status(400).json({ error: 'contactId ontbreekt.' });
+  if (contactId === auth.sub) return res.status(400).json({ error: 'Ongeldig verzoek.' });
+
+  try {
+    await ensureSchema();
+
+    const target = await pool.query(
+      `SELECT id FROM native_users WHERE id = $1 LIMIT 1`,
+      [contactId]
+    );
+    if (!target.rows.length) return res.status(404).json({ error: 'Contact niet gevonden' });
+
+    const deleted = await pool.query(
+      `DELETE FROM native_blocked_contacts
+       WHERE owner_id = $1 AND blocked_user_id = $2
+       RETURNING owner_id`,
+      [auth.sub, contactId]
+    );
+    if (!deleted.rows.length) return res.status(409).json({ error: 'Contact is niet geblokkeerd' });
+
+    io?.to(auth.sub).emit('contacts:updated', { reason: 'contact_unblocked' });
+    io?.to(auth.sub).emit('contact-requests:updated', { reason: 'contact_unblocked' });
+
+    return res.json({ success: true, message: 'Contact gedeblokkeerd' });
+  } catch (err) {
+    console.error('Native contact deblokkeren fout:', err);
+    return res.status(500).json({ error: 'Contact deblokkeren mislukt.' });
   }
 });
 
