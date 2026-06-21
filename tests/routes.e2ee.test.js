@@ -48,7 +48,11 @@ function mockMakeMessagesCollection(convId) {
       return { id };
     },
     doc(msgId) {
-      return makeMessageDocRef(convId, msgId);
+      return mockMakeMessageDocRef(convId, msgId);
+    },
+    async get() {
+      const docs = (mockState.messages[convId] || []).map((entry) => mockMakeSnapshot(entry.id, entry));
+      return { docs };
     },
     orderBy() {
       return {
@@ -227,7 +231,33 @@ describe('e2ee routes', () => {
         },
       },
       messages: {
-        'conv-1': [],
+        'conv-1': [
+          {
+            id: 'msg-attachment-1',
+            type: 'attachment',
+            messageType: 'attachment',
+            attachment: {
+              name: 'foto.png',
+              downloadUrl: 'http://localhost:3001/attachments/mock-2',
+              transfer: 'remote',
+              mimeType: 'application/pulse-e2ee-envelope+json',
+              originalMimeType: 'image/png',
+              contentEncoding: 'mock-e2ee-envelope-v1',
+              envelopeKind: 'pulse_mock_media_envelope',
+              expectedPayloadSha256: 'abcd1234',
+              encryption: {
+                strategyKey: '',
+                mediaKeyId: 'mock-media-key-1',
+                keyWrapAlg: 'pulse_mock_media_key_unwrap',
+                wrappedMediaKey: 'wrapped-key-1',
+                wrappedMediaKeyDigest: 'digest-1',
+                envelopeKind: 'pulse_mock_media_envelope',
+                originalMimeType: 'image/png',
+              },
+            },
+            createdAt: '2026-06-21T11:00:00.000Z',
+          },
+        ],
       },
     };
   });
@@ -290,13 +320,15 @@ describe('e2ee routes', () => {
 
     expect(response.status).toBe(200);
     expect(response.body).toEqual(expect.objectContaining({ ok: true, messageId: expect.any(String) }));
-    expect(mockState.messages['conv-1'][0]).toEqual(expect.objectContaining({
-      senderUserId: 'user-1',
-      senderDeviceId: 'dev-sender',
-      ciphertext: 'Zm9v',
-      protocol: 'signal_v1',
-      messageType: 'text',
-    }));
+    expect(mockState.messages['conv-1']).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        senderUserId: 'user-1',
+        senderDeviceId: 'dev-sender',
+        ciphertext: 'Zm9v',
+        protocol: 'signal_v1',
+        messageType: 'text',
+      }),
+    ]));
   });
 
   test('GET /messages/feed/:convId returns encrypted feed view for recipient device', async () => {
@@ -326,7 +358,11 @@ describe('e2ee routes', () => {
       .set('x-test-uid', 'user-2');
 
     expect(response.status).toBe(200);
-    expect(response.body).toEqual([
+    expect(response.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'msg-attachment-1',
+        type: 'attachment',
+      }),
       expect.objectContaining({
         id: 'msg-1',
         senderUserId: 'user-1',
@@ -335,6 +371,30 @@ describe('e2ee routes', () => {
         ciphertext: 'Zm9v',
         protocol: 'signal_v1',
       }),
-    ]);
+    ]));
+  });
+
+  test('GET /api/attachments/:attachmentId/meta returns metadata and integrity headers', async () => {
+    const response = await request(buildApp())
+      .get('/api/attachments/mock-2/meta')
+      .set('x-test-uid', 'user-2');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(expect.objectContaining({
+      ok: true,
+      messageId: 'msg-attachment-1',
+      attachment: expect.objectContaining({
+        name: 'foto.png',
+        downloadUrl: 'http://localhost:3001/attachments/mock-2',
+        expectedPayloadSha256: 'abcd1234',
+      }),
+    }));
+    expect(response.headers['x-pulse-expected-sha256']).toBe('abcd1234');
+    expect(response.headers['x-pulse-content-encoding']).toBe('mock-e2ee-envelope-v1');
+    expect(response.headers['x-pulse-envelope-kind']).toBe('pulse_mock_media_envelope');
+    expect(response.headers['x-pulse-original-mimetype']).toBe('image/png');
+    expect(response.headers['x-pulse-media-key-id']).toBe('mock-media-key-1');
+    expect(response.headers['x-pulse-key-wrap-alg']).toBe('pulse_mock_media_key_unwrap');
+    expect(response.headers['x-pulse-wrapped-media-key-digest']).toBe('digest-1');
   });
 });

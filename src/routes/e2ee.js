@@ -24,6 +24,54 @@ function buildEncryptedPreview({ messageType = 'text', sharedContact = null } = 
   return 'Versleuteld bericht';
 }
 
+function getAttachmentIdentifierCandidates(attachment = {}) {
+  const candidates = [];
+  const values = [
+    attachment.downloadUrl,
+    attachment.url,
+    attachment.thumbnailUrl,
+    attachment.storageKey,
+  ].filter(Boolean);
+
+  values.forEach((value) => {
+    try {
+      const parsed = new URL(value);
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      if (parts.length > 0) candidates.push(parts[parts.length - 1]);
+    } catch {
+      const parts = String(value).split('/').filter(Boolean);
+      if (parts.length > 0) candidates.push(parts[parts.length - 1]);
+    }
+  });
+
+  return Array.from(new Set(candidates.filter(Boolean)));
+}
+
+async function findAttachmentForUser(userId, attachmentId) {
+  const convsSnap = await db.collection('conversations')
+    .where('members', 'array-contains', userId)
+    .get();
+
+  for (const convDoc of convsSnap.docs) {
+    const messagesSnap = await convDoc.ref.collection('messages').get();
+    for (const msgDoc of messagesSnap.docs) {
+      const message = msgDoc.data() || {};
+      const attachment = message.attachment || null;
+      if (!attachment || typeof attachment !== 'object') continue;
+      const candidates = getAttachmentIdentifierCandidates(attachment);
+      if (candidates.includes(attachmentId)) {
+        return {
+          convId: convDoc.id,
+          messageId: msgDoc.id,
+          attachment,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
 function resolveRecipientMessageView(message, viewerUid, viewerDeviceId = '') {
   const recipientPayloads = Array.isArray(message.recipientPayloads) ? message.recipientPayloads : [];
   const matchingPayload = recipientPayloads.find((payload) => (
@@ -208,6 +256,43 @@ module.exports = (io) => {
       res.json(messages);
     } catch (err) {
       console.error('messages feed fout:', err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
+  router.get('/api/attachments/:attachmentId/meta', verifyAuth, async (req, res) => {
+    try {
+      const { attachmentId } = req.params;
+      const resolved = await findAttachmentForUser(req.uid, attachmentId);
+      if (!resolved?.attachment) return res.status(404).json({ error: 'attachment_not_found' });
+
+      const attachment = resolved.attachment;
+      const expectedSha = attachment.expectedPayloadSha256 || attachment.encryption?.sha256 || '';
+      const strategyKey = attachment.strategyKey || attachment.encryption?.strategyKey || '';
+      const contentEncoding = attachment.contentEncoding || '';
+      const envelopeKind = attachment.envelopeKind || attachment.encryption?.envelopeKind || '';
+      const originalMimeType = attachment.originalMimeType || attachment.encryption?.originalMimeType || '';
+      const mediaKeyId = attachment.encryption?.mediaKeyId || '';
+      const keyWrapAlg = attachment.encryption?.keyWrapAlg || '';
+      const wrappedMediaKeyDigest = attachment.encryption?.wrappedMediaKeyDigest || '';
+
+      if (expectedSha) res.setHeader('X-Pulse-Expected-Sha256', expectedSha);
+      if (strategyKey) res.setHeader('X-Pulse-Encryption-Strategy', strategyKey);
+      if (contentEncoding) res.setHeader('X-Pulse-Content-Encoding', contentEncoding);
+      if (envelopeKind) res.setHeader('X-Pulse-Envelope-Kind', envelopeKind);
+      if (originalMimeType) res.setHeader('X-Pulse-Original-MimeType', originalMimeType);
+      if (mediaKeyId) res.setHeader('X-Pulse-Media-Key-Id', mediaKeyId);
+      if (keyWrapAlg) res.setHeader('X-Pulse-Key-Wrap-Alg', keyWrapAlg);
+      if (wrappedMediaKeyDigest) res.setHeader('X-Pulse-Wrapped-Media-Key-Digest', wrappedMediaKeyDigest);
+
+      res.json({
+        ok: true,
+        attachment,
+        conversationId: resolved.convId,
+        messageId: resolved.messageId,
+      });
+    } catch (err) {
+      console.error('attachment meta fout:', err);
       res.status(500).json({ error: 'Serverfout' });
     }
   });
