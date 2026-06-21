@@ -11,10 +11,6 @@ function getPendingCallByCallee(calleeUid) {
   return Object.values(pendingCalls).find((call) => call?.to === calleeUid) || null;
 }
 
-function getPendingCallByCaller(callerUid) {
-  return Object.values(pendingCalls).find((call) => call?.from === callerUid) || null;
-}
-
 function deletePendingCallBySession(sessionId) {
   if (!sessionId) return;
   delete pendingCalls[sessionId];
@@ -23,6 +19,12 @@ function deletePendingCallBySession(sessionId) {
 function deletePendingCallsForUser(uid) {
   Object.entries(pendingCalls).forEach(([sessionId, call]) => {
     if (call?.from === uid || call?.to === uid) delete pendingCalls[sessionId];
+  });
+}
+
+function deletePendingCallsStartedByUser(uid) {
+  Object.entries(pendingCalls).forEach(([sessionId, call]) => {
+    if (call?.from === uid) delete pendingCalls[sessionId];
   });
 }
 
@@ -42,9 +44,9 @@ function emitCallLogOutsideConversation(io, convId, members, senderId, payload, 
 
 module.exports = function registerCalls(io, socket, uid) {
   // ── Video upgrade doorsturen naar de andere kant ──
-  socket.on('call:video-upgrade', ({ to }) => {
+  socket.on('call:video-upgrade', ({ to, sessionId }) => {
     const targetSocket = getSocketId(to);
-    if (targetSocket) io.to(targetSocket).emit('call:video-upgrade');
+    if (targetSocket) io.to(targetSocket).emit('call:video-upgrade', { sessionId: sessionId || null });
   });
 
   // ── Oproep opslaan als bericht in gesprek ──
@@ -203,7 +205,9 @@ module.exports = function registerCalls(io, socket, uid) {
   });
 
   socket.on('disconnect', () => {
-    deletePendingCallsForUser(uid);
+    // Bewaar pending incoming offers voor de ontvanger zodat call recovery na
+    // een reload/tab-herstel nog via /calls/pending/:sessionId kan slagen.
+    deletePendingCallsStartedByUser(uid);
     activeCalls.delete(uid);
   });
 };
