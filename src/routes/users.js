@@ -550,6 +550,41 @@ module.exports = (io, onlineUsers) => {
     }
   });
 
+  router.delete('/api/conversations/:convId/clear', verifyAuth, async (req, res) => {
+    try {
+      const { convId } = req.params;
+      const uid = req.uid;
+
+      const convRef = db.collection('conversations').doc(convId);
+      const convDoc = await convRef.get();
+      if (!convDoc.exists) return res.status(404).json({ error: 'Niet gevonden' });
+
+      const convData = convDoc.data() || {};
+      const members = convData.members || [];
+      if (!members.includes(uid)) return res.status(403).json({ error: 'Geen toegang.' });
+
+      await convRef.set({
+        lastMessage: '',
+        lastMessageAt: null,
+        lastMessageType: null,
+        lastCallDirection: null,
+        lastCallIsVideo: false,
+        lastCallSenderId: null,
+        deletedFor: admin.firestore.FieldValue.arrayRemove(uid),
+        [`clearedAt.${uid}`]: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+
+      io.to(convId).emit('conversation:cleared', { convId, uid });
+      const sockets = onlineUsers[uid];
+      if (sockets) sockets.forEach((sid) => io.to(sid).emit('conversation:cleared', { convId, uid }));
+
+      res.json({ success: true, convId });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Serverfout bij wissen' });
+    }
+  });
+
   router.delete('/api/conversations/:convId/hard', verifyAuth, async (req, res) => {
     try {
       const { convId } = req.params;

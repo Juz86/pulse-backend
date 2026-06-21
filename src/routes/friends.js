@@ -249,6 +249,76 @@ module.exports = (io, onlineUsers) => {
     }
   });
 
+  router.post('/api/friend-requests/:requestId/remind', verifyAuth, async (req, res) => {
+    try {
+      const { requestId } = req.params;
+      const reqRef = db.collection('friendRequests').doc(requestId);
+      const reqDoc = await reqRef.get();
+      if (!reqDoc.exists) return res.status(404).json({ error: 'Verzoek niet gevonden' });
+
+      const requestData = reqDoc.data() || {};
+      if (req.uid !== requestData.fromUid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (requestData.status !== 'pending') return res.status(400).json({ error: 'Alleen openstaande verzoeken kunnen worden herinnerd.' });
+
+      await reqRef.update({
+        remindedAt: admin.firestore.FieldValue.serverTimestamp(),
+        reminderCount: Number(requestData.reminderCount || 0) + 1,
+      });
+
+      io.to(requestData.toUid).emit('friend:request:reminder', {
+        requestId,
+        fromUid: requestData.fromUid,
+        fromName: requestData.fromName,
+        fromEmail: requestData.fromEmail,
+      });
+
+      const targetSocket = getSocketId(requestData.toUid);
+      if (!targetSocket) {
+        sendPush(
+          requestData.toUid,
+          {
+            title: 'Pulse — Herinnering',
+            body: `${requestData.fromName || 'Iemand'} wacht nog op je contactverzoek.`,
+          },
+          { type: 'friend_request_reminder', requestId }
+        ).catch((e) => console.warn('[Pulse] Push bij friend request reminder mislukt:', e.message));
+      }
+
+      res.json({ success: true, requestId });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
+  router.delete('/api/friend-requests/:requestId/cancel', verifyAuth, async (req, res) => {
+    try {
+      const { requestId } = req.params;
+      const reqRef = db.collection('friendRequests').doc(requestId);
+      const reqDoc = await reqRef.get();
+      if (!reqDoc.exists) return res.status(404).json({ error: 'Verzoek niet gevonden' });
+
+      const requestData = reqDoc.data() || {};
+      if (req.uid !== requestData.fromUid) return res.status(403).json({ error: 'Geen toegang.' });
+      if (requestData.status !== 'pending') return res.status(400).json({ error: 'Alleen openstaande verzoeken kunnen worden geannuleerd.' });
+
+      await reqRef.update({
+        status: 'cancelled',
+        cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      io.to(requestData.toUid).emit('friend:request:cancelled', {
+        requestId,
+        fromUid: requestData.fromUid,
+      });
+
+      res.json({ success: true, requestId });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
   router.get('/api/contacts/:uid', verifyAuth, async (req, res) => {
     try {
       const { uid } = req.params;

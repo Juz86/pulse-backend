@@ -8,6 +8,19 @@ router.get('/', (req, res) => {
   res.json({ status: 'Pulse server draait ✅', time: new Date().toISOString() });
 });
 
+router.get('/runtimez', (_req, res) => {
+  const firebaseCredentialMode = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON
+    ? 'inline_json'
+    : (process.env.GOOGLE_APPLICATION_CREDENTIALS ? 'file_path' : 'unknown');
+
+  res.json({
+    ok: true,
+    nodeEnv: process.env.NODE_ENV || 'development',
+    firebaseCredentialMode,
+    firestoreEmulatorHost: process.env.FIRESTORE_EMULATOR_HOST || null,
+  });
+});
+
 // ─── FCM token opslaan ───────────────────────────────────────────────────────
 router.post('/api/fcm-token', verifyAuth, async (req, res) => {
   try {
