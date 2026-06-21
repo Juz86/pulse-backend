@@ -23,6 +23,15 @@ function toMillis(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function isFirestoreMissingIndexError(error) {
+  const code = String(error?.code || '').toLowerCase();
+  const message = String(error?.message || '').toLowerCase();
+  return code === 'failed-precondition'
+    || message.includes('requires an index')
+    || message.includes('query requires an index')
+    || message.includes('failed precondition');
+}
+
 function deriveCallDirectionForViewer(rawDirection, senderId, viewerUid) {
   const normalized = String(rawDirection || '').toLowerCase();
   const sentByViewer = senderId === viewerUid;
@@ -329,15 +338,27 @@ module.exports = (io, onlineUsers) => {
     try {
       const { uid } = req.params;
       if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
-      const snap = await db.collection('conversations')
-        .where('members', 'array-contains', uid)
-        .orderBy('updatedAt', 'desc')
-        .limit(50)
-        .get();
+      let snap;
+      try {
+        snap = await db.collection('conversations')
+          .where('members', 'array-contains', uid)
+          .orderBy('updatedAt', 'desc')
+          .limit(50)
+          .get();
+      } catch (queryError) {
+        if (!isFirestoreMissingIndexError(queryError)) throw queryError;
+        console.warn('[Pulse] Firestore index ontbreekt voor conversations query; fallback zonder orderBy wordt gebruikt.');
+        snap = await db.collection('conversations')
+          .where('members', 'array-contains', uid)
+          .limit(200)
+          .get();
+      }
 
       const convs = snap.docs
         .filter(d => !(d.data().deletedFor || []).includes(uid))
-        .map(d => ({ id: d.id, ...d.data() }));
+        .map(d => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => toMillis(b.updatedAt) - toMillis(a.updatedAt))
+        .slice(0, 50);
 
       const staleSummaryUpdates = [];
       await Promise.all(convs.map(async (conv) => {
