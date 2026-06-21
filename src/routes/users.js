@@ -15,6 +15,26 @@ function validEmail(e) { return typeof e === 'string' && EMAIL_REGEX.test(e.trim
 function normalizeIdentifier(value) { return typeof value === 'string' ? value.trim().toLowerCase() : ''; }
 const DEFAULT_HISTORY_RETENTION_DAYS = COMM_RETENTION_DAYS;
 
+function toMillis(value) {
+  if (!value) return 0;
+  if (typeof value?.toDate === 'function') return value.toDate().getTime();
+  if (Number.isFinite(value?._seconds)) return value._seconds * 1000;
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function deriveCallDirectionForViewer(rawDirection, senderId, viewerUid) {
+  const normalized = String(rawDirection || '').toLowerCase();
+  const sentByViewer = senderId === viewerUid;
+
+  if (normalized === 'completed') return sentByViewer ? 'outgoing' : 'incoming';
+  if (normalized === 'declined' || normalized === 'no-answer' || normalized === 'no_answer') {
+    return sentByViewer ? 'outgoing' : 'missed';
+  }
+  if (normalized === 'incoming' || normalized === 'outgoing' || normalized === 'missed') return normalized;
+  return sentByViewer ? 'outgoing' : 'incoming';
+}
+
 async function getUserHistoryRules(uid) {
   const userDoc = await db.collection('users').doc(uid).get();
   const userData = userDoc.exists ? userDoc.data() || {} : {};
@@ -395,6 +415,85 @@ module.exports = (io, onlineUsers) => {
       res.json(convs);
     } catch (err) {
       console.error(err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
+  router.get('/api/messages/recent-calls', verifyAuth, async (req, res) => {
+    try {
+      const uid = req.uid;
+      const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
+      const userDoc = await db.collection('users').doc(uid).get();
+      const clearedAfterMs = toMillis(userDoc.data()?.callLogClearedAt);
+
+      const convsSnap = await db.collection('conversations')
+        .where('members', 'array-contains', uid)
+        .get();
+      const conversations = convsSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+      const peerUids = Array.from(new Set(
+        conversations.flatMap((conv) => (conv.members || []).filter((memberUid) => memberUid && memberUid !== uid))
+      ));
+
+      const peerDocs = await Promise.all(peerUids.map((peerUid) => db.collection('users').doc(peerUid).get()));
+      const peerMap = {};
+      peerDocs.forEach((peerDoc, index) => {
+        peerMap[peerUids[index]] = peerDoc.exists ? (peerDoc.data() || {}) : {};
+      });
+
+      const entriesNested = await Promise.all(conversations.map(async (conv) => {
+        const snap = await db.collection('conversations')
+          .doc(conv.id)
+          .collection('messages')
+          .where('type', '==', 'call')
+          .get();
+
+        const otherUid = (conv.members || []).find((memberUid) => memberUid !== uid) || '';
+        const otherProfile = peerMap[otherUid] || {};
+        const fallbackName = conv.isGroup
+          ? (conv.groupName || 'Groepsgesprek')
+          : (conv.memberNames?.[otherUid] || otherProfile.displayName || otherProfile.email || 'Contactpersoon');
+        const fallbackPhoto = otherProfile.photoURL || '';
+
+        return snap.docs
+          .map((doc) => ({ id: doc.id, ...doc.data() }))
+          .filter((message) => !Array.isArray(message.deletedFor) || !message.deletedFor.includes(uid))
+          .map((message) => {
+            const ts = toMillis(message.createdAt);
+            return {
+              id: message.id,
+              convId: conv.id,
+              uid: otherUid,
+              name: fallbackName,
+              photoURL: fallbackPhoto,
+              isVideo: !!message.isVideo,
+              direction: deriveCallDirectionForViewer(message.direction, message.senderId, uid),
+              ts,
+            };
+          })
+          .filter((entry) => entry.uid && entry.ts > clearedAfterMs);
+      }));
+
+      const entries = entriesNested
+        .flat()
+        .sort((a, b) => Number(b.ts) - Number(a.ts))
+        .slice(0, limit);
+
+      res.json(entries);
+    } catch (err) {
+      console.error('recent-calls fout:', err);
+      res.status(500).json({ error: 'Serverfout' });
+    }
+  });
+
+  router.delete('/api/messages/recent-calls', verifyAuth, async (req, res) => {
+    try {
+      await db.collection('users').doc(req.uid).set({
+        callLogClearedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error('recent-calls clear fout:', err);
       res.status(500).json({ error: 'Serverfout' });
     }
   });

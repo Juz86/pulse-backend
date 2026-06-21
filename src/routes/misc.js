@@ -2,6 +2,11 @@ const router = require('express').Router();
 const { db } = require('../firebase');
 const { verifyAuth } = require('../middleware');
 const { admin } = require('../firebase');
+const { pendingCalls } = require('../state');
+
+function findPendingCallBySession(sessionId) {
+  return pendingCalls[sessionId] || null;
+}
 
 // ─── Gezondheidscheck ────────────────────────────────────────────────────────
 router.get('/', (req, res) => {
@@ -19,6 +24,35 @@ router.get('/runtimez', (_req, res) => {
     firebaseCredentialMode,
     firestoreEmulatorHost: process.env.FIRESTORE_EMULATOR_HOST || null,
   });
+});
+
+router.get('/calls/pending/:sessionId', verifyAuth, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const pendingCall = findPendingCallBySession(sessionId);
+    if (!pendingCall) return res.status(404).json({ error: 'pending_call_not_found' });
+
+    const fromUid = req.query.fromUid || pendingCall.from;
+    if (req.uid !== pendingCall.to && req.uid !== fromUid) {
+      return res.status(403).json({ error: 'Geen toegang.' });
+    }
+
+    res.json({
+      ok: true,
+      call: {
+        sessionId: pendingCall.sessionId,
+        from: pendingCall.from,
+        fromUid: pendingCall.from,
+        to: pendingCall.to,
+        offer: pendingCall.offer,
+        callerName: pendingCall.callerName || 'Iemand',
+        isVideo: !!pendingCall.isVideo,
+        createdAt: pendingCall.createdAt || Date.now(),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Serverfout' });
+  }
 });
 
 // ─── FCM token opslaan ───────────────────────────────────────────────────────

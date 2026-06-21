@@ -57,7 +57,12 @@ function mockMakeCollection(name, ownerId = null) {
           },
           async set(data, options = {}) {
             const current = mockState.users[uid] || {};
-            mockState.users[uid] = options.merge ? { ...current, ...data } : { ...data };
+            if (options.merge) {
+              mockState.users[uid] = { ...current };
+              mockApplyPatch(mockState.users[uid], data);
+            } else {
+              mockState.users[uid] = { ...data };
+            }
           },
           async update(patch) {
             if (!mockState.users[uid]) throw new Error(`Unknown user ${uid}`);
@@ -136,6 +141,19 @@ function mockMakeCollection(name, ownerId = null) {
 
   if (name === 'conversations') {
     return {
+      where(field, op, value) {
+        if (field !== 'members' || op !== 'array-contains') {
+          throw new Error(`Unsupported conversations query ${field} ${op}`);
+        }
+        const docs = Object.entries(mockState.conversations)
+          .filter(([, data]) => Array.isArray(data.members) && data.members.includes(value))
+          .map(([id, data]) => mockMakeDocSnapshot(id, data));
+        return {
+          async get() {
+            return { docs };
+          },
+        };
+      },
       doc(convId) {
         return {
           async get() {
@@ -157,6 +175,17 @@ function mockMakeCollection(name, ownerId = null) {
           collection(sub) {
             if (sub !== 'messages') throw new Error(`Unsupported subcollection ${sub}`);
             return {
+              where(field, op, value) {
+                if (field !== 'type' || op !== '==') throw new Error(`Unsupported message query ${field} ${op}`);
+                return {
+                  async get() {
+                    const docs = (mockState.messages[convId] || [])
+                      .filter((message) => message.type === value)
+                      .map((message) => mockMakeDocSnapshot(message.id, message));
+                    return { docs };
+                  },
+                };
+              },
               async get() {
                 return { docs: [] };
               },
@@ -215,6 +244,7 @@ jest.mock('../src/middleware', () => ({
 
 jest.mock('../src/state', () => ({
   getSocketId: () => null,
+  pendingCalls: {},
 }));
 
 jest.mock('../src/push', () => ({
@@ -270,6 +300,26 @@ describe('compatibility routes', () => {
           lastCallSenderId: 'user-1',
           deletedFor: ['user-1'],
         },
+      },
+      messages: {
+        'conv-1': [
+          {
+            id: 'msg-call-1',
+            type: 'call',
+            isVideo: true,
+            direction: 'completed',
+            senderId: 'user-1',
+            createdAt: '2026-06-21T12:00:00.000Z',
+          },
+          {
+            id: 'msg-call-2',
+            type: 'call',
+            isVideo: false,
+            direction: 'no-answer',
+            senderId: 'user-2',
+            createdAt: '2026-06-21T12:05:00.000Z',
+          },
+        ],
       },
     };
   });
@@ -333,5 +383,59 @@ describe('compatibility routes', () => {
       deletedFor: [],
     }));
     expect(mockState.conversations['conv-1'].clearedAt['user-1']).toBe('ts');
+  });
+
+  test('GET /calls/pending/:sessionId returns pending call offer for authorized user', async () => {
+    const { pendingCalls } = require('../src/state');
+    pendingCalls['call_123'] = {
+      sessionId: 'call_123',
+      from: 'user-1',
+      to: 'user-2',
+      offer: { type: 'offer', sdp: 'test-sdp' },
+      callerName: 'User One',
+      isVideo: true,
+      createdAt: 12345,
+    };
+
+    const app = buildApp();
+    const response = await request(app)
+      .get('/calls/pending/call_123?fromUid=user-1')
+      .set('x-test-uid', 'user-2');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(expect.objectContaining({
+      ok: true,
+      call: expect.objectContaining({
+        sessionId: 'call_123',
+        from: 'user-1',
+        to: 'user-2',
+        callerName: 'User One',
+        isVideo: true,
+        offer: expect.objectContaining({ type: 'offer' }),
+      }),
+    }));
+
+    delete pendingCalls['call_123'];
+  });
+
+  test('GET /api/messages/recent-calls returns normalized recent call entries', async () => {
+    const app = buildApp();
+    const response = await request(app)
+      .get('/api/messages/recent-calls?limit=10')
+      .set('x-test-uid', 'user-1');
+
+    expect(response.status).toBe(200);
+    expect(Array.isArray(response.body)).toBe(true);
+  });
+
+  test('DELETE /api/messages/recent-calls stores clear timestamp on user profile', async () => {
+    const app = buildApp();
+    const response = await request(app)
+      .delete('/api/messages/recent-calls')
+      .set('x-test-uid', 'user-1');
+
+    expect(response.status).toBe(200);
+    expect(response.body.success).toBe(true);
+    expect(mockState.users['user-1'].callLogClearedAt).toBe('ts');
   });
 });

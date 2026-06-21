@@ -4,7 +4,7 @@ const onlineUsers   = {};        // uid → Set<socketId>
 const activeCalls   = new Set(); // uid's in een actief gesprek
 const inactiveUsers = new Set(); // uid's die online maar inactief zijn
 const activeSessions = {};       // uid → { sessionDocId, startTime, accumulated, pausedAt }
-const pendingCalls  = {};        // calleeUid → { from, callerName, isVideo }
+const pendingCalls  = {};        // sessionId → { sessionId, from, to, offer, callerName, isVideo, createdAt }
 
 function getSocketId(uid) {
   const sockets = onlineUsers[uid];
