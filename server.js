@@ -29,6 +29,7 @@ const usersRouter   = require('./src/routes/users');
 const parentRouter  = require('./src/routes/parent');
 const friendsRouter = require('./src/routes/friends');
 const agendaRouter  = require('./src/routes/agenda');
+const e2eeRouter    = require('./src/routes/e2ee');
 
 // ─── Socket handler modules ───────────────────────────────────────────────────
 const registerPresence      = require('./src/socket/presence');
@@ -173,6 +174,7 @@ app.use(usersRouter(io, onlineUsers));
 app.use(parentRouter(io, onlineUsers));
 app.use(friendsRouter(io, onlineUsers));
 app.use(agendaRouter(io));
+app.use(e2eeRouter(io));
 
 
 // ─── Socket.IO auth middleware ────────────────────────────────────────────────
