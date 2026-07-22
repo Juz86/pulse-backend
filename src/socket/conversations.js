@@ -1,7 +1,30 @@
 const { admin, db } = require('../firebase');
 const { schemas, validate } = require('../validate');
+const { sendPush } = require('../push');
+
+function isGroupAdmin(conversation, uid) {
+  return Array.isArray(conversation?.adminIds)
+    ? conversation.adminIds.includes(uid)
+    : conversation?.creatorId === uid;
+}
+
+function emitToUser(io, uid, event, payload) {
+  const { onlineUsers } = require('../state');
+  const sockets = onlineUsers[uid];
+  if (!sockets) return;
+  sockets.forEach((socketId) => io.to(socketId).emit(event, payload));
+}
 
 module.exports = function registerConversations(io, socket, uid) {
+  db.collection('group_admin_promotions').where('targetUid', '==', uid).get()
+    .then((snapshot) => {
+      snapshot.docs
+        .map((doc) => ({ id: doc.id, ...doc.data() }))
+        .filter((request) => request.status === 'pending')
+        .forEach((request) => socket.emit('conversation:admin_promotion_requested', { request }));
+    })
+    .catch((error) => console.warn('Beheerderverzoeken ophalen mislukt:', error.message));
+
   // ── Gesprek aanmaken ──
   socket.on('conversation:create', async (data, callback) => {
     const validated = validate(schemas.convCreate, data, callback);
@@ -106,5 +129,87 @@ module.exports = function registerConversations(io, socket, uid) {
       io.to(convId).emit('conversation:memberRemoved', { convId, uid: targetUid });
       cb?.({});
     } catch (e) { cb?.({ error: e.message }); }
+  });
+
+  socket.on('conversation:promoteAdmin', async ({ convId, uid: targetUid }, cb = () => {}) => {
+    if (!convId || !targetUid) return cb({ error: 'Ongeldig beheerderverzoek.' });
+    try {
+      const convRef = db.collection('conversations').doc(convId);
+      const convDoc = await convRef.get();
+      if (!convDoc.exists) return cb({ error: 'Groep niet gevonden.' });
+
+      const conversation = convDoc.data() || {};
+      if (!conversation.isGroup) return cb({ error: 'Dit is geen groepsgesprek.' });
+      if (!isGroupAdmin(conversation, uid)) return cb({ error: 'Alleen beheerders kunnen dit verzoek versturen.' });
+      if (!(conversation.members || []).includes(targetUid)) return cb({ error: 'Dit lid zit niet in de groep.' });
+      if (isGroupAdmin(conversation, targetUid)) return cb({ error: 'Dit lid is al beheerder.' });
+
+      const requestRef = db.collection('group_admin_promotions').doc(`${convId}_${targetUid}`);
+      const existingRequest = await requestRef.get();
+      if (existingRequest.exists && existingRequest.data()?.status === 'pending') {
+        return cb({ error: 'Er staat al een beheerderverzoek open.' });
+      }
+
+      const requestedByName = conversation.memberNames?.[uid] || conversation.memberEmails?.[uid] || uid;
+      const request = {
+        id: requestRef.id,
+        convId,
+        targetUid,
+        requestedByUid: uid,
+        requestedByName,
+        groupName: conversation.groupName || 'deze groep',
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      await requestRef.set(request);
+      emitToUser(io, targetUid, 'conversation:admin_promotion_requested', { request });
+      sendPush(targetUid, {
+        title: 'Beheerderverzoek',
+        body: `${requestedByName} vraagt je beheerder te worden van ${request.groupName}.`,
+      }, { type: 'group_admin_promotion', convId, requestId: request.id }).catch(() => {});
+      cb({ ok: true, request });
+    } catch (error) {
+      console.error('Beheerderverzoek versturen mislukt:', error);
+      cb({ error: 'Beheerderverzoek kon niet worden verstuurd.' });
+    }
+  });
+
+  socket.on('conversation:respondToAdminPromotion', async ({ requestId, accept }, cb = () => {}) => {
+    if (!requestId || typeof accept !== 'boolean') return cb({ error: 'Ongeldige reactie.' });
+    try {
+      const requestRef = db.collection('group_admin_promotions').doc(requestId);
+      const requestDoc = await requestRef.get();
+      if (!requestDoc.exists) return cb({ error: 'Beheerderverzoek niet gevonden.' });
+      const request = requestDoc.data();
+      if (request.targetUid !== uid || request.status !== 'pending') return cb({ error: 'Dit beheerderverzoek is niet meer beschikbaar.' });
+
+      const convRef = db.collection('conversations').doc(request.convId);
+      const convDoc = await convRef.get();
+      if (!convDoc.exists) return cb({ error: 'Groep niet gevonden.' });
+      const currentConversation = convDoc.data() || {};
+      if (!currentConversation.isGroup || !(currentConversation.members || []).includes(uid)) {
+        return cb({ error: 'Je zit niet meer in deze groep.' });
+      }
+
+      const updatedAt = new Date().toISOString();
+      await requestRef.update({ status: accept ? 'accepted' : 'declined', respondedAt: updatedAt, updatedAt });
+      if (!accept) return cb({ ok: true, accepted: false });
+
+      const adminIds = Array.from(new Set([...(currentConversation.adminIds || [currentConversation.creatorId]), uid].filter(Boolean)));
+      const conversation = { id: request.convId, ...currentConversation, adminIds, updatedAt };
+      await convRef.update({ adminIds, updatedAt });
+      (currentConversation.members || []).forEach((memberUid) => {
+        emitToUser(io, memberUid, 'conversation:admins_updated', {
+          conversation,
+          promotedUid: uid,
+          promotedByName: request.requestedByName,
+        });
+      });
+      cb({ ok: true, accepted: true, conversation });
+    } catch (error) {
+      console.error('Beheerderverzoek beantwoorden mislukt:', error);
+      cb({ error: 'Beheerderverzoek kon niet worden verwerkt.' });
+    }
   });
 };
