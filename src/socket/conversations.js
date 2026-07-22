@@ -175,6 +175,38 @@ module.exports = function registerConversations(io, socket, uid) {
     }
   });
 
+  socket.on('conversation:relinquishAdmin', async ({ convId }, cb = () => {}) => {
+    if (!convId) return cb({ error: 'Ongeldige groep.' });
+    try {
+      const convRef = db.collection('conversations').doc(convId);
+      const convDoc = await convRef.get();
+      if (!convDoc.exists) return cb({ error: 'Groep niet gevonden.' });
+
+      const currentConversation = convDoc.data() || {};
+      if (!currentConversation.isGroup) return cb({ error: 'Dit is geen groepsgesprek.' });
+      if (!(currentConversation.members || []).includes(uid)) return cb({ error: 'Je zit niet in deze groep.' });
+      if (!isGroupAdmin(currentConversation, uid)) return cb({ error: 'Je bent geen beheerder van deze groep.' });
+
+      const adminIds = Array.from(new Set(currentConversation.adminIds || [currentConversation.creatorId])).filter(Boolean);
+      const nextAdminIds = adminIds.filter((adminUid) => adminUid !== uid);
+      if (!nextAdminIds.length) return cb({ error: 'Maak eerst een ander groepslid beheerder.' });
+
+      const updatedAt = new Date().toISOString();
+      const conversation = { id: convId, ...currentConversation, adminIds: nextAdminIds, updatedAt };
+      await convRef.update({ adminIds: nextAdminIds, updatedAt });
+      (currentConversation.members || []).forEach((memberUid) => {
+        emitToUser(io, memberUid, 'conversation:admins_updated', {
+          conversation,
+          relinquishedUid: uid,
+        });
+      });
+      cb({ ok: true, conversation });
+    } catch (error) {
+      console.error('Beheerderrol opgeven mislukt:', error);
+      cb({ error: 'Beheerderrol kon niet worden opgegeven.' });
+    }
+  });
+
   socket.on('conversation:respondToAdminPromotion', async ({ requestId, accept }, cb = () => {}) => {
     if (!requestId || typeof accept !== 'boolean') return cb({ error: 'Ongeldige reactie.' });
     try {
