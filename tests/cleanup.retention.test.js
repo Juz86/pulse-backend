@@ -29,6 +29,7 @@ const mockDb = {
 
 // Timestamp mock — gedraagt zich zoals admin.firestore.Timestamp.fromDate
 const mockTimestamp = { toDate: () => new Date() };
+const originalFirebaseEnabled = process.env.FIREBASE_ENABLED;
 
 jest.mock('../src/firebase', () => ({
   admin: {
@@ -63,6 +64,7 @@ function makeDoc(id, data = {}) {
 
 describe('cleanMessages — 30-dagenretentie', () => {
   beforeEach(() => {
+    process.env.FIREBASE_ENABLED = 'true';
     jest.clearAllMocks();
     mockBatch.delete.mockClear();
     mockBatch.commit.mockClear();
@@ -145,6 +147,7 @@ describe('cleanMessages — 30-dagenretentie', () => {
 
 describe('cleanParentActivities — 30-dagenretentie', () => {
   beforeEach(() => {
+    process.env.FIREBASE_ENABLED = 'true';
     jest.clearAllMocks();
     mockBatch.delete.mockClear();
     mockBatch.commit.mockClear();
@@ -231,6 +234,11 @@ describe('cleanParentActivities — 30-dagenretentie', () => {
 
     expect(mockBatch.delete).not.toHaveBeenCalledWith(recentActivity.ref);
   });
+});
+
+afterAll(() => {
+  if (originalFirebaseEnabled === undefined) delete process.env.FIREBASE_ENABLED;
+  else process.env.FIREBASE_ENABLED = originalFirebaseEnabled;
 });
 
 describe('Retentiebeleid constanten', () => {
