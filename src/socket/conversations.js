@@ -117,7 +117,9 @@ module.exports = function registerConversations(io, socket, uid) {
       const members = convData.members || [];
       const isSelfLeave = targetUid === uid;
       if (!members.includes(targetUid)) { cb?.({ error: 'Geen toegang.' }); return; }
-      if (convData.isGroup && convData.creatorId && convData.creatorId !== uid && !isSelfLeave) { cb?.({ error: 'Alleen de groepsbeheerder kan leden verwijderen.' }); return; }
+      if (!convData.isGroup) { cb?.({ error: 'Dit is geen groepsgesprek.' }); return; }
+      if (!isSelfLeave && !isGroupAdmin(convData, uid)) { cb?.({ error: 'Alleen beheerders kunnen leden verwijderen.' }); return; }
+      if (!isSelfLeave && isGroupAdmin(convData, targetUid)) { cb?.({ error: 'Een beheerder kan een andere beheerder niet verwijderen.' }); return; }
       const update = { members: admin.firestore.FieldValue.arrayRemove(targetUid) };
       update[`memberNames.${targetUid}`] = admin.firestore.FieldValue.delete();
       if (convData.isGroup && convData.creatorId === targetUid) {
