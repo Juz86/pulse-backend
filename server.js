@@ -241,18 +241,40 @@ io.on('connection', (socket) => {
 
   // Typing indicators (inline — not worth a separate module)
   const typingTimers = {};
-  socket.on('typing:start', ({ convId, name }) => {
-    socket.to(convId).emit('typing:update', { uid, name, typing: true });
-    clearTimeout(typingTimers[convId]);
-    typingTimers[convId] = setTimeout(() => {
-      socket.to(convId).emit('typing:update', { uid, typing: false });
-      delete typingTimers[convId];
+  socket.on('typing:start', ({ convId, conversationId, name, displayName } = {}) => {
+    const resolvedConvId = convId || conversationId;
+    if (!resolvedConvId) return;
+    const resolvedName = displayName || name || 'Iemand';
+    socket.to(resolvedConvId).emit('typing:update', {
+      uid,
+      convId: resolvedConvId,
+      conversationId: resolvedConvId,
+      name: resolvedName,
+      displayName: resolvedName,
+      typing: true,
+    });
+    clearTimeout(typingTimers[resolvedConvId]);
+    typingTimers[resolvedConvId] = setTimeout(() => {
+      socket.to(resolvedConvId).emit('typing:update', {
+        uid,
+        convId: resolvedConvId,
+        conversationId: resolvedConvId,
+        typing: false,
+      });
+      delete typingTimers[resolvedConvId];
     }, 2000);
   });
-  socket.on('typing:stop', ({ convId }) => {
-    clearTimeout(typingTimers[convId]);
-    delete typingTimers[convId];
-    socket.to(convId).emit('typing:update', { uid, typing: false });
+  socket.on('typing:stop', ({ convId, conversationId } = {}) => {
+    const resolvedConvId = convId || conversationId;
+    if (!resolvedConvId) return;
+    clearTimeout(typingTimers[resolvedConvId]);
+    delete typingTimers[resolvedConvId];
+    socket.to(resolvedConvId).emit('typing:update', {
+      uid,
+      convId: resolvedConvId,
+      conversationId: resolvedConvId,
+      typing: false,
+    });
   });
 
   // Register all socket handler modules
