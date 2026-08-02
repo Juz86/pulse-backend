@@ -133,6 +133,31 @@ module.exports = function registerConversations(io, socket, uid) {
     } catch (e) { cb?.({ error: e.message }); }
   });
 
+  // ── Groep opheffen ──
+  socket.on('conversation:dissolveGroup', async ({ convId }, cb = () => {}) => {
+    if (!convId) return cb({ error: 'Ongeldige groep.' });
+    try {
+      const convRef = db.collection('conversations').doc(convId);
+      const convDoc = await convRef.get();
+      if (!convDoc.exists) return cb({ error: 'Groep niet gevonden.' });
+
+      const conversation = convDoc.data() || {};
+      if (!conversation.isGroup) return cb({ error: 'Dit is geen groepsgesprek.' });
+      if (!(conversation.members || []).includes(uid)) return cb({ error: 'Je zit niet in deze groep.' });
+      if (!isGroupAdmin(conversation, uid)) return cb({ error: 'Alleen beheerders kunnen een groep opheffen.' });
+
+      await db.recursiveDelete(convRef);
+
+      (conversation.members || []).forEach((memberUid) => {
+        emitToUser(io, memberUid, 'conversation:dissolved', { convId, groupName: conversation.groupName || '' });
+      });
+      cb({ ok: true, convId });
+    } catch (error) {
+      console.error('Groep opheffen mislukt:', error);
+      cb({ error: 'Groep kon niet worden opgeheven.' });
+    }
+  });
+
   socket.on('conversation:promoteAdmin', async ({ convId, uid: targetUid }, cb = () => {}) => {
     if (!convId || !targetUid) return cb({ error: 'Ongeldig beheerderverzoek.' });
     try {
