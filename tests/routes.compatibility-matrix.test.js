@@ -362,6 +362,32 @@ describe('compatibility routes', () => {
     else process.env.PULSE_ANDROID_MIN_VERSION_CODE = previousMinimum;
   });
 
+  test('GET /api/feature-flags exposes only valid public boolean flags', async () => {
+    const previousFlags = process.env.PULSE_FEATURE_FLAGS_JSON;
+    process.env.PULSE_FEATURE_FLAGS_JSON = JSON.stringify({
+      group_member_actions_v2: true,
+      future_call_ui: false,
+      invalidFlag: 'true',
+      'invalid-name': true,
+    });
+
+    const app = buildApp();
+    const response = await request(app).get('/api/feature-flags');
+
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body).toEqual({
+      ok: true,
+      flags: {
+        group_member_actions_v2: true,
+        future_call_ui: false,
+      },
+    });
+
+    if (previousFlags === undefined) delete process.env.PULSE_FEATURE_FLAGS_JSON;
+    else process.env.PULSE_FEATURE_FLAGS_JSON = previousFlags;
+  });
+
   test('POST /api/friend-requests/:requestId/remind updates reminder state', async () => {
     const app = buildApp();
     const response = await request(app)

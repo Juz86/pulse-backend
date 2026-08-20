@@ -13,6 +13,20 @@ function readVersionCode(value) {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
+function readPublicFeatureFlags(value) {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([name, enabled]) => /^[a-z][a-z0-9_]{1,79}$/.test(name) && typeof enabled === 'boolean'),
+    );
+  } catch {
+    return {};
+  }
+}
+
 // ─── Gezondheidscheck ────────────────────────────────────────────────────────
 router.get('/', (req, res) => {
   res.json({ status: 'Pulse server draait ✅', time: new Date().toISOString() });
@@ -53,6 +67,17 @@ router.get('/api/app-update', (req, res) => {
     minimumVersionCode,
     updateAvailable,
     updateRequired,
+  });
+});
+
+// ─── Publieke feature flags ──────────────────────────────────────────────────
+// Alleen UI-/uitrolvlaggen horen hier thuis. Autorisatie wordt altijd opnieuw
+// op de betreffende API-route afgedwongen en mag nooit op een feature flag leunen.
+router.get('/api/feature-flags', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json({
+    ok: true,
+    flags: readPublicFeatureFlags(process.env.PULSE_FEATURE_FLAGS_JSON),
   });
 });
 
