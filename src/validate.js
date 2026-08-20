@@ -12,6 +12,7 @@ const schemas = {
     convId:  z.string().min(1).max(128),
     msgId:   z.string().min(1).max(128),
     newText: z.string().min(1).max(5000),
+    featureFlagged: z.boolean().optional(),
   }),
   messageReact: z.object({
     convId: z.string().min(1).max(128),

@@ -267,9 +267,12 @@ module.exports = function registerMessages(io, socket, uid) {
   socket.on('message:edit', async (data, callback) => {
     const validated = validate(schemas.messageEdit, data, callback);
     if (!validated) return;
-    const { convId, msgId, newText } = validated;
+    const { convId, msgId, newText, featureFlagged } = validated;
     try {
-      if (!isFeatureEnabled('message_editing')) {
+      // Oudere appversies kenden bewerken al. Alleen de nieuwe, geflagde UI
+      // wordt door de vlag bestuurd, zodat een backenddeploy geen regressie
+      // veroorzaakt voor testers met een eerder geïnstalleerde appversie.
+      if (featureFlagged && !isFeatureEnabled('message_editing')) {
         return callback?.({ error: 'Bericht bewerken is nog niet beschikbaar.' });
       }
       const { onlineUsers } = require('../state');
