@@ -336,6 +336,32 @@ describe('compatibility routes', () => {
     }));
   });
 
+  test('GET /api/app-update exposes the configured Play update policy', async () => {
+    const previousLatest = process.env.PULSE_ANDROID_LATEST_VERSION_CODE;
+    const previousMinimum = process.env.PULSE_ANDROID_MIN_VERSION_CODE;
+    process.env.PULSE_ANDROID_LATEST_VERSION_CODE = '23';
+    process.env.PULSE_ANDROID_MIN_VERSION_CODE = '22';
+
+    const app = buildApp();
+    const response = await request(app).get('/api/app-update?clientVersionCode=21');
+
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body).toEqual(expect.objectContaining({
+      ok: true,
+      clientVersionCode: 21,
+      latestVersionCode: 23,
+      minimumVersionCode: 22,
+      updateAvailable: true,
+      updateRequired: true,
+    }));
+
+    if (previousLatest === undefined) delete process.env.PULSE_ANDROID_LATEST_VERSION_CODE;
+    else process.env.PULSE_ANDROID_LATEST_VERSION_CODE = previousLatest;
+    if (previousMinimum === undefined) delete process.env.PULSE_ANDROID_MIN_VERSION_CODE;
+    else process.env.PULSE_ANDROID_MIN_VERSION_CODE = previousMinimum;
+  });
+
   test('POST /api/friend-requests/:requestId/remind updates reminder state', async () => {
     const app = buildApp();
     const response = await request(app)
