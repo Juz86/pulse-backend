@@ -379,6 +379,7 @@ describe('compatibility routes', () => {
     expect(response.body).toEqual({
       ok: true,
       flags: {
+        message_editing: false,
         group_member_actions_v2: true,
         future_call_ui: false,
       },

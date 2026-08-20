@@ -3,6 +3,16 @@ const { queueMessage } = require('../redis');
 const { sendPush } = require('../push');
 const { schemas, validate } = require('../validate');
 const { getMessageHistoryType, resolveConversationHistoryRules } = require('../cleanup');
+const { isFeatureEnabled } = require('../featureFlags');
+
+const MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000;
+
+function toTimestampMs(value) {
+  if (typeof value?.toMillis === 'function') return value.toMillis();
+  if (typeof value?.toDate === 'function') return value.toDate().getTime();
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 function emitToOnlineMembersOutsideConversation(io, convId, members, senderId, eventName, payload, onlineUsers) {
   const roomSockets = io.sockets.adapter.rooms.get(convId) || new Set();
@@ -259,6 +269,9 @@ module.exports = function registerMessages(io, socket, uid) {
     if (!validated) return;
     const { convId, msgId, newText } = validated;
     try {
+      if (!isFeatureEnabled('message_editing')) {
+        return callback?.({ error: 'Bericht bewerken is nog niet beschikbaar.' });
+      }
       const { onlineUsers } = require('../state');
       const trimmed = newText.trim();
       if (!trimmed) return callback?.({ error: 'Bericht mag niet leeg zijn.' });
@@ -268,6 +281,10 @@ module.exports = function registerMessages(io, socket, uid) {
       if (!msgDoc.exists) return callback?.({ error: 'Bericht niet gevonden.' });
       if (msgDoc.data().senderId !== uid) return callback?.({ error: 'Alleen eigen berichten bewerken.' });
       if (msgDoc.data().type && msgDoc.data().type !== 'text') return callback?.({ error: 'Dit bericht kan niet bewerkt worden.' });
+      const createdAtMs = toTimestampMs(msgDoc.data().createdAt);
+      if (!createdAtMs || Date.now() - createdAtMs > MESSAGE_EDIT_WINDOW_MS) {
+        return callback?.({ error: 'Berichten kunnen tot 15 minuten na verzending worden bewerkt.' });
+      }
 
       const editedAt = new Date().toISOString();
       await msgRef.update({ text: trimmed, editedAt });

@@ -3,6 +3,7 @@ const { db } = require('../firebase');
 const { verifyAuth } = require('../middleware');
 const { admin } = require('../firebase');
 const { pendingCalls } = require('../state');
+const { readPublicFeatureFlags } = require('../featureFlags');
 
 function findPendingCallBySession(sessionId) {
   return pendingCalls[sessionId] || null;
@@ -11,20 +12,6 @@ function findPendingCallBySession(sessionId) {
 function readVersionCode(value) {
   const parsed = Number.parseInt(String(value || ''), 10);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
-}
-
-function readPublicFeatureFlags(value) {
-  if (!value) return {};
-  try {
-    const parsed = JSON.parse(value);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    return Object.fromEntries(
-      Object.entries(parsed)
-        .filter(([name, enabled]) => /^[a-z][a-z0-9_]{1,79}$/.test(name) && typeof enabled === 'boolean'),
-    );
-  } catch {
-    return {};
-  }
 }
 
 // ─── Gezondheidscheck ────────────────────────────────────────────────────────
@@ -77,7 +64,7 @@ router.get('/api/feature-flags', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   return res.json({
     ok: true,
-    flags: readPublicFeatureFlags(process.env.PULSE_FEATURE_FLAGS_JSON),
+    flags: readPublicFeatureFlags(),
   });
 });
 
