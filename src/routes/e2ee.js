@@ -363,6 +363,10 @@ module.exports = (io) => {
         lastMessage: buildEncryptedPreview({ messageType, sharedContact }),
         lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastReactionMessageId: admin.firestore.FieldValue.delete(),
+        lastReactionEmoji: admin.firestore.FieldValue.delete(),
+        lastReactionReactorId: admin.firestore.FieldValue.delete(),
+        lastReactionAt: admin.firestore.FieldValue.delete(),
         lastMessageType: messageType,
         deletedFor: [],
       });

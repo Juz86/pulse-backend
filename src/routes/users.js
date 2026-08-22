@@ -583,7 +583,35 @@ module.exports = (io, onlineUsers) => {
       });
 
       const reactions = (await msgRef.get()).data().reactions || {};
-      const payload = { convId, msgId, reactions };
+      const conversationUpdate = hasReacted
+        ? (
+          convData.lastReactionMessageId === msgId
+          && convData.lastReactionEmoji === emoji
+          && convData.lastReactionReactorId === uid
+            ? {
+                lastReactionMessageId: admin.firestore.FieldValue.delete(),
+                lastReactionEmoji: admin.firestore.FieldValue.delete(),
+                lastReactionReactorId: admin.firestore.FieldValue.delete(),
+                lastReactionAt: admin.firestore.FieldValue.delete(),
+              }
+            : null
+        )
+        : {
+            lastReactionMessageId: msgId,
+            lastReactionEmoji: emoji,
+            lastReactionReactorId: uid,
+            lastReactionAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          };
+      if (conversationUpdate) await convDoc.ref.update(conversationUpdate);
+      const payload = {
+        convId,
+        msgId,
+        reactions,
+        emoji,
+        reactorId: uid,
+        reactionAt: new Date().toISOString(),
+      };
 
       io.to(convId).emit('message:reaction', payload);
       members.forEach(memberUid => {

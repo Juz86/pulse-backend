@@ -137,6 +137,10 @@ module.exports = function registerMessages(io, socket, uid) {
           lastMessage,
           lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          lastReactionMessageId: admin.firestore.FieldValue.delete(),
+          lastReactionEmoji: admin.firestore.FieldValue.delete(),
+          lastReactionReactorId: admin.firestore.FieldValue.delete(),
+          lastReactionAt: admin.firestore.FieldValue.delete(),
           deletedFor: [],  // Herstel gesprek voor iedereen die het had verwijderd
         }),
       ]);
@@ -244,7 +248,35 @@ module.exports = function registerMessages(io, socket, uid) {
       });
 
       const updatedReactions = (await msgRef.get()).data().reactions || {};
-      const payload = { convId, msgId, reactions: updatedReactions };
+      const conversationUpdate = hasReacted
+        ? (
+          convDoc.data()?.lastReactionMessageId === msgId
+          && convDoc.data()?.lastReactionEmoji === emoji
+          && convDoc.data()?.lastReactionReactorId === uid
+            ? {
+                lastReactionMessageId: admin.firestore.FieldValue.delete(),
+                lastReactionEmoji: admin.firestore.FieldValue.delete(),
+                lastReactionReactorId: admin.firestore.FieldValue.delete(),
+                lastReactionAt: admin.firestore.FieldValue.delete(),
+              }
+            : null
+        )
+        : {
+            lastReactionMessageId: msgId,
+            lastReactionEmoji: emoji,
+            lastReactionReactorId: uid,
+            lastReactionAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          };
+      if (conversationUpdate) await db.collection('conversations').doc(convId).update(conversationUpdate);
+      const payload = {
+        convId,
+        msgId,
+        reactions: updatedReactions,
+        emoji,
+        reactorId: uid,
+        reactionAt: new Date().toISOString(),
+      };
       io.to(convId).emit('message:reaction', payload);
       const members = convDoc.data().members || [];
       emitToOnlineMembersOutsideConversation(
