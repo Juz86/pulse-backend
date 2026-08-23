@@ -1,12 +1,16 @@
 let mockUsers;
 let mockPendingCalls;
 let mockActiveCalls;
+let mockActiveCallSessions;
+let mockOnlineUsers;
 let mockSocketLookup;
 let mockSendPush;
+let socketCounter;
 
-function makeSocket(uid) {
+function makeSocket(uid, id = `socket-${uid}-${++socketCounter}`) {
   const handlers = new Map();
   return {
+    id,
     data: { uid },
     on(event, handler) {
       handlers.set(event, handler);
@@ -77,6 +81,23 @@ jest.mock('../src/state', () => ({
   get pendingCalls() {
     return mockPendingCalls;
   },
+  get activeCallSessions() {
+    return mockActiveCallSessions;
+  },
+  get onlineUsers() {
+    return mockOnlineUsers;
+  },
+  getSocketIds: (uid) => Array.from(mockOnlineUsers[uid] || []),
+  getCallPeerSocketId: (sessionId, fromUid, toUid) => {
+    const session = mockActiveCallSessions[sessionId];
+    if (!session) return null;
+    if (session.callerUid === fromUid && session.calleeUid === toUid) return session.calleeSocketId;
+    if (session.calleeUid === fromUid && session.callerUid === toUid) return session.callerSocketId;
+    return null;
+  },
+  clearCallSession: (sessionId) => {
+    delete mockActiveCallSessions[sessionId];
+  },
   getSocketId: (...args) => mockSocketLookup(...args),
 }));
 
@@ -94,6 +115,9 @@ describe('socket call recovery behavior', () => {
     };
     mockPendingCalls = {};
     mockActiveCalls = new Set();
+    mockActiveCallSessions = {};
+    mockOnlineUsers = { callee: new Set(['socket-callee']) };
+    socketCounter = 0;
     mockSocketLookup = jest.fn((uid) => (uid === 'callee' ? 'socket-callee' : null));
     mockSendPush = jest.fn().mockResolvedValue(undefined);
   });
@@ -155,7 +179,7 @@ describe('socket call recovery behavior', () => {
   test('forwards a video offer with its session id to the recipient', async () => {
     const registerCalls = require('../src/socket/calls');
     const io = makeIo();
-    const callerSocket = makeSocket('caller');
+    const callerSocket = makeSocket('caller', 'socket-caller');
     registerCalls(io, callerSocket, 'caller');
 
     await callerSocket.trigger('call:offer', {
@@ -176,6 +200,41 @@ describe('socket call recovery behavior', () => {
         sessionId: 'video-session',
       }),
     });
+  });
+
+  test('rings every recipient device and lets only the first answer claim the call', async () => {
+    const registerCalls = require('../src/socket/calls');
+    mockOnlineUsers.callee = new Set(['socket-callee-phone', 'socket-callee-tablet']);
+    mockSocketLookup = jest.fn((uid) => (uid === 'caller' ? 'socket-caller' : null));
+    const io = makeIo();
+    const callerSocket = makeSocket('caller', 'socket-caller');
+    const phoneSocket = makeSocket('callee', 'socket-callee-phone');
+    const tabletSocket = makeSocket('callee', 'socket-callee-tablet');
+    registerCalls(io, callerSocket, 'caller');
+    registerCalls(io, phoneSocket, 'callee');
+    registerCalls(io, tabletSocket, 'callee');
+
+    await callerSocket.trigger('call:offer', {
+      to: 'callee', from: 'caller', offer: { type: 'offer', sdp: 'offer' },
+      isVideo: true, callerName: 'Caller', sessionId: 'multi-device-session',
+    });
+    phoneSocket.trigger('call:answer', {
+      to: 'caller', answer: { type: 'answer', sdp: 'phone-answer' }, sessionId: 'multi-device-session',
+    });
+    tabletSocket.trigger('call:answer', {
+      to: 'caller', answer: { type: 'answer', sdp: 'tablet-answer' }, sessionId: 'multi-device-session',
+    });
+
+    expect(io.emitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({ target: 'socket-callee-phone', event: 'call:offer' }),
+      expect.objectContaining({ target: 'socket-callee-tablet', event: 'call:offer' }),
+      expect.objectContaining({ target: 'socket-caller', event: 'call:answer', payload: expect.objectContaining({ sessionId: 'multi-device-session' }) }),
+      expect.objectContaining({ target: 'socket-callee-tablet', event: 'call:ended', payload: expect.objectContaining({ reason: 'answered_elsewhere' }) }),
+    ]));
+    expect(mockActiveCallSessions['multi-device-session']).toEqual(expect.objectContaining({
+      calleeSocketId: 'socket-callee-phone',
+    }));
+    expect(tabletSocket.emit).toHaveBeenCalledWith('call:ended', expect.objectContaining({ reason: 'answered_elsewhere' }));
   });
 
   test('forwards answer, video upgrade, and end while clearing active call state', () => {
