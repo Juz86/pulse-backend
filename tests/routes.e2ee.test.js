@@ -18,6 +18,10 @@ function mockApplyPatch(target, patch) {
       target[key] = 'ts';
       return;
     }
+    if (value && value.__op === 'delete') {
+      delete target[key];
+      return;
+    }
     target[key] = value;
   });
 }
@@ -115,6 +119,7 @@ jest.mock('../src/firebase', () => ({
     firestore: {
       FieldValue: {
         serverTimestamp: () => ({ __op: 'serverTimestamp' }),
+        delete: () => ({ __op: 'delete' }),
       },
     },
   },
