@@ -103,7 +103,18 @@ module.exports = function registerConversations(io, socket, uid) {
         members: admin.firestore.FieldValue.arrayUnion(targetUid),
         [`memberNames.${targetUid}`]: displayName,
       });
-      io.to(convId).emit('conversation:memberAdded', { convId, uid: targetUid, displayName });
+      const conversation = {
+        id: convId,
+        ...convDoc.data(),
+        members: [...new Set([...(convDoc.data().members || []), targetUid])],
+        memberNames: { ...(convDoc.data().memberNames || {}), [targetUid]: displayName },
+      };
+      const payload = { convId, uid: targetUid, conversation };
+      // Snake_case en het conversation-object vormen het gedeelde realtime
+      // contract met de client. Het nieuwe lid zit nog niet in de room en
+      // krijgt daarom ook een directe invalidatie voor zijn gesprekkenlijst.
+      io.to(convId).emit('conversation:member_added', payload);
+      emitToUser(io, targetUid, 'conversation:member_added', payload);
       cb?.({});
     } catch (e) { cb?.({ error: e.message }); }
   });
@@ -128,7 +139,23 @@ module.exports = function registerConversations(io, socket, uid) {
         else update.creatorId = admin.firestore.FieldValue.delete();
       }
       await db.collection('conversations').doc(convId).update(update);
-      io.to(convId).emit('conversation:memberRemoved', { convId, uid: targetUid });
+      const memberNames = { ...(convData.memberNames || {}) };
+      delete memberNames[targetUid];
+      const conversation = {
+        id: convId,
+        ...convData,
+        members: members.filter((memberUid) => memberUid !== targetUid),
+        memberNames,
+        ...(convData.creatorId === targetUid ? { creatorId: members.find((memberUid) => memberUid !== targetUid) || null } : {}),
+      };
+      const payload = { convId, uid: targetUid, removedSelf: false, conversation };
+      io.to(convId).emit('conversation:member_removed', payload);
+      // De verwijderde gebruiker ontvangt een eigen payload zodat de client
+      // direct de geopende groep sluit en uit zijn gesprekkenlijst verwijdert.
+      emitToUser(io, targetUid, 'conversation:member_removed', {
+        ...payload,
+        removedSelf: true,
+      });
       cb?.({});
     } catch (e) { cb?.({ error: e.message }); }
   });
