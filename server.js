@@ -36,6 +36,7 @@ const registerPresence      = require('./src/socket/presence');
 const registerMessages      = require('./src/socket/messages');
 const registerCalls         = require('./src/socket/calls');
 const registerConversations = require('./src/socket/conversations');
+const { getSyncRequiredPayload } = require('./src/socket/sync');
 
 // ─── App URL ──────────────────────────────────────────────────────────────────
 const APP_URL = process.env.APP_URL || '';
@@ -202,6 +203,11 @@ io.use(async (socket, next) => {
 io.on('connection', (socket) => {
   const uid = socket.userId;
   console.log('🔌 Verbonden:', socket.id, uid);
+
+  // Socket.IO may not replay events that happened while this device was
+  // offline. The client uses this versioned signal to reconcile its cached
+  // API-backed lists before resuming normal realtime handling.
+  socket.emit('sync:required', getSyncRequiredPayload());
 
   // In-memory limiters per socket (eerste verdedigingslinie, altijd actief)
   const limits = {
