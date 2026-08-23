@@ -14,8 +14,17 @@ async function sendPush(uid, notification, data = {}) {
     if (!tokens.length) return;
     const stringData = Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)]));
     const isIncomingCall = stringData.type === 'incoming_call';
+    // Data-only is required for Android call UI while the app is backgrounded:
+    // notification payloads are otherwise handled by FCM's generic tray and
+    // never reach our FirebaseMessagingService.
+    if (isIncomingCall) {
+      stringData.title = notification?.title || 'Inkomende oproep';
+      stringData.body = notification?.body || 'Iemand belt je via Pulse.';
+    }
     const response = await admin.messaging().sendEachForMulticast({
-      tokens, notification, data: stringData,
+      tokens,
+      ...(isIncomingCall ? {} : { notification }),
+      data: stringData,
       // Android WebViews are suspended in the background. A high-priority
       // notification wakes the system UI, while the data payload lets Pulse
       // restore the pending offer after the user taps it.

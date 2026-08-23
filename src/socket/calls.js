@@ -138,26 +138,29 @@ module.exports = function registerCalls(io, socket, uid) {
 
     const effectiveSessionId = sessionId || buildSessionId();
     const targetSocketIds = getSocketIds(to);
+    // Een ontbrekende socket betekent alleen dat de WebView niet actief is;
+    // Android kan in de achtergrond of na afsluiten nog steeds via FCM rinkelen.
+    // De offer moet daarom altijd bewaard blijven tot de ontvanger hem kan
+    // herstellen vanuit de inkomende oproepmelding.
+    if (activeCalls.has(to)) {
+      socket.emit('call:busy', { to, sessionId: effectiveSessionId });
+      return;
+    }
+    // Voorkom dubbele inkomende oproep notificaties voor hetzelfde gesprek
+    if (getPendingCallByCallee(to)) return;
+    // Bijhouden dat deze oproep uitstaat (nog niet beantwoord)
+    pendingCalls[effectiveSessionId] = {
+      sessionId: effectiveSessionId,
+      from: uid,
+      to,
+      offer,
+      callerName,
+      isVideo: !!isVideo,
+      callerSocketId: socket.id,
+      recipientSocketIds: targetSocketIds,
+      createdAt: Date.now(),
+    };
     if (targetSocketIds.length > 0) {
-      // Controleer of ontvanger al in een actief gesprek zit
-      if (activeCalls.has(to)) {
-        socket.emit('call:busy', { to, sessionId: effectiveSessionId });
-        return;
-      }
-      // Voorkom dubbele inkomende oproep notificaties voor hetzelfde gesprek
-      if (getPendingCallByCallee(to)) return;
-      // Bijhouden dat deze oproep uitstaat (nog niet beantwoord)
-      pendingCalls[effectiveSessionId] = {
-        sessionId: effectiveSessionId,
-        from: uid,
-        to,
-        offer,
-        callerName,
-        isVideo: !!isVideo,
-        callerSocketId: socket.id,
-        recipientSocketIds: targetSocketIds,
-        createdAt: Date.now(),
-      };
       // Eén gebruiker kan op telefoon, tablet en web ingelogd zijn. Alle
       // apparaten rinkelen; het eerste antwoord claimt de call hieronder.
       emitToSocketIds(io, targetSocketIds, 'call:offer', {
@@ -179,13 +182,6 @@ module.exports = function registerCalls(io, socket, uid) {
           callerName: callerName || 'Iemand',
           isVideo: !!isVideo,
         }
-      );
-    } else {
-      socket.emit('call:unavailable', { to, sessionId: effectiveSessionId });
-      // Gebruiker is offline → gemiste oproep notificatie
-      sendPush(to,
-        { title: '📞 Gemiste oproep', body: `${callerName} heeft je ${isVideo ? 'geprobeerd te videobellen' : 'gebeld'}.` },
-        { type: 'missed_call' }
       );
     }
   });
