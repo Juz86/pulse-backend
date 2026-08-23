@@ -163,6 +163,23 @@ module.exports = function registerCalls(io, socket, uid) {
       emitToSocketIds(io, targetSocketIds, 'call:offer', {
         from: uid, fromUid: uid, offer, isVideo, callerName, sessionId: effectiveSessionId,
       });
+      // Een actieve socket betekent niet dat Android de WebView nog uitvoert:
+      // op de achtergrond wordt die vaak gepauzeerd. Stuur daarom ook een
+      // hoog-prioritaire callpush; op de voorgrond blijft de socket-overlay de
+      // primaire UI en op de achtergrond opent de push de antwoord/weiger-flow.
+      sendPush(to,
+        {
+          title: isVideo ? '📹 Inkomend videogesprek' : '📞 Inkomende oproep',
+          body: `${callerName || 'Iemand'} belt je via Pulse.`,
+        },
+        {
+          type: 'incoming_call',
+          callSessionId: effectiveSessionId,
+          fromUid: uid,
+          callerName: callerName || 'Iemand',
+          isVideo: !!isVideo,
+        }
+      );
     } else {
       socket.emit('call:unavailable', { to, sessionId: effectiveSessionId });
       // Gebruiker is offline → gemiste oproep notificatie

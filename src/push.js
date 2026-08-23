@@ -13,8 +13,22 @@ async function sendPush(uid, notification, data = {}) {
     ])];
     if (!tokens.length) return;
     const stringData = Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)]));
+    const isIncomingCall = stringData.type === 'incoming_call';
     const response = await admin.messaging().sendEachForMulticast({
       tokens, notification, data: stringData,
+      // Android WebViews are suspended in the background. A high-priority
+      // notification wakes the system UI, while the data payload lets Pulse
+      // restore the pending offer after the user taps it.
+      android: {
+        priority: isIncomingCall ? 'high' : 'normal',
+        notification: {
+          channelId: isIncomingCall ? 'pulse_calls' : 'pulse_messages',
+          priority: isIncomingCall ? 'max' : 'default',
+          visibility: 'public',
+          sound: 'default',
+          tag: isIncomingCall && stringData.callSessionId ? `call_${stringData.callSessionId}` : undefined,
+        },
+      },
       webpush: { fcmOptions: { link: APP_URL } },
     });
     const toRemove = [];

@@ -200,6 +200,16 @@ describe('socket call recovery behavior', () => {
         sessionId: 'video-session',
       }),
     });
+    expect(mockSendPush).toHaveBeenCalledWith(
+      'callee',
+      expect.objectContaining({ title: '📹 Inkomend videogesprek' }),
+      expect.objectContaining({
+        type: 'incoming_call',
+        callSessionId: 'video-session',
+        fromUid: 'caller',
+        isVideo: true,
+      })
+    );
   });
 
   test('rings every recipient device and lets only the first answer claim the call', async () => {
