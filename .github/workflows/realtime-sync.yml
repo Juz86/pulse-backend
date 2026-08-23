@@ -1,0 +1,37 @@
+name: Realtime Sync
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - 'server.js'
+      - 'src/socket/**'
+      - 'src/routes/**'
+      - 'src/state.js'
+      - 'tests/socket*.test.js'
+      - '.github/workflows/realtime-sync.yml'
+
+jobs:
+  verify-realtime-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run realtime sync protocol test
+        run: npm test -- --runInBand tests/socket.sync.test.js
+
+      - name: Run full backend test suite
+        run: npm test -- --runInBand
