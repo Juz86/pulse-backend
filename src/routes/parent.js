@@ -564,7 +564,10 @@ module.exports = (io, onlineUsers) => {
         lastSeen: childData.lastSeen || null,
       };
 
-      const contactList = contactsSnap.docs.map(d => ({ uid: d.id, displayName: d.data().displayName, photoURL: d.data().photoURL || null, email: d.data().email || null, username: d.data().username || null, relation: d.data().relation || null }));
+      // Oude vriendschappen hadden nog geen relatieveld. Familiecontacten
+      // worden expliciet als `familie` opgeslagen; een ontbrekende waarde is
+      // daarom een bestaande vriendschap en hoort in de vriendenfilter.
+      const contactList = contactsSnap.docs.map(d => ({ uid: d.id, displayName: d.data().displayName, photoURL: d.data().photoURL || null, email: d.data().email || null, username: d.data().username || null, relation: d.data().relation || 'vrienden' }));
 
       const friendRequests = {
         sent: friendReqSentSnap.docs.map(d => ({ toName: d.data().toName || d.data().toEmail || '', status: d.data().status, createdAt: d.data().createdAt || null })),

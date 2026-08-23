@@ -81,6 +81,7 @@ module.exports = (io, onlineUsers) => {
         batch.set(db.collection('users').doc(fromUid).collection('contacts').doc(toUser.uid), {
           uid: toUser.uid, displayName: toUser.displayName, email: toUser.email,
           photoURL: toUser.photoURL || null, nickname,
+          relation: 'vrienden',
           addedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
         await batch.commit();
@@ -195,10 +196,12 @@ module.exports = (io, onlineUsers) => {
       // Voeg toe aan beiden contactenlijst
       batch.set(db.collection('users').doc(toUid).collection('contacts').doc(fromUid), {
         uid: fromUid, displayName: fromName, email: fromEmail, photoURL: fromPhoto || null,
+        relation: 'vrienden',
         addedAt: new Date().toISOString(),
       });
       batch.set(db.collection('users').doc(fromUid).collection('contacts').doc(toUid), {
         uid: toUid, displayName: toName, email: toEmail, photoURL: null,
+        relation: 'vrienden',
         addedAt: new Date().toISOString(),
       });
       // Verzoek als geaccepteerd markeren
