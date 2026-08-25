@@ -163,6 +163,7 @@ app.get('/health', (_req, res) => {
   res.json({
     ok: true,
     service: 'pulse-backend',
+    callPushProtocol: 'data-only-v2',
     appOrigins: Array.from(appOrigins),
     marketingOrigins: Array.from(marketingOrigins),
   });
