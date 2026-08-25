@@ -166,24 +166,23 @@ module.exports = function registerCalls(io, socket, uid) {
       emitToSocketIds(io, targetSocketIds, 'call:offer', {
         from: uid, fromUid: uid, offer, isVideo, callerName, sessionId: effectiveSessionId,
       });
-      // Een actieve socket betekent niet dat Android de WebView nog uitvoert:
-      // op de achtergrond wordt die vaak gepauzeerd. Stuur daarom ook een
-      // hoog-prioritaire callpush; op de voorgrond blijft de socket-overlay de
-      // primaire UI en op de achtergrond opent de push de antwoord/weiger-flow.
-      sendPush(to,
-        {
-          title: isVideo ? '📹 Inkomend videogesprek' : '📞 Inkomende oproep',
-          body: `${callerName || 'Iemand'} belt je via Pulse.`,
-        },
-        {
-          type: 'incoming_call',
-          callSessionId: effectiveSessionId,
-          fromUid: uid,
-          callerName: callerName || 'Iemand',
-          isVideo: !!isVideo,
-        }
-      );
     }
+    // Dit moet buiten de socket-voorwaarde blijven: bij een afgesloten app is
+    // er juist geen socket meer, terwijl FCM dan de enige manier is om het
+    // inkomende gesprek te tonen en de opgeslagen offer te herstellen.
+    sendPush(to,
+      {
+        title: isVideo ? '📹 Inkomend videogesprek' : '📞 Inkomende oproep',
+        body: `${callerName || 'Iemand'} belt je via Pulse.`,
+      },
+      {
+        type: 'incoming_call',
+        callSessionId: effectiveSessionId,
+        fromUid: uid,
+        callerName: callerName || 'Iemand',
+        isVideo: !!isVideo,
+      }
+    );
   });
 
   socket.on('call:answer', ({ to, answer, sessionId }) => {
