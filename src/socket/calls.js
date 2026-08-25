@@ -178,6 +178,7 @@ module.exports = function registerCalls(io, socket, uid) {
       {
         type: 'incoming_call',
         callSessionId: effectiveSessionId,
+        sessionId: effectiveSessionId,
         fromUid: uid,
         callerName: callerName || 'Iemand',
         isVideo: !!isVideo,
@@ -216,6 +217,12 @@ module.exports = function registerCalls(io, socket, uid) {
       deletePendingCallsForUser(socket.data.uid);
       deletePendingCallsForUser(to);
     }
+    const answeredSessionId = sessionId || pendingCall?.sessionId || '';
+    sendPush(uid, null, {
+      type: 'call_cancelled',
+      callSessionId: answeredSessionId,
+      sessionId: answeredSessionId,
+    });
   });
 
   socket.on('call:ice-candidate', ({ to, candidate, sessionId }) => {
@@ -231,6 +238,12 @@ module.exports = function registerCalls(io, socket, uid) {
       const targetSocket = resolvePeerSocketId(sessionId, uid, to);
       if (targetSocket) io.to(targetSocket).emit('call:ended', { sessionId: sessionId || null });
     }
+    const endedSessionId = sessionId || pendingCall?.sessionId || '';
+    sendPush(to, null, {
+      type: 'call_cancelled',
+      callSessionId: endedSessionId,
+      sessionId: endedSessionId,
+    });
     // Beide users zijn niet meer in een actief gesprek
     activeCalls.delete(socket.data.uid);
     activeCalls.delete(to);
@@ -257,6 +270,11 @@ module.exports = function registerCalls(io, socket, uid) {
       deletePendingCallsForUser(socket.data.uid);
       deletePendingCallsForUser(to);
     }
+    sendPush(uid, null, {
+      type: 'call_cancelled',
+      callSessionId: sessionId || '',
+      sessionId: sessionId || '',
+    });
     clearCallSession(sessionId);
   });
 
