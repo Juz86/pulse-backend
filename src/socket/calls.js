@@ -15,6 +15,30 @@ function buildSessionId() {
   return `call_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+const earlyCallerCandidates = new Map();
+const MAX_EARLY_CANDIDATE_SESSIONS = 128;
+const MAX_CANDIDATES_PER_CALL = 64;
+
+function storeEarlyCallerCandidate(sessionId, from, to, candidate) {
+  if (!sessionId || !from || !to || !candidate) return;
+  const existing = earlyCallerCandidates.get(sessionId);
+  const batch = existing?.from === from && existing?.to === to
+    ? existing
+    : { from, to, candidates: [] };
+  if (batch.candidates.length < MAX_CANDIDATES_PER_CALL) batch.candidates.push(candidate);
+  earlyCallerCandidates.delete(sessionId);
+  earlyCallerCandidates.set(sessionId, batch);
+  while (earlyCallerCandidates.size > MAX_EARLY_CANDIDATE_SESSIONS) {
+    earlyCallerCandidates.delete(earlyCallerCandidates.keys().next().value);
+  }
+}
+
+function takeEarlyCallerCandidates(sessionId, from, to) {
+  const batch = sessionId ? earlyCallerCandidates.get(sessionId) : null;
+  if (sessionId) earlyCallerCandidates.delete(sessionId);
+  return batch?.from === from && batch?.to === to ? batch.candidates : [];
+}
+
 function getPendingCallByCallee(calleeUid) {
   return Object.values(pendingCalls).find((call) => call?.to === calleeUid) || null;
 }
@@ -154,6 +178,7 @@ module.exports = function registerCalls(io, socket, uid) {
       from: uid,
       to,
       offer,
+      callerCandidates: takeEarlyCallerCandidates(effectiveSessionId, uid, to),
       callerName,
       isVideo: !!isVideo,
       callerSocketId: socket.id,
@@ -210,22 +235,30 @@ module.exports = function registerCalls(io, socket, uid) {
     const targetSocket = resolvePeerSocketId(sessionId, uid, to);
     if (targetSocket) io.to(targetSocket).emit('call:answer', { answer, fromUid: uid, sessionId: sessionId || null });
     // Oproep beantwoord → beide users zijn nu in een actief gesprek
-    activeCalls.add(socket.data.uid);
+    activeCalls.add(uid);
     activeCalls.add(to);
     if (sessionId) deletePendingCallBySession(sessionId);
     else {
-      deletePendingCallsForUser(socket.data.uid);
+      deletePendingCallsForUser(uid);
       deletePendingCallsForUser(to);
     }
     const answeredSessionId = sessionId || pendingCall?.sessionId || '';
     sendPush(uid, null, {
       type: 'call_cancelled',
+      reason: 'answered',
       callSessionId: answeredSessionId,
       sessionId: answeredSessionId,
     });
   });
 
   socket.on('call:ice-candidate', ({ to, candidate, sessionId }) => {
+    const pendingCall = sessionId ? pendingCalls[sessionId] : null;
+    if (pendingCall?.from === uid && pendingCall?.to === to && candidate) {
+      pendingCall.callerCandidates = pendingCall.callerCandidates || [];
+      if (pendingCall.callerCandidates.length < MAX_CANDIDATES_PER_CALL) pendingCall.callerCandidates.push(candidate);
+    } else if (!pendingCall && sessionId) {
+      storeEarlyCallerCandidate(sessionId, uid, to, candidate);
+    }
     const targetSocket = resolvePeerSocketId(sessionId, uid, to);
     if (targetSocket) io.to(targetSocket).emit('call:ice-candidate', { candidate, fromUid: uid, sessionId: sessionId || null });
   });
@@ -245,7 +278,7 @@ module.exports = function registerCalls(io, socket, uid) {
       sessionId: endedSessionId,
     });
     // Beide users zijn niet meer in een actief gesprek
-    activeCalls.delete(socket.data.uid);
+    activeCalls.delete(uid);
     activeCalls.delete(to);
     // Als oproep nog uitstond (niet beantwoord) → gemiste oproep notificatie
     if (pendingCall) {
@@ -263,11 +296,11 @@ module.exports = function registerCalls(io, socket, uid) {
     const targetSocket = resolvePeerSocketId(sessionId, uid, to);
     if (targetSocket) io.to(targetSocket).emit('call:declined', { sessionId: sessionId || null });
     // Bewust geweigerd → geen gemiste oproep
-    activeCalls.delete(socket.data.uid);
+    activeCalls.delete(uid);
     activeCalls.delete(to);
     if (sessionId) deletePendingCallBySession(sessionId);
     else {
-      deletePendingCallsForUser(socket.data.uid);
+      deletePendingCallsForUser(uid);
       deletePendingCallsForUser(to);
     }
     sendPush(uid, null, {

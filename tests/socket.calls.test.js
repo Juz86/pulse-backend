@@ -176,6 +176,58 @@ describe('socket call recovery behavior', () => {
     expect(mockPendingCalls['session-2']).toBeUndefined();
   });
 
+  test('stores caller ICE candidates while the callee is not connected', async () => {
+    const registerCalls = require('../src/socket/calls');
+    mockOnlineUsers.callee = new Set();
+    mockSocketLookup = jest.fn(() => null);
+    const io = makeIo();
+    const callerSocket = makeSocket('caller', 'socket-caller');
+    registerCalls(io, callerSocket, 'caller');
+
+    await callerSocket.trigger('call:offer', {
+      to: 'callee',
+      offer: { type: 'offer', sdp: 'audio-offer' },
+      isVideo: false,
+      callerName: 'Caller',
+      sessionId: 'native-session',
+    });
+    callerSocket.trigger('call:ice-candidate', {
+      to: 'callee',
+      sessionId: 'native-session',
+      candidate: { candidate: 'candidate:1', sdpMid: '0', sdpMLineIndex: 0 },
+    });
+
+    expect(mockPendingCalls['native-session'].callerCandidates).toEqual([
+      { candidate: 'candidate:1', sdpMid: '0', sdpMLineIndex: 0 },
+    ]);
+  });
+
+  test('keeps ICE candidates that arrive while the offer checks are still pending', async () => {
+    const registerCalls = require('../src/socket/calls');
+    mockOnlineUsers.callee = new Set();
+    mockSocketLookup = jest.fn(() => null);
+    const io = makeIo();
+    const callerSocket = makeSocket('caller', 'socket-caller');
+    registerCalls(io, callerSocket, 'caller');
+
+    callerSocket.trigger('call:ice-candidate', {
+      to: 'callee',
+      sessionId: 'early-native-session',
+      candidate: { candidate: 'candidate:early', sdpMid: '0', sdpMLineIndex: 0 },
+    });
+    await callerSocket.trigger('call:offer', {
+      to: 'callee',
+      offer: { type: 'offer', sdp: 'audio-offer' },
+      isVideo: false,
+      callerName: 'Caller',
+      sessionId: 'early-native-session',
+    });
+
+    expect(mockPendingCalls['early-native-session'].callerCandidates).toEqual([
+      { candidate: 'candidate:early', sdpMid: '0', sdpMLineIndex: 0 },
+    ]);
+  });
+
   test('forwards a video offer with its session id to the recipient', async () => {
     const registerCalls = require('../src/socket/calls');
     const io = makeIo();

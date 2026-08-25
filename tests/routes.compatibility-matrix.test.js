@@ -216,6 +216,9 @@ function mockMakeCollection(name, ownerId = null) {
 
 jest.mock('../src/firebase', () => ({
   admin: {
+    auth: () => ({
+      createCustomToken: async (uid) => `native-token-${uid}`,
+    }),
     firestore: {
       FieldValue: {
         serverTimestamp: () => ({ __op: 'serverTimestamp' }),
@@ -448,6 +451,7 @@ describe('compatibility routes', () => {
       callerName: 'User One',
       isVideo: true,
       createdAt: 12345,
+      callerCandidates: [{ candidate: 'candidate:1', sdpMid: '0', sdpMLineIndex: 0 }],
     };
 
     const app = buildApp();
@@ -465,10 +469,22 @@ describe('compatibility routes', () => {
         callerName: 'User One',
         isVideo: true,
         offer: expect.objectContaining({ type: 'offer' }),
+        callerCandidates: [expect.objectContaining({ candidate: 'candidate:1' })],
       }),
     }));
 
     delete pendingCalls['call_123'];
+  });
+
+  test('POST /api/native-call-auth mints a Firebase custom token for the current user', async () => {
+    const app = buildApp();
+    const response = await request(app)
+      .post('/api/native-call-auth')
+      .set('x-test-uid', 'user-2');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ ok: true, customToken: 'native-token-user-2' });
+    expect(response.headers['cache-control']).toBe('no-store');
   });
 
   test('GET /api/messages/recent-calls returns normalized recent call entries', async () => {

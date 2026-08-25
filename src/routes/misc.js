@@ -87,6 +87,7 @@ router.get('/calls/pending/:sessionId', verifyAuth, async (req, res) => {
         fromUid: pendingCall.from,
         to: pendingCall.to,
         offer: pendingCall.offer,
+        callerCandidates: Array.isArray(pendingCall.callerCandidates) ? pendingCall.callerCandidates : [],
         callerName: pendingCall.callerName || 'Iemand',
         isVideo: !!pendingCall.isVideo,
         createdAt: pendingCall.createdAt || Date.now(),
@@ -94,6 +95,17 @@ router.get('/calls/pending/:sessionId', verifyAuth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: 'Serverfout' });
+  }
+});
+
+router.post('/api/native-call-auth', verifyAuth, async (req, res) => {
+  try {
+    const customToken = await admin.auth().createCustomToken(req.uid, { pulseNativeCall: true });
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, customToken });
+  } catch (err) {
+    console.error('Native call auth fout:', err);
+    return res.status(500).json({ error: 'native_call_auth_failed' });
   }
 });
 
