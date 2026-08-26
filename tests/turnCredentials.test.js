@@ -9,16 +9,18 @@ const {
 describe('Cloudflare TURN credentials', () => {
   it('normaliseert TURN urls en verwijdert poort 53', () => {
     expect(normalizeCloudflareIceServer({
-      iceServers: {
-        urls: [
-          'stun:stun.cloudflare.com:3478',
-          'turn:turn.cloudflare.com:3478?transport=udp',
-          'turn:turn.cloudflare.com:53?transport=udp',
-          'turns:turn.cloudflare.com:443?transport=tcp',
-        ],
-        username: 'user',
-        credential: 'secret',
-      },
+      iceServers: [
+        { urls: ['stun:stun.cloudflare.com:3478'] },
+        {
+          urls: [
+            'turn:turn.cloudflare.com:3478?transport=udp',
+            'turn:turn.cloudflare.com:53?transport=udp',
+            'turns:turn.cloudflare.com:443?transport=tcp',
+          ],
+          username: 'user',
+          credential: 'secret',
+        },
+      ],
     })).toEqual({
       urls: [
         'turn:turn.cloudflare.com:3478?transport=udp',
@@ -38,11 +40,14 @@ describe('Cloudflare TURN credentials', () => {
     const fetchImpl = jest.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
-        iceServers: {
-          urls: ['turn:turn.cloudflare.com:3478?transport=udp'],
-          username: 'temporary-user',
-          credential: 'temporary-secret',
-        },
+        iceServers: [
+          { urls: ['stun:stun.cloudflare.com:3478'] },
+          {
+            urls: ['turn:turn.cloudflare.com:3478?transport=udp'],
+            username: 'temporary-user',
+            credential: 'temporary-secret',
+          },
+        ],
       }),
     });
 
@@ -58,7 +63,7 @@ describe('Cloudflare TURN credentials', () => {
     expect(result.source).toBe('cloudflare');
     expect(result.iceServers.at(-1).username).toBe('temporary-user');
     expect(fetchImpl).toHaveBeenCalledWith(
-      expect.stringContaining('/key-id/credentials/generate'),
+      expect.stringContaining('/key-id/credentials/generate-ice-servers'),
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({ Authorization: 'Bearer key-secret' }),

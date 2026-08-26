@@ -15,23 +15,26 @@ function readTtlSeconds(value) {
 }
 
 function normalizeCloudflareIceServer(payload) {
-  const server = payload?.iceServers;
-  if (!server || !Array.isArray(server.urls)) return null;
+  const servers = Array.isArray(payload?.iceServers)
+    ? payload.iceServers
+    : [payload?.iceServers].filter(Boolean);
 
-  const urls = server.urls.filter((url) => (
-    typeof url === 'string'
-    && /^turns?:/i.test(url)
-    && !/:53(?:\?|$)/i.test(url)
-  ));
-  if (!urls.length || typeof server.username !== 'string' || typeof server.credential !== 'string') {
-    return null;
+  for (const server of servers) {
+    if (!Array.isArray(server?.urls)) continue;
+    const urls = server.urls.filter((url) => (
+      typeof url === 'string'
+      && /^turns?:/i.test(url)
+      && !/:53(?:\?|$)/i.test(url)
+    ));
+    if (urls.length && typeof server.username === 'string' && typeof server.credential === 'string') {
+      return {
+        urls,
+        username: server.username,
+        credential: server.credential,
+      };
+    }
   }
-
-  return {
-    urls,
-    username: server.username,
-    credential: server.credential,
-  };
+  return null;
 }
 
 function readStaticTurnServer(env) {
@@ -54,7 +57,7 @@ async function generateCloudflareTurnServer({ env = process.env, fetchImpl = glo
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const response = await fetchImpl(
-      `${CLOUDFLARE_TURN_API}/${encodeURIComponent(keyId)}/credentials/generate`,
+      `${CLOUDFLARE_TURN_API}/${encodeURIComponent(keyId)}/credentials/generate-ice-servers`,
       {
         method: 'POST',
         headers: {
