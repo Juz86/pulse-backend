@@ -14,7 +14,7 @@ const jwt = require('jsonwebtoken');
 
 // ─── Core modules ─────────────────────────────────────────────────────────────
 const { admin, db } = require('./src/firebase');
-const { redisPub, redisSub, checkRateLimit } = require('./src/redis');
+const { redisPub, redisSub, checkRateLimit, getRedis } = require('./src/redis');
 const { onlineUsers, activeCalls, inactiveUsers, activeSessions } = require('./src/state');
 const { globalLimiter, securityHeaders, makeRateLimiter, makeSecondLimiter } = require('./src/middleware');
 
@@ -164,6 +164,8 @@ app.get('/health', (_req, res) => {
     ok: true,
     service: 'pulse-backend',
     callPushProtocol: 'data-only-v2',
+    callSessionProtocol: 'redis-v1',
+    callSessionStore: getRedis() ? 'redis' : 'memory_fallback',
     appOrigins: Array.from(appOrigins),
     marketingOrigins: Array.from(marketingOrigins),
   });
