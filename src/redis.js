@@ -6,8 +6,19 @@ const redisUrl = process.env.REDIS_URL;
 if (redisUrl) {
   try {
     const Redis = require('ioredis');
-    const queueOpts  = { maxRetriesPerRequest: 1, connectTimeout: 3000, enableOfflineQueue: false, retryStrategy: () => null };
-    const adapterOpts = { connectTimeout: 5000, retryStrategy: (t) => Math.min(t * 100, 3000) };
+    // Railway private networking can resolve to IPv4 and IPv6. Dual-stack
+    // lookup avoids ioredis selecting an unreachable address family.
+    const sharedNetworkOpts = { family: 0, connectTimeout: 10_000 };
+    const queueOpts = {
+      ...sharedNetworkOpts,
+      maxRetriesPerRequest: 1,
+      enableOfflineQueue: false,
+      retryStrategy: (t) => Math.min(t * 200, 3000),
+    };
+    const adapterOpts = {
+      ...sharedNetworkOpts,
+      retryStrategy: (t) => Math.min(t * 100, 3000),
+    };
     const redisClient = new Redis(redisUrl, queueOpts);
     redisPub = new Redis(redisUrl, adapterOpts);
     redisSub = new Redis(redisUrl, adapterOpts);
