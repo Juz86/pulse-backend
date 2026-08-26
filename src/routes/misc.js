@@ -4,6 +4,7 @@ const { verifyAuth } = require('../middleware');
 const { admin } = require('../firebase');
 const { getPendingCall } = require('../callStore');
 const { readPublicFeatureFlags } = require('../featureFlags');
+const { getTurnCredentials } = require('../turnCredentials');
 
 function readVersionCode(value) {
   const parsed = Number.parseInt(String(value || ''), 10);
@@ -122,28 +123,10 @@ router.post('/api/fcm-token', verifyAuth, async (req, res) => {
 });
 
 // ── TURN credentials — ICE server config nooit in de frontend bundle ─────────
-router.get('/api/turn-credentials', verifyAuth, (req, res) => {
-  const iceServers = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun.cloudflare.com:3478' },
-  ];
-
-  // Voeg TURN toe als env vars beschikbaar zijn (TURN_URL, TURN_USERNAME, TURN_CREDENTIAL)
-  const turnUrl        = process.env.TURN_URL;
-  const turnUsername   = process.env.TURN_USERNAME;
-  const turnCredential = process.env.TURN_CREDENTIAL;
-  if (turnUrl && turnUsername && turnCredential) {
-    iceServers.push(
-      { urls: turnUrl,                               username: turnUsername, credential: turnCredential },
-      { urls: turnUrl.replace(':80', ':443'),        username: turnUsername, credential: turnCredential },
-      { urls: turnUrl.replace('turn:', 'turns:') + '?transport=tcp', username: turnUsername, credential: turnCredential },
-    );
-  }
-
-  // Cache 1 uur in de browser
-  res.setHeader('Cache-Control', 'private, max-age=3600');
-  res.json({ iceServers });
+router.get('/api/turn-credentials', verifyAuth, async (_req, res) => {
+  const credentials = await getTurnCredentials({ logger: console });
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  res.json(credentials);
 });
 
 module.exports = router;
