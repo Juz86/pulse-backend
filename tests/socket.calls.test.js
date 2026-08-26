@@ -29,11 +29,19 @@ function makeIo() {
   return {
     emitted,
     to(target) {
-      return {
+      const operator = {
         emit(event, payload) {
           emitted.push({ target, event, payload });
         },
+        except(excludedSocketId) {
+          return {
+            emit(event, payload) {
+              emitted.push({ target, excludedSocketId, event, payload });
+            },
+          };
+        },
       };
+      return operator;
     },
     sockets: {
       adapter: {
@@ -154,7 +162,7 @@ describe('socket call recovery behavior', () => {
     }));
   });
 
-  test('caller disconnect clears pending offer started by caller', async () => {
+  test('caller disconnect keeps pending offer for a reconnect', async () => {
     const registerCalls = require('../src/socket/calls');
     const io = makeIo();
     const callerSocket = makeSocket('caller');
@@ -173,7 +181,7 @@ describe('socket call recovery behavior', () => {
 
     callerSocket.trigger('disconnect');
 
-    expect(mockPendingCalls['session-2']).toBeUndefined();
+    expect(mockPendingCalls['session-2']).toBeDefined();
   });
 
   test('stores caller ICE candidates while the callee is not connected', async () => {
@@ -191,7 +199,7 @@ describe('socket call recovery behavior', () => {
       callerName: 'Caller',
       sessionId: 'native-session',
     });
-    callerSocket.trigger('call:ice-candidate', {
+    await callerSocket.trigger('call:ice-candidate', {
       to: 'callee',
       sessionId: 'native-session',
       candidate: { candidate: 'candidate:1', sdpMid: '0', sdpMLineIndex: 0 },
@@ -210,7 +218,7 @@ describe('socket call recovery behavior', () => {
     const callerSocket = makeSocket('caller', 'socket-caller');
     registerCalls(io, callerSocket, 'caller');
 
-    callerSocket.trigger('call:ice-candidate', {
+    await callerSocket.trigger('call:ice-candidate', {
       to: 'callee',
       sessionId: 'early-native-session',
       candidate: { candidate: 'candidate:early', sdpMid: '0', sdpMLineIndex: 0 },
@@ -244,7 +252,7 @@ describe('socket call recovery behavior', () => {
     });
 
     expect(io.emitted).toContainEqual({
-      target: 'socket-callee',
+      target: 'callee',
       event: 'call:offer',
       payload: expect.objectContaining({
         fromUid: 'caller',
@@ -280,18 +288,17 @@ describe('socket call recovery behavior', () => {
       to: 'callee', from: 'caller', offer: { type: 'offer', sdp: 'offer' },
       isVideo: true, callerName: 'Caller', sessionId: 'multi-device-session',
     });
-    phoneSocket.trigger('call:answer', {
+    await phoneSocket.trigger('call:answer', {
       to: 'caller', answer: { type: 'answer', sdp: 'phone-answer' }, sessionId: 'multi-device-session',
     });
-    tabletSocket.trigger('call:answer', {
+    await tabletSocket.trigger('call:answer', {
       to: 'caller', answer: { type: 'answer', sdp: 'tablet-answer' }, sessionId: 'multi-device-session',
     });
 
     expect(io.emitted).toEqual(expect.arrayContaining([
-      expect.objectContaining({ target: 'socket-callee-phone', event: 'call:offer' }),
-      expect.objectContaining({ target: 'socket-callee-tablet', event: 'call:offer' }),
-      expect.objectContaining({ target: 'socket-caller', event: 'call:answer', payload: expect.objectContaining({ sessionId: 'multi-device-session' }) }),
-      expect.objectContaining({ target: 'socket-callee-tablet', event: 'call:ended', payload: expect.objectContaining({ reason: 'answered_elsewhere' }) }),
+      expect.objectContaining({ target: 'callee', event: 'call:offer' }),
+      expect.objectContaining({ target: 'caller', event: 'call:answer', payload: expect.objectContaining({ sessionId: 'multi-device-session' }) }),
+      expect.objectContaining({ target: 'callee', excludedSocketId: 'socket-callee-phone', event: 'call:ended', payload: expect.objectContaining({ reason: 'answered_elsewhere' }) }),
     ]));
     expect(mockActiveCallSessions['multi-device-session']).toEqual(expect.objectContaining({
       calleeSocketId: 'socket-callee-phone',
@@ -299,27 +306,70 @@ describe('socket call recovery behavior', () => {
     expect(tabletSocket.emit).toHaveBeenCalledWith('call:ended', expect.objectContaining({ reason: 'answered_elsewhere' }));
   });
 
-  test('forwards answer, video upgrade, and end while clearing active call state', () => {
+  test('forwards answer, video upgrade, and end while clearing active call state', async () => {
     const registerCalls = require('../src/socket/calls');
     mockSocketLookup = jest.fn((uid) => (uid === 'caller' ? 'socket-caller' : 'socket-callee'));
     const io = makeIo();
-    const calleeSocket = makeSocket('callee');
+    const callerSocket = makeSocket('caller', 'socket-caller');
+    const calleeSocket = makeSocket('callee', 'socket-callee');
+    registerCalls(io, callerSocket, 'caller');
     registerCalls(io, calleeSocket, 'callee');
 
-    calleeSocket.trigger('call:answer', {
+    await callerSocket.trigger('call:offer', {
+      to: 'callee',
+      offer: { type: 'offer', sdp: 'offer-sdp' },
+      isVideo: false,
+      callerName: 'Caller',
+      sessionId: 'session-live',
+    });
+    await calleeSocket.trigger('call:answer', {
       to: 'caller',
       answer: { type: 'answer', sdp: 'answer-sdp' },
       sessionId: 'session-live',
     });
-    calleeSocket.trigger('call:video-upgrade', { to: 'caller', sessionId: 'session-live' });
-    calleeSocket.trigger('call:end', { to: 'caller', sessionId: 'session-live' });
+    await calleeSocket.trigger('call:video-upgrade', { to: 'caller', sessionId: 'session-live' });
+    await calleeSocket.trigger('call:end', { to: 'caller', sessionId: 'session-live' });
 
     expect(io.emitted).toEqual(expect.arrayContaining([
-      expect.objectContaining({ target: 'socket-caller', event: 'call:answer', payload: expect.objectContaining({ sessionId: 'session-live' }) }),
-      expect.objectContaining({ target: 'socket-caller', event: 'call:video-upgrade', payload: { sessionId: 'session-live' } }),
-      expect.objectContaining({ target: 'socket-caller', event: 'call:ended', payload: { sessionId: 'session-live' } }),
+      expect.objectContaining({ target: 'caller', event: 'call:answer', payload: expect.objectContaining({ sessionId: 'session-live' }) }),
+      expect.objectContaining({ target: 'caller', event: 'call:video-upgrade', payload: { sessionId: 'session-live' } }),
+      expect.objectContaining({ target: 'caller', event: 'call:ended', payload: { sessionId: 'session-live' } }),
     ]));
-    expect(mockActiveCalls.has('caller')).toBe(false);
-    expect(mockActiveCalls.has('callee')).toBe(false);
+    expect(mockActiveCallSessions['session-live']).toBeUndefined();
+  });
+
+  test('resumes an active call after reconnect and can replay the answer', async () => {
+    const registerCalls = require('../src/socket/calls');
+    mockSocketLookup = jest.fn((uid) => (uid === 'caller' ? 'socket-caller-old' : 'socket-callee'));
+    const io = makeIo();
+    const callerSocket = makeSocket('caller', 'socket-caller-old');
+    const calleeSocket = makeSocket('callee', 'socket-callee');
+    registerCalls(io, callerSocket, 'caller');
+    registerCalls(io, calleeSocket, 'callee');
+
+    await callerSocket.trigger('call:offer', {
+      to: 'callee', offer: { type: 'offer', sdp: 'offer' }, isVideo: true,
+      callerName: 'Caller', sessionId: 'resume-session',
+    });
+    await calleeSocket.trigger('call:answer', {
+      to: 'caller', answer: { type: 'answer', sdp: 'saved-answer' }, sessionId: 'resume-session',
+    });
+
+    const resumedCaller = makeSocket('caller', 'socket-caller-new');
+    registerCalls(io, resumedCaller, 'caller');
+    await resumedCaller.trigger('call:resume', {
+      to: 'callee', sessionId: 'resume-session', needsAnswer: true,
+    });
+
+    expect(mockActiveCallSessions['resume-session']).toEqual(expect.objectContaining({
+      callerSocketId: 'socket-caller-new',
+    }));
+    expect(io.emitted).toContainEqual(expect.objectContaining({
+      target: 'callee', event: 'call:peer-resumed',
+    }));
+    expect(resumedCaller.emit).toHaveBeenCalledWith('call:answer', expect.objectContaining({
+      answer: { type: 'answer', sdp: 'saved-answer' },
+      sessionId: 'resume-session',
+    }));
   });
 });

@@ -1,78 +1,27 @@
 const { admin, db } = require('../firebase');
 const { sendPush } = require('../push');
 const {
-  activeCalls,
-  activeCallSessions,
-  pendingCalls,
-  clearCallSession,
-  getCallPeerSocketId,
-  getSocketId,
-  getSocketIds,
-} = require('../state');
+  addCallerCandidate,
+  claimPendingCall,
+  clearActiveCall,
+  createPendingCall,
+  deletePendingCall,
+  getActiveCall,
+  getPendingCall,
+  getPendingCallByCallee,
+  isUserInCall,
+  resumeActiveCall,
+} = require('../callStore');
 const { cleanupCommunicationsForUser, resolveConversationHistoryRules } = require('../cleanup');
 
 function buildSessionId() {
   return `call_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-const earlyCallerCandidates = new Map();
-const MAX_EARLY_CANDIDATE_SESSIONS = 128;
-const MAX_CANDIDATES_PER_CALL = 64;
-
-function storeEarlyCallerCandidate(sessionId, from, to, candidate) {
-  if (!sessionId || !from || !to || !candidate) return;
-  const existing = earlyCallerCandidates.get(sessionId);
-  const batch = existing?.from === from && existing?.to === to
-    ? existing
-    : { from, to, candidates: [] };
-  if (batch.candidates.length < MAX_CANDIDATES_PER_CALL) batch.candidates.push(candidate);
-  earlyCallerCandidates.delete(sessionId);
-  earlyCallerCandidates.set(sessionId, batch);
-  while (earlyCallerCandidates.size > MAX_EARLY_CANDIDATE_SESSIONS) {
-    earlyCallerCandidates.delete(earlyCallerCandidates.keys().next().value);
-  }
-}
-
-function takeEarlyCallerCandidates(sessionId, from, to) {
-  const batch = sessionId ? earlyCallerCandidates.get(sessionId) : null;
-  if (sessionId) earlyCallerCandidates.delete(sessionId);
-  return batch?.from === from && batch?.to === to ? batch.candidates : [];
-}
-
-function getPendingCallByCallee(calleeUid) {
-  return Object.values(pendingCalls).find((call) => call?.to === calleeUid) || null;
-}
-
-function deletePendingCallBySession(sessionId) {
-  if (!sessionId) return;
-  delete pendingCalls[sessionId];
-}
-
-function deletePendingCallsForUser(uid) {
-  Object.entries(pendingCalls).forEach(([sessionId, call]) => {
-    if (call?.from === uid || call?.to === uid) delete pendingCalls[sessionId];
-  });
-}
-
-function deletePendingCallsStartedByUser(uid) {
-  Object.entries(pendingCalls).forEach(([sessionId, call]) => {
-    if (call?.from === uid) delete pendingCalls[sessionId];
-  });
-}
-
-function getPendingCallForAnswer(sessionId, calleeUid, callerUid) {
-  if (sessionId) return pendingCalls[sessionId] || null;
-  return Object.values(pendingCalls).find((call) => call?.to === calleeUid && call?.from === callerUid) || null;
-}
-
-function emitToSocketIds(io, socketIds, event, payload, excludedSocketId = null) {
-  socketIds.forEach((socketId) => {
-    if (socketId && socketId !== excludedSocketId) io.to(socketId).emit(event, payload);
-  });
-}
-
-function resolvePeerSocketId(sessionId, fromUid, toUid) {
-  return getCallPeerSocketId(sessionId, fromUid, toUid) || getSocketId(toUid);
+function emitToUserExcept(io, userUid, excludedSocketId, event, payload) {
+  const room = io.to(userUid);
+  if (typeof room.except === 'function') room.except(excludedSocketId).emit(event, payload);
+  else room.emit(event, payload);
 }
 
 function emitCallLogOutsideConversation(io, convId, members, senderId, payload, onlineUsers) {
@@ -90,10 +39,19 @@ function emitCallLogOutsideConversation(io, convId, members, senderId, payload, 
 }
 
 module.exports = function registerCalls(io, socket, uid) {
+  const onCall = (event, handler) => {
+    socket.on(event, (payload = {}) => Promise.resolve(handler(payload || {})).catch((error) => {
+      console.error(`${event} fout:`, error);
+      socket.emit('call:unavailable', {
+        sessionId: payload?.sessionId || null,
+        reason: 'signaling_unavailable',
+      });
+    }));
+  };
+
   // ── Video upgrade doorsturen naar de andere kant ──
-  socket.on('call:video-upgrade', ({ to, sessionId }) => {
-    const targetSocket = resolvePeerSocketId(sessionId, uid, to);
-    if (targetSocket) io.to(targetSocket).emit('call:video-upgrade', { sessionId: sessionId || null });
+  onCall('call:video-upgrade', async ({ to, sessionId }) => {
+    io.to(to).emit('call:video-upgrade', { sessionId: sessionId || null });
   });
 
   // ── Oproep opslaan als bericht in gesprek ──
@@ -147,7 +105,7 @@ module.exports = function registerCalls(io, socket, uid) {
   });
 
   // ── WebRTC Signaling: Bellen ──
-  socket.on('call:offer', async ({ to, offer, isVideo, callerName, sessionId }) => {
+  onCall('call:offer', async ({ to, offer, isVideo, callerName, sessionId }) => {
     // Blokkeer check
     const [callerDoc, targetCallDoc] = await Promise.all([
       db.collection('users').doc(uid).get(),
@@ -161,37 +119,33 @@ module.exports = function registerCalls(io, socket, uid) {
     }
 
     const effectiveSessionId = sessionId || buildSessionId();
-    const targetSocketIds = getSocketIds(to);
     // Een ontbrekende socket betekent alleen dat de WebView niet actief is;
     // Android kan in de achtergrond of na afsluiten nog steeds via FCM rinkelen.
     // De offer moet daarom altijd bewaard blijven tot de ontvanger hem kan
     // herstellen vanuit de inkomende oproepmelding.
-    if (activeCalls.has(to)) {
+    if (await isUserInCall(to)) {
       socket.emit('call:busy', { to, sessionId: effectiveSessionId });
       return;
     }
     // Voorkom dubbele inkomende oproep notificaties voor hetzelfde gesprek
-    if (getPendingCallByCallee(to)) return;
-    // Bijhouden dat deze oproep uitstaat (nog niet beantwoord)
-    pendingCalls[effectiveSessionId] = {
+    const created = await createPendingCall({
       sessionId: effectiveSessionId,
       from: uid,
       to,
       offer,
-      callerCandidates: takeEarlyCallerCandidates(effectiveSessionId, uid, to),
       callerName,
       isVideo: !!isVideo,
       callerSocketId: socket.id,
-      recipientSocketIds: targetSocketIds,
       createdAt: Date.now(),
-    };
-    if (targetSocketIds.length > 0) {
-      // Eén gebruiker kan op telefoon, tablet en web ingelogd zijn. Alle
-      // apparaten rinkelen; het eerste antwoord claimt de call hieronder.
-      emitToSocketIds(io, targetSocketIds, 'call:offer', {
-        from: uid, fromUid: uid, offer, isVideo, callerName, sessionId: effectiveSessionId,
-      });
+    });
+    if (!created.created) {
+      if (created.reason === 'busy') socket.emit('call:busy', { to, sessionId: effectiveSessionId });
+      return;
     }
+    // De user-room werkt ook over meerdere Railway instances via de Redis adapter.
+    io.to(to).emit('call:offer', {
+      from: uid, fromUid: uid, offer, isVideo, callerName, sessionId: effectiveSessionId,
+    });
     // Dit moet buiten de socket-voorwaarde blijven: bij een afgesloten app is
     // er juist geen socket meer, terwijl FCM dan de enige manier is om het
     // inkomende gesprek te tonen en de opgeslagen offer te herstellen.
@@ -211,38 +165,24 @@ module.exports = function registerCalls(io, socket, uid) {
     );
   });
 
-  socket.on('call:answer', ({ to, answer, sessionId }) => {
-    const existingSession = sessionId ? activeCallSessions[sessionId] : null;
-    if (existingSession && existingSession.calleeUid === uid && existingSession.calleeSocketId !== socket.id) {
-      socket.emit('call:ended', { sessionId, reason: 'answered_elsewhere' });
+  onCall('call:answer', async ({ to, answer, sessionId }) => {
+    const result = await claimPendingCall(
+      sessionId, uid, to, socket.id, null, answer,
+    );
+    if (!result.claimed) {
+      socket.emit('call:ended', {
+        sessionId: sessionId || null,
+        reason: result.reason === 'answered_elsewhere' ? 'answered_elsewhere' : 'call_expired',
+      });
       return;
     }
-    const pendingCall = getPendingCallForAnswer(sessionId, uid, to);
-    if (pendingCall && pendingCall.to === uid && pendingCall.from === to) {
-      const acceptedSessionId = pendingCall.sessionId;
-      activeCallSessions[acceptedSessionId] = {
-        callerUid: pendingCall.from,
-        callerSocketId: pendingCall.callerSocketId || getSocketId(to),
-        calleeUid: uid,
-        calleeSocketId: socket.id,
-      };
-      deletePendingCallBySession(acceptedSessionId);
-      emitToSocketIds(io, pendingCall.recipientSocketIds || [], 'call:ended', {
-        sessionId: acceptedSessionId,
-        reason: 'answered_elsewhere',
-      }, socket.id);
-    }
-    const targetSocket = resolvePeerSocketId(sessionId, uid, to);
-    if (targetSocket) io.to(targetSocket).emit('call:answer', { answer, fromUid: uid, sessionId: sessionId || null });
-    // Oproep beantwoord → beide users zijn nu in een actief gesprek
-    activeCalls.add(uid);
-    activeCalls.add(to);
-    if (sessionId) deletePendingCallBySession(sessionId);
-    else {
-      deletePendingCallsForUser(uid);
-      deletePendingCallsForUser(to);
-    }
-    const answeredSessionId = sessionId || pendingCall?.sessionId || '';
+    const { pending, active } = result;
+    emitToUserExcept(io, uid, socket.id, 'call:ended', {
+      sessionId: pending.sessionId,
+      reason: 'answered_elsewhere',
+    });
+    io.to(to).emit('call:answer', { answer, fromUid: uid, sessionId: pending.sessionId });
+    const answeredSessionId = active.sessionId;
     sendPush(uid, null, {
       type: 'call_cancelled',
       reason: 'answered',
@@ -251,25 +191,18 @@ module.exports = function registerCalls(io, socket, uid) {
     });
   });
 
-  socket.on('call:ice-candidate', ({ to, candidate, sessionId }) => {
-    const pendingCall = sessionId ? pendingCalls[sessionId] : null;
-    if (pendingCall?.from === uid && pendingCall?.to === to && candidate) {
-      pendingCall.callerCandidates = pendingCall.callerCandidates || [];
-      if (pendingCall.callerCandidates.length < MAX_CANDIDATES_PER_CALL) pendingCall.callerCandidates.push(candidate);
-    } else if (!pendingCall && sessionId) {
-      storeEarlyCallerCandidate(sessionId, uid, to, candidate);
-    }
-    const targetSocket = resolvePeerSocketId(sessionId, uid, to);
-    if (targetSocket) io.to(targetSocket).emit('call:ice-candidate', { candidate, fromUid: uid, sessionId: sessionId || null });
+  onCall('call:ice-candidate', async ({ to, candidate, sessionId }) => {
+    await addCallerCandidate(sessionId, uid, to, candidate);
+    io.to(to).emit('call:ice-candidate', { candidate, fromUid: uid, sessionId: sessionId || null });
   });
 
-  socket.on('call:end', async ({ to, sessionId }) => {
-    const pendingCall = sessionId ? pendingCalls[sessionId] : getPendingCallByCallee(to);
+  onCall('call:end', async ({ to, sessionId }) => {
+    const pendingCall = sessionId ? await getPendingCall(sessionId) : await getPendingCallByCallee(to);
+    const active = sessionId ? await getActiveCall(sessionId) : null;
     if (pendingCall?.from === uid) {
-      emitToSocketIds(io, pendingCall.recipientSocketIds || getSocketIds(to), 'call:ended', { sessionId: pendingCall.sessionId });
+      io.to(to).emit('call:ended', { sessionId: pendingCall.sessionId });
     } else {
-      const targetSocket = resolvePeerSocketId(sessionId, uid, to);
-      if (targetSocket) io.to(targetSocket).emit('call:ended', { sessionId: sessionId || null });
+      io.to(to).emit('call:ended', { sessionId: sessionId || null });
     }
     const endedSessionId = sessionId || pendingCall?.sessionId || '';
     sendPush(to, null, {
@@ -277,58 +210,52 @@ module.exports = function registerCalls(io, socket, uid) {
       callSessionId: endedSessionId,
       sessionId: endedSessionId,
     });
-    // Beide users zijn niet meer in een actief gesprek
-    activeCalls.delete(uid);
-    activeCalls.delete(to);
     // Als oproep nog uitstond (niet beantwoord) → gemiste oproep notificatie
     if (pendingCall) {
       const { callerName, isVideo, sessionId: pendingSessionId } = pendingCall;
-      deletePendingCallBySession(pendingSessionId);
+      await deletePendingCall(pendingSessionId);
       sendPush(to,
         { title: '📞 Gemiste oproep', body: `${callerName} heeft je ${isVideo ? 'geprobeerd te videobellen' : 'gebeld'}.` },
         { type: 'missed_call' }
       );
     }
-    clearCallSession(sessionId);
+    if (active) await clearActiveCall(sessionId);
   });
 
-  socket.on('call:decline', ({ to, sessionId }) => {
-    const targetSocket = resolvePeerSocketId(sessionId, uid, to);
-    if (targetSocket) io.to(targetSocket).emit('call:declined', { sessionId: sessionId || null });
+  onCall('call:decline', async ({ to, sessionId }) => {
+    io.to(to).emit('call:declined', { sessionId: sessionId || null });
     // Bewust geweigerd → geen gemiste oproep
-    activeCalls.delete(uid);
-    activeCalls.delete(to);
-    if (sessionId) deletePendingCallBySession(sessionId);
-    else {
-      deletePendingCallsForUser(uid);
-      deletePendingCallsForUser(to);
-    }
+    if (sessionId) await deletePendingCall(sessionId);
     sendPush(uid, null, {
       type: 'call_cancelled',
       callSessionId: sessionId || '',
       sessionId: sessionId || '',
     });
-    clearCallSession(sessionId);
+    await clearActiveCall(sessionId);
   });
 
-  socket.on('call:busy', ({ to, sessionId }) => {
-    const targetSocket = resolvePeerSocketId(sessionId, uid, to);
-    if (targetSocket) io.to(targetSocket).emit('call:busy', { fromUid: uid, sessionId: sessionId || null });
-    if (sessionId) deletePendingCallBySession(sessionId);
+  onCall('call:busy', async ({ to, sessionId }) => {
+    io.to(to).emit('call:busy', { fromUid: uid, sessionId: sessionId || null });
+    if (sessionId) await deletePendingCall(sessionId);
   });
 
-  socket.on('call:renegotiate', ({ to, signal, sessionId }) => {
-    const targetSocket = resolvePeerSocketId(sessionId, uid, to);
-    if (targetSocket) io.to(targetSocket).emit('call:renegotiate', { signal, sessionId: sessionId || null });
+  onCall('call:renegotiate', async ({ to, signal, sessionId }) => {
+    io.to(to).emit('call:renegotiate', { signal, sessionId: sessionId || null });
+  });
+
+  onCall('call:resume', async ({ to, sessionId, needsAnswer }) => {
+    const active = await resumeActiveCall(sessionId, uid, socket.id);
+    if (!active) return;
+    const peerUid = active.callerUid === uid ? active.calleeUid : active.callerUid;
+    io.to(peerUid).emit('call:peer-resumed', { sessionId, fromUid: uid });
+    if (needsAnswer && uid === active.callerUid && active.answer) {
+      socket.emit('call:answer', { answer: active.answer, fromUid: peerUid, sessionId });
+    }
+    if (to && to !== peerUid) console.warn('call:resume peer mismatch', { sessionId, uid });
   });
 
   socket.on('disconnect', () => {
-    // Bewaar pending incoming offers voor de ontvanger zodat call recovery na
-    // een reload/tab-herstel nog via /calls/pending/:sessionId kan slagen.
-    deletePendingCallsStartedByUser(uid);
-    activeCalls.delete(uid);
-    Object.entries(activeCallSessions).forEach(([sessionId, session]) => {
-      if (session?.callerUid === uid || session?.calleeUid === uid) clearCallSession(sessionId);
-    });
+    // Oproepstatus blijft met TTL in Redis staan. Een korte netwerkdip wordt
+    // hersteld via call:resume; expliciet call:end ruimt de sessie wel op.
   });
 };

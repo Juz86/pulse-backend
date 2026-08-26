@@ -2,12 +2,8 @@ const router = require('express').Router();
 const { db } = require('../firebase');
 const { verifyAuth } = require('../middleware');
 const { admin } = require('../firebase');
-const { pendingCalls } = require('../state');
+const { getPendingCall } = require('../callStore');
 const { readPublicFeatureFlags } = require('../featureFlags');
-
-function findPendingCallBySession(sessionId) {
-  return pendingCalls[sessionId] || null;
-}
 
 function readVersionCode(value) {
   const parsed = Number.parseInt(String(value || ''), 10);
@@ -71,7 +67,7 @@ router.get('/api/feature-flags', (_req, res) => {
 router.get('/calls/pending/:sessionId', verifyAuth, async (req, res) => {
   try {
     const { sessionId } = req.params;
-    const pendingCall = findPendingCallBySession(sessionId);
+    const pendingCall = await getPendingCall(sessionId);
     if (!pendingCall) return res.status(404).json({ error: 'pending_call_not_found' });
 
     const fromUid = req.query.fromUid || pendingCall.from;
