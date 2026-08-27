@@ -2,6 +2,7 @@ const {
   DEFAULT_TTL_SECONDS,
   MAX_TTL_SECONDS,
   getTurnCredentials,
+  getTurnConfigurationStatus,
   normalizeCloudflareIceServer,
   readTtlSeconds,
 } = require('../src/turnCredentials');
@@ -34,6 +35,19 @@ describe('Cloudflare TURN credentials', () => {
   it('begrensd de TTL op 48 uur', () => {
     expect(readTtlSeconds()).toBe(DEFAULT_TTL_SECONDS);
     expect(readTtlSeconds('999999')).toBe(MAX_TTL_SECONDS);
+  });
+
+  it('rapporteert veilige runtime-metadata zonder secrets', () => {
+    expect(getTurnConfigurationStatus({
+      CLOUDFLARE_TURN_KEY_ID: 'key-id',
+      CLOUDFLARE_TURN_KEY_SECRET: 'key-secret',
+      CLOUDFLARE_TURN_TTL_SECONDS: '7200',
+    })).toEqual({
+      turnConfigured: true,
+      turnProvider: 'cloudflare',
+      turnCredentialTtlSeconds: 7200,
+    });
+    expect(JSON.stringify(getTurnConfigurationStatus({}))).not.toContain('secret');
   });
 
   it('haalt tijdelijke credentials server-side bij Cloudflare op', async () => {

@@ -4,7 +4,7 @@ const { verifyAuth } = require('../middleware');
 const { admin } = require('../firebase');
 const { getPendingCall } = require('../callStore');
 const { readPublicFeatureFlags } = require('../featureFlags');
-const { getTurnCredentials } = require('../turnCredentials');
+const { getTurnConfigurationStatus, getTurnCredentials } = require('../turnCredentials');
 
 function readVersionCode(value) {
   const parsed = Number.parseInt(String(value || ''), 10);
@@ -26,6 +26,7 @@ router.get('/runtimez', (_req, res) => {
     nodeEnv: process.env.NODE_ENV || 'development',
     firebaseCredentialMode,
     firestoreEmulatorHost: process.env.FIRESTORE_EMULATOR_HOST || null,
+    ...getTurnConfigurationStatus(),
   });
 });
 

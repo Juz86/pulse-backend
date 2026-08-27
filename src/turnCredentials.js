@@ -46,6 +46,31 @@ function readStaticTurnServer(env) {
   };
 }
 
+function getTurnConfigurationStatus(env = process.env) {
+  const cloudflareConfigured = Boolean(
+    env.CLOUDFLARE_TURN_KEY_ID && env.CLOUDFLARE_TURN_KEY_SECRET,
+  );
+  if (cloudflareConfigured) {
+    return {
+      turnConfigured: true,
+      turnProvider: 'cloudflare',
+      turnCredentialTtlSeconds: readTtlSeconds(env.CLOUDFLARE_TURN_TTL_SECONDS),
+    };
+  }
+  if (readStaticTurnServer(env)) {
+    return {
+      turnConfigured: true,
+      turnProvider: 'static',
+      turnCredentialTtlSeconds: 3600,
+    };
+  }
+  return {
+    turnConfigured: false,
+    turnProvider: 'stun-only',
+    turnCredentialTtlSeconds: 0,
+  };
+}
+
 async function generateCloudflareTurnServer({ env = process.env, fetchImpl = global.fetch } = {}) {
   const keyId = env.CLOUDFLARE_TURN_KEY_ID;
   const keySecret = env.CLOUDFLARE_TURN_KEY_SECRET;
@@ -109,6 +134,7 @@ module.exports = {
   MAX_TTL_SECONDS,
   STUN_SERVERS,
   generateCloudflareTurnServer,
+  getTurnConfigurationStatus,
   getTurnCredentials,
   normalizeCloudflareIceServer,
   readTtlSeconds,

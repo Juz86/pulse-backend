@@ -17,6 +17,7 @@ const { admin, db } = require('./src/firebase');
 const { redisPub, redisSub, checkRateLimit, getRedis } = require('./src/redis');
 const { onlineUsers, activeCalls, inactiveUsers, activeSessions } = require('./src/state');
 const { globalLimiter, securityHeaders, makeRateLimiter, makeSecondLimiter } = require('./src/middleware');
+const { getTurnConfigurationStatus } = require('./src/turnCredentials');
 
 // ─── Cleanup module ───────────────────────────────────────────────────────────
 const { runCleanup, scheduleDaily } = require('./src/cleanup');
@@ -166,6 +167,7 @@ app.get('/health', (_req, res) => {
     callPushProtocol: 'data-only-v2',
     callSessionProtocol: 'redis-v1',
     callSessionStore: getRedis() ? 'redis' : 'memory_fallback',
+    ...getTurnConfigurationStatus(),
     appOrigins: Array.from(appOrigins),
     marketingOrigins: Array.from(marketingOrigins),
   });
