@@ -2,7 +2,8 @@ const { getRedis } = require('./redis');
 const { activeCallSessions, pendingCalls } = require('./state');
 
 const PENDING_TTL_SECONDS = 90;
-const ACTIVE_TTL_SECONDS = 6 * 60 * 60;
+const ACTIVE_TTL_SECONDS = 75;
+const ACTIVE_LEASE_MS = ACTIVE_TTL_SECONDS * 1000;
 const MAX_CANDIDATES = 64;
 
 const earlyCandidates = new Map();
@@ -124,6 +125,7 @@ async function claimPendingCall(sessionId, calleeUid, callerUid, calleeSocketId,
     calleeUid,
     calleeSocketId,
     answer: answer || null,
+    heartbeatAt: Date.now(),
   };
   if (!redis) {
     const existing = activeCallSessions[sessionId];
@@ -171,8 +173,23 @@ async function getActiveCall(sessionId) {
 
 async function isUserInCall(uid) {
   const redis = getRedis();
-  if (!redis) return activeUsers.has(uid);
-  return !!(await redis.get(key.user(uid)));
+  const sessionId = redis ? await redis.get(key.user(uid)) : activeUsers.get(uid);
+  if (!sessionId) return false;
+  const active = await getActiveCall(sessionId);
+  const heartbeatAt = Number(active?.heartbeatAt || 0);
+  if (heartbeatAt > 0 && Date.now() - heartbeatAt <= ACTIVE_LEASE_MS) return true;
+  if (active) {
+    await clearActiveCall(sessionId);
+  } else if (!redis) {
+    activeUsers.delete(uid);
+  } else {
+    const script = `
+      if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
+      return 0
+    `;
+    await redis.eval(script, 1, key.user(uid), sessionId);
+  }
+  return false;
 }
 
 async function resumeActiveCall(sessionId, uid, socketId) {
@@ -181,6 +198,7 @@ async function resumeActiveCall(sessionId, uid, socketId) {
   if (active.callerUid === uid) active.callerSocketId = socketId;
   else if (active.calleeUid === uid) active.calleeSocketId = socketId;
   else return null;
+  active.heartbeatAt = Date.now();
   const redis = getRedis();
   if (!redis) {
     activeCallSessions[sessionId] = active;
@@ -193,6 +211,10 @@ async function resumeActiveCall(sessionId, uid, socketId) {
     redis.expire(key.claim(sessionId), ACTIVE_TTL_SECONDS),
   ]);
   return active;
+}
+
+async function touchActiveCall(sessionId, uid, socketId) {
+  return resumeActiveCall(sessionId, uid, socketId);
 }
 
 async function deletePendingCall(sessionId) {
@@ -249,4 +271,5 @@ module.exports = {
   getPendingCallByCallee,
   isUserInCall,
   resumeActiveCall,
+  touchActiveCall,
 };

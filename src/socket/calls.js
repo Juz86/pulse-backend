@@ -11,6 +11,7 @@ const {
   getPendingCallByCallee,
   isUserInCall,
   resumeActiveCall,
+  touchActiveCall,
 } = require('../callStore');
 const { cleanupCommunicationsForUser, resolveConversationHistoryRules } = require('../cleanup');
 
@@ -254,8 +255,12 @@ module.exports = function registerCalls(io, socket, uid) {
     if (to && to !== peerUid) console.warn('call:resume peer mismatch', { sessionId, uid });
   });
 
+  onCall('call:heartbeat', async ({ sessionId }) => {
+    await touchActiveCall(sessionId, uid, socket.id);
+  });
+
   socket.on('disconnect', () => {
-    // Oproepstatus blijft met TTL in Redis staan. Een korte netwerkdip wordt
-    // hersteld via call:resume; expliciet call:end ruimt de sessie wel op.
+    // De korte heartbeat-lease houdt ruimte voor netwerkherstel. Zonder een
+    // levende gesprekspartner vervalt de bezetstatus automatisch.
   });
 };
