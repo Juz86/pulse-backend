@@ -126,6 +126,8 @@ async function claimPendingCall(sessionId, calleeUid, callerUid, calleeSocketId,
     calleeSocketId,
     answer: answer || null,
     heartbeatAt: Date.now(),
+    callerHeartbeatAt: Date.now(),
+    calleeHeartbeatAt: Date.now(),
   };
   if (!redis) {
     const existing = activeCallSessions[sessionId];
@@ -176,8 +178,16 @@ async function isUserInCall(uid) {
   const sessionId = redis ? await redis.get(key.user(uid)) : activeUsers.get(uid);
   if (!sessionId) return false;
   const active = await getActiveCall(sessionId);
-  const heartbeatAt = Number(active?.heartbeatAt || 0);
-  if (heartbeatAt > 0 && Date.now() - heartbeatAt <= ACTIVE_LEASE_MS) return true;
+  const legacyHeartbeatAt = Number(active?.heartbeatAt || 0);
+  const callerHeartbeatAt = Number(active?.callerHeartbeatAt || legacyHeartbeatAt);
+  const calleeHeartbeatAt = Number(active?.calleeHeartbeatAt || legacyHeartbeatAt);
+  const now = Date.now();
+  if (
+    callerHeartbeatAt > 0
+    && calleeHeartbeatAt > 0
+    && now - callerHeartbeatAt <= ACTIVE_LEASE_MS
+    && now - calleeHeartbeatAt <= ACTIVE_LEASE_MS
+  ) return true;
   if (active) {
     await clearActiveCall(sessionId);
   } else if (!redis) {
@@ -195,10 +205,28 @@ async function isUserInCall(uid) {
 async function resumeActiveCall(sessionId, uid, socketId) {
   const active = await getActiveCall(sessionId);
   if (!active) return null;
-  if (active.callerUid === uid) active.callerSocketId = socketId;
-  else if (active.calleeUid === uid) active.calleeSocketId = socketId;
-  else return null;
-  active.heartbeatAt = Date.now();
+  const now = Date.now();
+  const legacyHeartbeatAt = Number(active.heartbeatAt || 0);
+  const callerHeartbeatAt = Number(active.callerHeartbeatAt || legacyHeartbeatAt);
+  const calleeHeartbeatAt = Number(active.calleeHeartbeatAt || legacyHeartbeatAt);
+  active.callerHeartbeatAt = callerHeartbeatAt;
+  active.calleeHeartbeatAt = calleeHeartbeatAt;
+  if (active.callerUid === uid) {
+    if (calleeHeartbeatAt <= 0 || now - calleeHeartbeatAt > ACTIVE_LEASE_MS) {
+      await clearActiveCall(sessionId);
+      return null;
+    }
+    active.callerSocketId = socketId;
+    active.callerHeartbeatAt = now;
+  } else if (active.calleeUid === uid) {
+    if (callerHeartbeatAt <= 0 || now - callerHeartbeatAt > ACTIVE_LEASE_MS) {
+      await clearActiveCall(sessionId);
+      return null;
+    }
+    active.calleeSocketId = socketId;
+    active.calleeHeartbeatAt = now;
+  } else return null;
+  active.heartbeatAt = now;
   const redis = getRedis();
   if (!redis) {
     activeCallSessions[sessionId] = active;

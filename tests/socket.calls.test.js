@@ -372,4 +372,18 @@ describe('socket call recovery behavior', () => {
       sessionId: 'resume-session',
     }));
   });
+
+  test('heartbeat acknowledges an expired server-side call lease', async () => {
+    const registerCalls = require('../src/socket/calls');
+    const io = makeIo();
+    const callerSocket = makeSocket('caller', 'socket-caller');
+    registerCalls(io, callerSocket, 'caller');
+
+    await callerSocket.trigger('call:heartbeat', { sessionId: 'missing-session' });
+
+    expect(callerSocket.emit).toHaveBeenCalledWith('call:heartbeat:ack', {
+      sessionId: 'missing-session',
+      active: false,
+    });
+  });
 });

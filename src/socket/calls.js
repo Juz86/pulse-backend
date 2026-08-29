@@ -256,7 +256,11 @@ module.exports = function registerCalls(io, socket, uid) {
   });
 
   onCall('call:heartbeat', async ({ sessionId }) => {
-    await touchActiveCall(sessionId, uid, socket.id);
+    const active = await touchActiveCall(sessionId, uid, socket.id);
+    socket.emit('call:heartbeat:ack', {
+      sessionId: sessionId || null,
+      active: Boolean(active),
+    });
   });
 
   socket.on('disconnect', () => {
