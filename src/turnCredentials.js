@@ -129,6 +129,35 @@ async function getTurnCredentials(options = {}) {
   };
 }
 
+function summarizeTurnCredentials(credentials = {}) {
+  const iceServers = Array.isArray(credentials.iceServers) ? credentials.iceServers : [];
+  const urls = iceServers.flatMap((server) => (
+    Array.isArray(server?.urls) ? server.urls : [server?.urls].filter(Boolean)
+  )).filter((url) => typeof url === 'string');
+  const stunUrls = urls.filter((url) => /^stuns?:/i.test(url));
+  const turnUrls = urls.filter((url) => /^turns?:/i.test(url));
+  const turnTransports = [...new Set(turnUrls.map((url) => (
+    String(url).match(/[?&]transport=([^&]+)/i)?.[1] || 'unknown'
+  )))].sort();
+  const turnPorts = [...new Set(turnUrls.map((url) => {
+    const match = String(url).match(/:(\d+)(?:[?/]|$)/);
+    return match ? Number.parseInt(match[1], 10) : null;
+  }).filter(Number.isSafeInteger))].sort((left, right) => left - right);
+  const hasTurn = Boolean(credentials.hasTurn && turnUrls.length);
+  const source = typeof credentials.source === 'string' ? credentials.source : 'unknown';
+
+  return {
+    ok: source === 'cloudflare' && hasTurn,
+    source,
+    hasTurn,
+    expiresIn: Number.isSafeInteger(credentials.expiresIn) ? credentials.expiresIn : 0,
+    stunUrlCount: stunUrls.length,
+    turnUrlCount: turnUrls.length,
+    turnTransports,
+    turnPorts,
+  };
+}
+
 module.exports = {
   DEFAULT_TTL_SECONDS,
   MAX_TTL_SECONDS,
@@ -138,4 +167,5 @@ module.exports = {
   getTurnCredentials,
   normalizeCloudflareIceServer,
   readTtlSeconds,
+  summarizeTurnCredentials,
 };

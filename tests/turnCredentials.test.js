@@ -5,6 +5,7 @@ const {
   getTurnConfigurationStatus,
   normalizeCloudflareIceServer,
   readTtlSeconds,
+  summarizeTurnCredentials,
 } = require('../src/turnCredentials');
 
 describe('Cloudflare TURN credentials', () => {
@@ -108,5 +109,45 @@ describe('Cloudflare TURN credentials', () => {
     expect(result.source).toBe('static');
     expect(result.hasTurn).toBe(true);
     expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it('maakt een veilige diagnose zonder tijdelijke TURN-secrets of adressen', () => {
+    const summary = summarizeTurnCredentials({
+      source: 'cloudflare',
+      hasTurn: true,
+      expiresIn: 7200,
+      iceServers: [
+        { urls: 'stun:stun.cloudflare.com:3478' },
+        {
+          urls: [
+            'turn:turn.cloudflare.com:3478?transport=udp',
+            'turns:turn.cloudflare.com:443?transport=tcp',
+          ],
+          username: 'temporary-user',
+          credential: 'temporary-secret',
+        },
+      ],
+    });
+
+    expect(summary).toEqual({
+      ok: true,
+      source: 'cloudflare',
+      hasTurn: true,
+      expiresIn: 7200,
+      stunUrlCount: 1,
+      turnUrlCount: 2,
+      turnTransports: ['tcp', 'udp'],
+      turnPorts: [443, 3478],
+    });
+    expect(JSON.stringify(summary)).not.toContain('temporary-user');
+    expect(JSON.stringify(summary)).not.toContain('temporary-secret');
+  });
+
+  it('markeert STUN-fallback niet als succesvolle Cloudflare-probe', () => {
+    expect(summarizeTurnCredentials({
+      source: 'stun-only',
+      hasTurn: false,
+      iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
+    }).ok).toBe(false);
   });
 });

@@ -4,7 +4,11 @@ const { verifyAuth } = require('../middleware');
 const { admin } = require('../firebase');
 const { getPendingCall } = require('../callStore');
 const { readPublicFeatureFlags } = require('../featureFlags');
-const { getTurnConfigurationStatus, getTurnCredentials } = require('../turnCredentials');
+const {
+  getTurnConfigurationStatus,
+  getTurnCredentials,
+  summarizeTurnCredentials,
+} = require('../turnCredentials');
 
 function readVersionCode(value) {
   const parsed = Number.parseInt(String(value || ''), 10);
@@ -128,6 +132,21 @@ router.get('/api/turn-credentials', verifyAuth, async (_req, res) => {
   const credentials = await getTurnCredentials({ logger: console });
   res.setHeader('Cache-Control', 'private, max-age=300');
   res.json(credentials);
+});
+
+// Genereert echt tijdelijke TURN-credentials, maar retourneert uitsluitend
+// niet-gevoelige metadata voor runtime-diagnose en monitoring.
+router.get('/api/turn-diagnostics', verifyAuth, async (_req, res) => {
+  const startedAt = Date.now();
+  const credentials = await getTurnCredentials({ logger: console });
+  const summary = summarizeTurnCredentials(credentials);
+  res.setHeader('Cache-Control', 'no-store');
+  return res.status(summary.ok ? 200 : 503).json({
+    ...summary,
+    configured: getTurnConfigurationStatus(),
+    checkedAt: new Date().toISOString(),
+    durationMs: Date.now() - startedAt,
+  });
 });
 
 module.exports = router;
