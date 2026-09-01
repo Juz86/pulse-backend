@@ -38,6 +38,10 @@ const registerMessages      = require('./src/socket/messages');
 const registerCalls         = require('./src/socket/calls');
 const registerConversations = require('./src/socket/conversations');
 const { getSyncRequiredPayload } = require('./src/socket/sync');
+const {
+  CALL_OFFER_MAX_PER_HOUR,
+  buildSocketRateLimitResponse,
+} = require('./src/socket/rateLimitResponse');
 
 // ─── App URL ──────────────────────────────────────────────────────────────────
 const APP_URL = process.env.APP_URL || '';
@@ -220,13 +224,13 @@ io.on('connection', (socket) => {
     'message:react':          makeRateLimiter(60),
     'message:edit':           makeRateLimiter(20),
     'typing:start':           makeRateLimiter(60),
-    'call:offer':             makeRateLimiter(15, 60 * 60 * 1000), // 15 per uur
+    'call:offer':             makeRateLimiter(CALL_OFFER_MAX_PER_HOUR, 60 * 60 * 1000),
     'conversation:create':    makeRateLimiter(10, 60 * 60 * 1000), // 10 per uur
     'conversation:addMember': makeRateLimiter(20),
   };
   // Redis-limieten voor cross-instance bescherming (tweede verdedigingslinie)
   const redisLimits = {
-    'call:offer':          { max: 15, windowMs: 60 * 60 * 1000 },
+    'call:offer':          { max: CALL_OFFER_MAX_PER_HOUR, windowMs: 60 * 60 * 1000 },
     'conversation:create': { max: 10, windowMs: 60 * 60 * 1000 },
     'message:send':        { max: 600, windowMs: 60 * 1000 },
   };
@@ -238,6 +242,8 @@ io.on('connection', (socket) => {
     if (check && !check()) {
       console.warn(`[Pulse] Rate limit (lokaal): ${uid} → ${event}`);
       if (cb) cb({ error: 'Te veel verzoeken. Wacht even.' });
+      const response = buildSocketRateLimitResponse(event, args);
+      if (response) socket.emit(response.event, response.payload);
       return;
     }
     // Redis cross-instance check
@@ -245,6 +251,8 @@ io.on('connection', (socket) => {
     if (rDef && !(await checkRateLimit(uid, event, rDef.max, rDef.windowMs))) {
       console.warn(`[Pulse] Rate limit (Redis): ${uid} → ${event}`);
       if (cb) cb({ error: 'Te veel verzoeken. Wacht even.' });
+      const response = buildSocketRateLimitResponse(event, args);
+      if (response) socket.emit(response.event, response.payload);
       return;
     }
     next();
