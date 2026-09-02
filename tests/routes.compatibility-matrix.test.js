@@ -241,6 +241,7 @@ jest.mock('../src/middleware', () => ({
     next();
   },
   strictLimiter: (_req, _res, next) => next(),
+  callBootstrapLimiter: (_req, _res, next) => next(),
   lookupUsernameLimiter: (_req, _res, next) => next(),
   friendReqLimiter: (_req, _res, next) => next(),
 }));

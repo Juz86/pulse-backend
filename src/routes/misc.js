@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const { db } = require('../firebase');
-const { verifyAuth } = require('../middleware');
+const { callBootstrapLimiter, verifyAuth } = require('../middleware');
 const { admin } = require('../firebase');
 const { getPendingCall } = require('../callStore');
 const { readPublicFeatureFlags } = require('../featureFlags');
@@ -70,7 +70,7 @@ router.get('/api/feature-flags', (_req, res) => {
   });
 });
 
-router.get('/calls/pending/:sessionId', verifyAuth, async (req, res) => {
+router.get('/calls/pending/:sessionId', verifyAuth, callBootstrapLimiter, async (req, res) => {
   try {
     const { sessionId } = req.params;
     const pendingCall = await getPendingCall(sessionId);
@@ -100,7 +100,7 @@ router.get('/calls/pending/:sessionId', verifyAuth, async (req, res) => {
   }
 });
 
-router.post('/api/native-call-auth', verifyAuth, async (req, res) => {
+router.post('/api/native-call-auth', verifyAuth, callBootstrapLimiter, async (req, res) => {
   try {
     const customToken = await admin.auth().createCustomToken(req.uid, { pulseNativeCall: true });
     res.setHeader('Cache-Control', 'no-store');
@@ -128,7 +128,7 @@ router.post('/api/fcm-token', verifyAuth, async (req, res) => {
 });
 
 // ── TURN credentials — ICE server config nooit in de frontend bundle ─────────
-router.get('/api/turn-credentials', verifyAuth, async (_req, res) => {
+router.get('/api/turn-credentials', verifyAuth, callBootstrapLimiter, async (_req, res) => {
   const credentials = await getTurnCredentials({ logger: console });
   res.setHeader('Cache-Control', 'private, max-age=300');
   res.json(credentials);
