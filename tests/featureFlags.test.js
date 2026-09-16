@@ -10,13 +10,13 @@ describe('feature flags', () => {
 
   test('message editing is disabled unless explicitly enabled', () => {
     delete process.env.PULSE_FEATURE_FLAGS_JSON;
-    expect(readPublicFeatureFlags()).toEqual({ message_editing: false });
+    expect(readPublicFeatureFlags()).toEqual({ message_editing: false, realtimekit_calls_v2: false });
     expect(isFeatureEnabled('message_editing')).toBe(false);
   });
 
   test('accepts valid boolean flags from Railway configuration', () => {
     process.env.PULSE_FEATURE_FLAGS_JSON = '{"message_editing":true,"invalid":"yes"}';
-    expect(readPublicFeatureFlags()).toEqual({ message_editing: true });
+    expect(readPublicFeatureFlags()).toEqual({ message_editing: true, realtimekit_calls_v2: false });
     expect(isFeatureEnabled('message_editing')).toBe(true);
   });
 });

@@ -384,6 +384,7 @@ describe('compatibility routes', () => {
       ok: true,
       flags: {
         message_editing: false,
+        realtimekit_calls_v2: false,
         group_member_actions_v2: true,
         future_call_ui: false,
       },

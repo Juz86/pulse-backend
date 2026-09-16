@@ -18,6 +18,7 @@ const { redisPub, redisSub, checkRateLimit, getRedis } = require('./src/redis');
 const { onlineUsers, activeCalls, inactiveUsers, activeSessions } = require('./src/state');
 const { globalLimiter, securityHeaders, makeRateLimiter, makeSecondLimiter } = require('./src/middleware');
 const { getTurnConfigurationStatus } = require('./src/turnCredentials');
+const { getRealtimeKitConfigurationStatus } = require('./src/realtimeKit');
 
 // ─── Cleanup module ───────────────────────────────────────────────────────────
 const { runCleanup, scheduleDaily } = require('./src/cleanup');
@@ -26,6 +27,7 @@ const { runCleanup, scheduleDaily } = require('./src/cleanup');
 const authRouter    = require('./src/routes/auth');
 const nativeAuthRouter = require('./src/routes/auth.native');
 const miscRouter    = require('./src/routes/misc');
+const realtimeKitCallsRouter = require('./src/routes/calls.realtimekit');
 const usersRouter   = require('./src/routes/users');
 const parentRouter  = require('./src/routes/parent');
 const friendsRouter = require('./src/routes/friends');
@@ -172,6 +174,7 @@ app.get('/health', (_req, res) => {
     callSessionProtocol: 'redis-v1',
     callSessionStore: getRedis() ? 'redis' : 'memory_fallback',
     ...getTurnConfigurationStatus(),
+    ...getRealtimeKitConfigurationStatus(),
     appOrigins: Array.from(appOrigins),
     marketingOrigins: Array.from(marketingOrigins),
   });
@@ -180,6 +183,7 @@ app.get('/health', (_req, res) => {
 app.use(authRouter);
 app.use(nativeAuthRouter(io));
 app.use(miscRouter);
+app.use(realtimeKitCallsRouter);
 app.use(usersRouter(io, onlineUsers));
 app.use(parentRouter(io, onlineUsers));
 app.use(friendsRouter(io, onlineUsers));

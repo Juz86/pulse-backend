@@ -1,5 +1,6 @@
 const FEATURE_FLAG_DEFAULTS = Object.freeze({
   message_editing: false,
+  realtimekit_calls_v2: false,
 });
 
 function readPublicFeatureFlags(value = process.env.PULSE_FEATURE_FLAGS_JSON) {
