@@ -92,6 +92,7 @@ router.get('/calls/pending/:sessionId', verifyAuth, callBootstrapLimiter, async 
         callerCandidates: Array.isArray(pendingCall.callerCandidates) ? pendingCall.callerCandidates : [],
         callerName: pendingCall.callerName || 'Iemand',
         isVideo: !!pendingCall.isVideo,
+        callEngine: pendingCall.offer?.engine === 'realtimekit-v2' ? 'realtimekit-v2' : 'webrtc-v1',
         createdAt: pendingCall.createdAt || Date.now(),
       },
     });

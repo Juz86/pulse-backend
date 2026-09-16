@@ -41,8 +41,11 @@ function emitCallLogOutsideConversation(io, convId, members, senderId, payload, 
 
 module.exports = function registerCalls(io, socket, uid) {
   const onCall = (event, handler) => {
-    socket.on(event, (payload = {}) => Promise.resolve(handler(payload || {})).catch((error) => {
+    socket.on(event, (payload = {}, acknowledgement) => Promise.resolve(handler(payload || {}, acknowledgement)).catch((error) => {
       console.error(`${event} fout:`, error);
+      if (typeof acknowledgement === 'function') {
+        acknowledgement({ ok: false, error: 'signaling_unavailable' });
+      }
       socket.emit('call:unavailable', {
         sessionId: payload?.sessionId || null,
         reason: 'signaling_unavailable',
@@ -106,7 +109,10 @@ module.exports = function registerCalls(io, socket, uid) {
   });
 
   // ── WebRTC Signaling: Bellen ──
-  onCall('call:offer', async ({ to, offer, isVideo, callerName, sessionId }) => {
+  onCall('call:offer', async ({ to, offer, isVideo, callerName, sessionId }, acknowledgement) => {
+    const acknowledge = (payload) => {
+      if (typeof acknowledgement === 'function') acknowledgement(payload);
+    };
     // Blokkeer check
     const [callerDoc, targetCallDoc] = await Promise.all([
       db.collection('users').doc(uid).get(),
@@ -115,6 +121,7 @@ module.exports = function registerCalls(io, socket, uid) {
     const targetBlocked = targetCallDoc.data()?.blockedUsers || [];
     const callerBlocked = callerDoc.data()?.blockedUsers || [];
     if (targetBlocked.includes(uid) || callerBlocked.includes(to)) {
+      acknowledge({ ok: false, error: 'blocked', sessionId: sessionId || null });
       socket.emit('call:unavailable', { to, sessionId: sessionId || null });
       return;
     }
@@ -125,6 +132,7 @@ module.exports = function registerCalls(io, socket, uid) {
     // De offer moet daarom altijd bewaard blijven tot de ontvanger hem kan
     // herstellen vanuit de inkomende oproepmelding.
     if (await isUserInCall(to)) {
+      acknowledge({ ok: false, error: 'busy', sessionId: effectiveSessionId });
       socket.emit('call:busy', { to, sessionId: effectiveSessionId });
       return;
     }
@@ -140,12 +148,18 @@ module.exports = function registerCalls(io, socket, uid) {
       createdAt: Date.now(),
     });
     if (!created.created) {
+      acknowledge({
+        ok: false,
+        error: created.reason || 'already_ringing',
+        sessionId: created.existingSessionId || effectiveSessionId,
+      });
       if (created.reason === 'busy') socket.emit('call:busy', { to, sessionId: effectiveSessionId });
       return;
     }
+    const callEngine = offer?.engine === 'realtimekit-v2' ? 'realtimekit-v2' : 'webrtc-v1';
     // De user-room werkt ook over meerdere Railway instances via de Redis adapter.
     io.to(to).emit('call:offer', {
-      from: uid, fromUid: uid, offer, isVideo, callerName, sessionId: effectiveSessionId,
+      from: uid, fromUid: uid, offer, isVideo, callerName, sessionId: effectiveSessionId, callEngine,
     });
     // Dit moet buiten de socket-voorwaarde blijven: bij een afgesloten app is
     // er juist geen socket meer, terwijl FCM dan de enige manier is om het
@@ -162,15 +176,21 @@ module.exports = function registerCalls(io, socket, uid) {
         fromUid: uid,
         callerName: callerName || 'Iemand',
         isVideo: !!isVideo,
+        callEngine,
       }
     );
+    acknowledge({ ok: true, sessionId: effectiveSessionId, callEngine });
   });
 
-  onCall('call:answer', async ({ to, answer, sessionId }) => {
+  onCall('call:answer', async ({ to, answer, sessionId }, acknowledgement) => {
+    const acknowledge = (payload) => {
+      if (typeof acknowledgement === 'function') acknowledgement(payload);
+    };
     const result = await claimPendingCall(
       sessionId, uid, to, socket.id, null, answer,
     );
     if (!result.claimed) {
+      acknowledge({ ok: false, error: result.reason || 'call_expired', sessionId: sessionId || null });
       socket.emit('call:ended', {
         sessionId: sessionId || null,
         reason: result.reason === 'answered_elsewhere' ? 'answered_elsewhere' : 'call_expired',
@@ -190,6 +210,7 @@ module.exports = function registerCalls(io, socket, uid) {
       callSessionId: answeredSessionId,
       sessionId: answeredSessionId,
     });
+    acknowledge({ ok: true, sessionId: answeredSessionId });
   });
 
   onCall('call:ice-candidate', async ({ to, candidate, sessionId }) => {

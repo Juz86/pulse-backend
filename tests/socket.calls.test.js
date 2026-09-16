@@ -16,10 +16,10 @@ function makeSocket(uid, id = `socket-${uid}-${++socketCounter}`) {
       handlers.set(event, handler);
     },
     emit: jest.fn(),
-    trigger(event, payload) {
+    trigger(event, payload, acknowledgement) {
       const handler = handlers.get(event);
       if (!handler) throw new Error(`Missing handler for ${event}`);
-      return handler(payload);
+      return handler(payload, acknowledgement);
     },
   };
 }
@@ -269,6 +269,47 @@ describe('socket call recovery behavior', () => {
         fromUid: 'caller',
         isVideo: true,
       })
+    );
+  });
+
+  test('acknowledges RealtimeKit invitations and answers deterministically', async () => {
+    const registerCalls = require('../src/socket/calls');
+    const io = makeIo();
+    const callerSocket = makeSocket('caller', 'socket-caller');
+    const calleeSocket = makeSocket('callee', 'socket-callee');
+    const offerAck = jest.fn();
+    const answerAck = jest.fn();
+    registerCalls(io, callerSocket, 'caller');
+    registerCalls(io, calleeSocket, 'callee');
+
+    await callerSocket.trigger('call:offer', {
+      to: 'callee',
+      offer: { engine: 'realtimekit-v2' },
+      isVideo: true,
+      callerName: 'Caller',
+      sessionId: 'realtimekit-session',
+    }, offerAck);
+    await calleeSocket.trigger('call:answer', {
+      to: 'caller',
+      answer: { engine: 'realtimekit-v2' },
+      sessionId: 'realtimekit-session',
+    }, answerAck);
+
+    expect(offerAck).toHaveBeenCalledWith({
+      ok: true,
+      sessionId: 'realtimekit-session',
+      callEngine: 'realtimekit-v2',
+    });
+    expect(answerAck).toHaveBeenCalledWith({ ok: true, sessionId: 'realtimekit-session' });
+    expect(io.emitted).toContainEqual(expect.objectContaining({
+      target: 'callee',
+      event: 'call:offer',
+      payload: expect.objectContaining({ callEngine: 'realtimekit-v2' }),
+    }));
+    expect(mockSendPush).toHaveBeenCalledWith(
+      'callee',
+      expect.any(Object),
+      expect.objectContaining({ callEngine: 'realtimekit-v2' }),
     );
   });
 
