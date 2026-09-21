@@ -210,7 +210,6 @@ jest.mock('../src/email', () => ({
 }));
 
 jest.mock('../src/state', () => ({
-  activeCalls: new Map(),
 }));
 
 function buildApp(onlineUsers = {}) {

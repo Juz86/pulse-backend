@@ -329,7 +329,7 @@ router.get('/native/parent/children', async (req, res) => {
       photoURL: null,
       online: false,
       lastSeen: null,
-      pausedFeatures: { chat: false, call: false, video: false },
+      pausedFeatures: { chat: false },
     }));
 
     return res.json(children);
@@ -405,7 +405,7 @@ router.post('/native/parent/create-child', async (req, res) => {
       photoURL: null,
       online: false,
       lastSeen: null,
-      pausedFeatures: { chat: false, call: false, video: false },
+      pausedFeatures: { chat: false },
     };
 
     return res.status(201).json({

@@ -1,6 +1,5 @@
 const rateLimit = require('express-rate-limit');
 const { admin } = require('./firebase');
-const { isCallBootstrapRequest } = require('./callBootstrapRateLimit');
 
 const sendCodeLimiter       = rateLimit({ windowMs: 15 * 60 * 1000, max: 5,   message: { error: 'Te veel verzoeken, probeer later opnieuw.' } });
 const verifyCodeLimiter     = rateLimit({ windowMs: 15 * 60 * 1000, max: 10,  message: { error: 'Te veel pogingen. Wacht 15 minuten.' } });
@@ -9,14 +8,7 @@ const friendReqLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 20,  message
 const globalLimiter    = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 200,
-  skip: isCallBootstrapRequest,
   message: { error: 'Te veel verzoeken.' },
-});
-const callBootstrapLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 120,
-  keyGenerator: req => req.uid,
-  message: { error: 'Te veel oproepverzoeken. Probeer het later opnieuw.' },
 });
 const strictLimiter    = rateLimit({ windowMs: 60 * 60 * 1000, max: 5,   message: { error: 'Te veel verzoeken.' } });
 
@@ -72,7 +64,6 @@ module.exports = {
   lookupUsernameLimiter,
   friendReqLimiter,
   globalLimiter,
-  callBootstrapLimiter,
   strictLimiter,
   securityHeaders,
   verifyAuth,

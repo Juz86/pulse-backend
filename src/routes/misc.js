@@ -1,14 +1,8 @@
 const router = require('express').Router();
 const { db } = require('../firebase');
-const { callBootstrapLimiter, verifyAuth } = require('../middleware');
+const { verifyAuth } = require('../middleware');
 const { admin } = require('../firebase');
-const { getPendingCall } = require('../callStore');
 const { readPublicFeatureFlags } = require('../featureFlags');
-const {
-  getTurnConfigurationStatus,
-  getTurnCredentials,
-  summarizeTurnCredentials,
-} = require('../turnCredentials');
 
 function readVersionCode(value) {
   const parsed = Number.parseInt(String(value || ''), 10);
@@ -30,7 +24,6 @@ router.get('/runtimez', (_req, res) => {
     nodeEnv: process.env.NODE_ENV || 'development',
     firebaseCredentialMode,
     firestoreEmulatorHost: process.env.FIRESTORE_EMULATOR_HOST || null,
-    ...getTurnConfigurationStatus(),
   });
 });
 
@@ -70,48 +63,6 @@ router.get('/api/feature-flags', (_req, res) => {
   });
 });
 
-router.get('/calls/pending/:sessionId', verifyAuth, callBootstrapLimiter, async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const pendingCall = await getPendingCall(sessionId);
-    if (!pendingCall) return res.status(404).json({ error: 'pending_call_not_found' });
-
-    const fromUid = req.query.fromUid || pendingCall.from;
-    if (req.uid !== pendingCall.to && req.uid !== fromUid) {
-      return res.status(403).json({ error: 'Geen toegang.' });
-    }
-
-    res.json({
-      ok: true,
-      call: {
-        sessionId: pendingCall.sessionId,
-        from: pendingCall.from,
-        fromUid: pendingCall.from,
-        to: pendingCall.to,
-        offer: pendingCall.offer,
-        callerCandidates: Array.isArray(pendingCall.callerCandidates) ? pendingCall.callerCandidates : [],
-        callerName: pendingCall.callerName || 'Iemand',
-        isVideo: !!pendingCall.isVideo,
-        callEngine: pendingCall.offer?.engine === 'realtimekit-v2' ? 'realtimekit-v2' : 'webrtc-v1',
-        createdAt: pendingCall.createdAt || Date.now(),
-      },
-    });
-  } catch (err) {
-    res.status(500).json({ error: 'Serverfout' });
-  }
-});
-
-router.post('/api/native-call-auth', verifyAuth, callBootstrapLimiter, async (req, res) => {
-  try {
-    const customToken = await admin.auth().createCustomToken(req.uid, { pulseNativeCall: true });
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ok: true, customToken });
-  } catch (err) {
-    console.error('Native call auth fout:', err);
-    return res.status(500).json({ error: 'native_call_auth_failed' });
-  }
-});
-
 // ─── FCM token opslaan ───────────────────────────────────────────────────────
 router.post('/api/fcm-token', verifyAuth, async (req, res) => {
   try {
@@ -126,28 +77,6 @@ router.post('/api/fcm-token', verifyAuth, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Serverfout' });
   }
-});
-
-// ── TURN credentials — ICE server config nooit in de frontend bundle ─────────
-router.get('/api/turn-credentials', verifyAuth, callBootstrapLimiter, async (_req, res) => {
-  const credentials = await getTurnCredentials({ logger: console });
-  res.setHeader('Cache-Control', 'private, max-age=300');
-  res.json(credentials);
-});
-
-// Genereert echt tijdelijke TURN-credentials, maar retourneert uitsluitend
-// niet-gevoelige metadata voor runtime-diagnose en monitoring.
-router.get('/api/turn-diagnostics', verifyAuth, async (_req, res) => {
-  const startedAt = Date.now();
-  const credentials = await getTurnCredentials({ logger: console });
-  const summary = summarizeTurnCredentials(credentials);
-  res.setHeader('Cache-Control', 'no-store');
-  return res.status(summary.ok ? 200 : 503).json({
-    ...summary,
-    configured: getTurnConfigurationStatus(),
-    checkedAt: new Date().toISOString(),
-    durationMs: Date.now() - startedAt,
-  });
 });
 
 module.exports = router;

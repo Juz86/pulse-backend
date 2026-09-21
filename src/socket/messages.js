@@ -2,7 +2,7 @@ const { admin, db } = require('../firebase');
 const { queueMessage } = require('../redis');
 const { sendPush } = require('../push');
 const { schemas, validate } = require('../validate');
-const { getMessageHistoryType, resolveConversationHistoryRules } = require('../cleanup');
+const { resolveConversationHistoryRules } = require('../cleanup');
 const { isFeatureEnabled } = require('../featureFlags');
 
 const MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000;
@@ -50,7 +50,7 @@ module.exports = function registerMessages(io, socket, uid) {
         db.collection('conversations').doc(convId).get(),
       ]);
       const senderData = senderDoc.data() || {};
-      const senderPf = senderData.pausedFeatures || (senderData.paused ? { chat: true, call: true, video: true } : null);
+      const senderPf = senderData.pausedFeatures || (senderData.paused ? { chat: true } : null);
       if (senderDoc.exists && senderPf?.chat) {
         if (typeof callback === 'function') callback({ error: 'Chatten is gepauzeerd door je ouder.' });
         return;
@@ -89,12 +89,10 @@ module.exports = function registerMessages(io, socket, uid) {
       const allReceiversOnline = receiverUids.every(memberUid => onlineUsers[memberUid]?.size);
       const isEphemeralDirectChat =
         !convDataCheck.isGroup &&
-        getMessageHistoryType(verifiedMessage) === 'chat' &&
         Number(historyRules?.chatRetentionDays ?? 30) === 0 &&
         allReceiversOnline;
       const lastMessage = verifiedMessage.type === 'contact'
         ? `Contactpersoon: ${verifiedMessage.sharedContact?.name || ''}`
-        : verifiedMessage.type === 'call' ? (verifiedMessage.isVideo ? 'Video-oproep' : 'Spraakoproep')
         : verifiedMessage.text;
 
       if (isEphemeralDirectChat) {

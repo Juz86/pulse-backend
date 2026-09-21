@@ -248,7 +248,6 @@ jest.mock('../src/middleware', () => ({
 
 jest.mock('../src/state', () => ({
   getSocketId: () => null,
-  pendingCalls: {},
 }));
 
 jest.mock('../src/push', () => ({
@@ -299,32 +298,10 @@ describe('compatibility routes', () => {
           members: ['user-1', 'user-2'],
           lastMessage: 'Hallo',
           lastMessageType: 'text',
-          lastCallDirection: 'outgoing',
-          lastCallIsVideo: true,
-          lastCallSenderId: 'user-1',
           deletedFor: ['user-1'],
         },
       },
-      messages: {
-        'conv-1': [
-          {
-            id: 'msg-call-1',
-            type: 'call',
-            isVideo: true,
-            direction: 'completed',
-            senderId: 'user-1',
-            createdAt: '2026-06-21T12:00:00.000Z',
-          },
-          {
-            id: 'msg-call-2',
-            type: 'call',
-            isVideo: false,
-            direction: 'no-answer',
-            senderId: 'user-2',
-            createdAt: '2026-06-21T12:05:00.000Z',
-          },
-        ],
-      },
+      messages: {},
     };
   });
 
@@ -384,7 +361,6 @@ describe('compatibility routes', () => {
       ok: true,
       flags: {
         message_editing: false,
-        realtimekit_calls_v2: false,
         group_member_actions_v2: true,
         future_call_ui: false,
       },
@@ -435,78 +411,9 @@ describe('compatibility routes', () => {
       lastMessage: '',
       lastMessageAt: null,
       lastMessageType: null,
-      lastCallDirection: null,
-      lastCallIsVideo: false,
-      lastCallSenderId: null,
       deletedFor: [],
     }));
     expect(mockState.conversations['conv-1'].clearedAt['user-1']).toBe('ts');
   });
 
-  test('GET /calls/pending/:sessionId returns pending call offer for authorized user', async () => {
-    const { pendingCalls } = require('../src/state');
-    pendingCalls['call_123'] = {
-      sessionId: 'call_123',
-      from: 'user-1',
-      to: 'user-2',
-      offer: { type: 'offer', sdp: 'test-sdp' },
-      callerName: 'User One',
-      isVideo: true,
-      createdAt: 12345,
-      callerCandidates: [{ candidate: 'candidate:1', sdpMid: '0', sdpMLineIndex: 0 }],
-    };
-
-    const app = buildApp();
-    const response = await request(app)
-      .get('/calls/pending/call_123?fromUid=user-1')
-      .set('x-test-uid', 'user-2');
-
-    expect(response.status).toBe(200);
-    expect(response.body).toEqual(expect.objectContaining({
-      ok: true,
-      call: expect.objectContaining({
-        sessionId: 'call_123',
-        from: 'user-1',
-        to: 'user-2',
-        callerName: 'User One',
-        isVideo: true,
-        offer: expect.objectContaining({ type: 'offer' }),
-        callerCandidates: [expect.objectContaining({ candidate: 'candidate:1' })],
-      }),
-    }));
-
-    delete pendingCalls['call_123'];
-  });
-
-  test('POST /api/native-call-auth mints a Firebase custom token for the current user', async () => {
-    const app = buildApp();
-    const response = await request(app)
-      .post('/api/native-call-auth')
-      .set('x-test-uid', 'user-2');
-
-    expect(response.status).toBe(200);
-    expect(response.body).toEqual({ ok: true, customToken: 'native-token-user-2' });
-    expect(response.headers['cache-control']).toBe('no-store');
-  });
-
-  test('GET /api/messages/recent-calls returns normalized recent call entries', async () => {
-    const app = buildApp();
-    const response = await request(app)
-      .get('/api/messages/recent-calls?limit=10')
-      .set('x-test-uid', 'user-1');
-
-    expect(response.status).toBe(200);
-    expect(Array.isArray(response.body)).toBe(true);
-  });
-
-  test('DELETE /api/messages/recent-calls stores clear timestamp on user profile', async () => {
-    const app = buildApp();
-    const response = await request(app)
-      .delete('/api/messages/recent-calls')
-      .set('x-test-uid', 'user-1');
-
-    expect(response.status).toBe(200);
-    expect(response.body.success).toBe(true);
-    expect(mockState.users['user-1'].callLogClearedAt).toBe('ts');
-  });
 });

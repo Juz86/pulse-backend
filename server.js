@@ -14,11 +14,9 @@ const jwt = require('jsonwebtoken');
 
 // ─── Core modules ─────────────────────────────────────────────────────────────
 const { admin, db } = require('./src/firebase');
-const { redisPub, redisSub, checkRateLimit, getRedis } = require('./src/redis');
-const { onlineUsers, activeCalls, inactiveUsers, activeSessions } = require('./src/state');
+const { redisPub, redisSub, checkRateLimit } = require('./src/redis');
+const { onlineUsers, inactiveUsers, activeSessions } = require('./src/state');
 const { globalLimiter, securityHeaders, makeRateLimiter, makeSecondLimiter } = require('./src/middleware');
-const { getTurnConfigurationStatus } = require('./src/turnCredentials');
-const { getRealtimeKitConfigurationStatus } = require('./src/realtimeKit');
 
 // ─── Cleanup module ───────────────────────────────────────────────────────────
 const { runCleanup, scheduleDaily } = require('./src/cleanup');
@@ -27,7 +25,6 @@ const { runCleanup, scheduleDaily } = require('./src/cleanup');
 const authRouter    = require('./src/routes/auth');
 const nativeAuthRouter = require('./src/routes/auth.native');
 const miscRouter    = require('./src/routes/misc');
-const realtimeKitCallsRouter = require('./src/routes/calls.realtimekit');
 const usersRouter   = require('./src/routes/users');
 const parentRouter  = require('./src/routes/parent');
 const friendsRouter = require('./src/routes/friends');
@@ -37,13 +34,8 @@ const e2eeRouter    = require('./src/routes/e2ee');
 // ─── Socket handler modules ───────────────────────────────────────────────────
 const registerPresence      = require('./src/socket/presence');
 const registerMessages      = require('./src/socket/messages');
-const registerCalls         = require('./src/socket/calls');
 const registerConversations = require('./src/socket/conversations');
 const { getSyncRequiredPayload } = require('./src/socket/sync');
-const {
-  CALL_OFFER_MAX_PER_HOUR,
-  buildSocketRateLimitResponse,
-} = require('./src/socket/rateLimitResponse');
 
 // ─── App URL ──────────────────────────────────────────────────────────────────
 const APP_URL = process.env.APP_URL || '';
@@ -170,11 +162,6 @@ app.get('/health', (_req, res) => {
   res.json({
     ok: true,
     service: 'pulse-backend',
-    callPushProtocol: 'data-only-v2',
-    callSessionProtocol: 'redis-v1',
-    callSessionStore: getRedis() ? 'redis' : 'memory_fallback',
-    ...getTurnConfigurationStatus(),
-    ...getRealtimeKitConfigurationStatus(),
     appOrigins: Array.from(appOrigins),
     marketingOrigins: Array.from(marketingOrigins),
   });
@@ -183,7 +170,6 @@ app.get('/health', (_req, res) => {
 app.use(authRouter);
 app.use(nativeAuthRouter(io));
 app.use(miscRouter);
-app.use(realtimeKitCallsRouter);
 app.use(usersRouter(io, onlineUsers));
 app.use(parentRouter(io, onlineUsers));
 app.use(friendsRouter(io, onlineUsers));
@@ -228,13 +214,11 @@ io.on('connection', (socket) => {
     'message:react':          makeRateLimiter(60),
     'message:edit':           makeRateLimiter(20),
     'typing:start':           makeRateLimiter(60),
-    'call:offer':             makeRateLimiter(CALL_OFFER_MAX_PER_HOUR, 60 * 60 * 1000),
     'conversation:create':    makeRateLimiter(10, 60 * 60 * 1000), // 10 per uur
     'conversation:addMember': makeRateLimiter(20),
   };
   // Redis-limieten voor cross-instance bescherming (tweede verdedigingslinie)
   const redisLimits = {
-    'call:offer':          { max: CALL_OFFER_MAX_PER_HOUR, windowMs: 60 * 60 * 1000 },
     'conversation:create': { max: 10, windowMs: 60 * 60 * 1000 },
     'message:send':        { max: 600, windowMs: 60 * 1000 },
   };
@@ -246,8 +230,6 @@ io.on('connection', (socket) => {
     if (check && !check()) {
       console.warn(`[Pulse] Rate limit (lokaal): ${uid} → ${event}`);
       if (cb) cb({ error: 'Te veel verzoeken. Wacht even.' });
-      const response = buildSocketRateLimitResponse(event, args);
-      if (response) socket.emit(response.event, response.payload);
       return;
     }
     // Redis cross-instance check
@@ -255,8 +237,6 @@ io.on('connection', (socket) => {
     if (rDef && !(await checkRateLimit(uid, event, rDef.max, rDef.windowMs))) {
       console.warn(`[Pulse] Rate limit (Redis): ${uid} → ${event}`);
       if (cb) cb({ error: 'Te veel verzoeken. Wacht even.' });
-      const response = buildSocketRateLimitResponse(event, args);
-      if (response) socket.emit(response.event, response.payload);
       return;
     }
     next();
@@ -303,7 +283,6 @@ io.on('connection', (socket) => {
   // Register all socket handler modules
   registerPresence(io, socket, uid);
   registerMessages(io, socket, uid);
-  registerCalls(io, socket, uid);
   registerConversations(io, socket, uid);
 
   // ── Verbreken ──
@@ -311,7 +290,6 @@ io.on('connection', (socket) => {
     const uid = socket.userId ?? socket.data.uid;
     if (uid) {
       onlineUsers[uid]?.delete(socket.id);
-      activeCalls.delete(uid);
       if (!onlineUsers[uid]?.size) {
         delete onlineUsers[uid];
         inactiveUsers.delete(uid);

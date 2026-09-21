@@ -1,10 +1,9 @@
-const { onlineUsers, activeCalls, inactiveUsers, getSocketId } = require('../src/state');
+const { onlineUsers, inactiveUsers, getSocketId } = require('../src/state');
 
 describe('state', () => {
   afterEach(() => {
     // Opruimen na elke test
     Object.keys(onlineUsers).forEach(k => delete onlineUsers[k]);
-    activeCalls.clear();
     inactiveUsers.clear();
   });
 
@@ -22,14 +21,6 @@ describe('state', () => {
     onlineUsers['uid2'].delete('socket-1');
     expect(onlineUsers['uid2'].size).toBe(1);
     expect(getSocketId('uid2')).toBe('socket-2');
-  });
-
-  it('activeCalls bijhoudt actieve gesprekken', () => {
-    activeCalls.add('uid-a');
-    activeCalls.add('uid-b');
-    expect(activeCalls.has('uid-a')).toBe(true);
-    activeCalls.delete('uid-a');
-    expect(activeCalls.has('uid-a')).toBe(false);
   });
 
   it('inactiveUsers bijhoudt inactieve gebruikers', () => {

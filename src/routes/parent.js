@@ -1,7 +1,6 @@
 const { admin, db, storage } = require('../firebase');
 const { verifyAuth } = require('../middleware');
 const { sendPush } = require('../push');
-const { activeCalls } = require('../state');
 const { transporter } = require('../email');
 const {
   cleanupCommunicationsForUser,
@@ -27,13 +26,11 @@ async function getChildHistorySettings(childUid) {
 function parseHistoryRulesFromBody(body = {}) {
   return normalizeHistoryRules({
     chatRetentionDays: body.chatRetentionDays,
-    callRetentionDays: body.callRetentionDays,
-    videoRetentionDays: body.videoRetentionDays,
   });
 }
 
 function hasOnlySupportedHistoryRules(body = {}) {
-  return ['chatRetentionDays', 'callRetentionDays', 'videoRetentionDays'].every((key) => {
+  return ['chatRetentionDays'].every((key) => {
     if (body[key] === undefined || body[key] === null || body[key] === '') return true;
     return HISTORY_RETENTION_OPTIONS_DAYS.includes(Number(body[key]));
   });
@@ -114,7 +111,7 @@ module.exports = (io, onlineUsers) => {
       const children = allDocs.map(d => {
         const { uid, displayName, username, email, photoURL, online, lastSeen, paused, pausedFeatures } = d.data();
         const canManageHistory = isPrimaryParentOf(req.uid, d.data());
-        const pf = pausedFeatures || { chat: paused || false, call: paused || false, video: paused || false };
+        const pf = { chat: pausedFeatures?.chat ?? paused ?? false };
         return {
           uid,
           displayName,
@@ -251,7 +248,7 @@ module.exports = (io, onlineUsers) => {
         parentIds:   [req.uid],
         parentEmail: parentData.email,
         online:         false,
-        pausedFeatures: { chat: false, call: false, video: false },
+        pausedFeatures: { chat: false },
         createdAt:      admin.firestore.FieldValue.serverTimestamp(),
       });
 
@@ -454,7 +451,7 @@ module.exports = (io, onlineUsers) => {
     } catch (err) { console.error('delete-child fout:', err); res.status(500).json({ error: 'Serverfout' }); }
   });
 
-  // POST /api/parent/pause/:childUid — pauzeer kind (feature: 'chat'|'call'|'video'|'all')
+  // POST /api/parent/pause/:childUid — pauzeer chat voor een kind
   router.post('/api/parent/pause/:childUid', verifyAuth, async (req, res) => {
     try {
       const callerDoc = await db.collection('users').doc(req.uid).get();
@@ -464,13 +461,12 @@ module.exports = (io, onlineUsers) => {
       if (!childDoc.exists) return res.status(404).json({ error: 'Niet gevonden.' });
       if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
 
-      const { feature } = req.body; // 'chat', 'call', 'video', or 'all' / undefined
-      const current = childDoc.data().pausedFeatures || { chat: false, call: false, video: false };
+      const { feature } = req.body;
       let updated;
       if (!feature || feature === 'all') {
-        updated = { chat: true, call: true, video: true };
-      } else if (['chat', 'call', 'video'].includes(feature)) {
-        updated = { ...current, [feature]: true };
+        updated = { chat: true };
+      } else if (feature === 'chat') {
+        updated = { chat: true };
       } else {
         return res.status(400).json({ error: 'Ongeldig kenmerk.' });
       }
@@ -479,14 +475,11 @@ module.exports = (io, onlineUsers) => {
       const s = onlineUsers[childUid];
       if (s) s.forEach(sid => {
         io.to(sid).emit('account:paused', { features: updated });
-        if (activeCalls.has(childUid) && (updated.call || updated.video)) io.to(sid).emit('call:ended');
       });
-      if (updated.call || updated.video) activeCalls.delete(childUid);
 
-      const featureLabel = !feature || feature === 'all' ? 'alles' : feature === 'chat' ? 'chatten' : feature === 'call' ? 'bellen' : 'videobellen';
       if (!onlineUsers[childUid]?.size) {
         sendPush(childUid,
-          { title: 'Pulse', body: `${featureLabel.charAt(0).toUpperCase() + featureLabel.slice(1)} is gepauzeerd door je ouder.` },
+          { title: 'Pulse', body: 'Chatten is gepauzeerd door je ouder.' },
           { type: 'paused' }
         );
       }
@@ -494,7 +487,7 @@ module.exports = (io, onlineUsers) => {
     } catch (err) { res.status(500).json({ error: 'Serverfout' }); }
   });
 
-  // POST /api/parent/resume/:childUid — hervat kind (feature: 'chat'|'call'|'video'|'all')
+  // POST /api/parent/resume/:childUid — hervat chat voor een kind
   router.post('/api/parent/resume/:childUid', verifyAuth, async (req, res) => {
     try {
       const callerDoc = await db.collection('users').doc(req.uid).get();
@@ -505,12 +498,11 @@ module.exports = (io, onlineUsers) => {
       if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
 
       const { feature } = req.body;
-      const current = childDoc.data().pausedFeatures || { chat: false, call: false, video: false };
       let updated;
       if (!feature || feature === 'all') {
-        updated = { chat: false, call: false, video: false };
-      } else if (['chat', 'call', 'video'].includes(feature)) {
-        updated = { ...current, [feature]: false };
+        updated = { chat: false };
+      } else if (feature === 'chat') {
+        updated = { chat: false };
       } else {
         return res.status(400).json({ error: 'Ongeldig kenmerk.' });
       }
@@ -599,7 +591,7 @@ module.exports = (io, onlineUsers) => {
       const sessions = { totalSecondsLast7Days, daily: last7Days, hourlyPattern: hourlyMap };
 
       const topContactsMap = {};
-      let totalMessagesSent = 0, totalCallSecs = 0, totalVideoSecs = 0;
+      let totalMessagesSent = 0;
 
       await Promise.allSettled(convsSnap.docs.slice(0, 20).map(async convDoc => {
         const convData = convDoc.data();
@@ -608,16 +600,12 @@ module.exports = (io, onlineUsers) => {
         const key = otherUid || convDoc.id;
         const msgsSnap = await db.collection('conversations').doc(convDoc.id).collection('messages')
           .where('createdAt', '>=', thirtyDaysAgo).limit(500).get();
-        let sentMsgs = 0, calls = 0, videos = 0, callSecs = 0;
+        let sentMsgs = 0;
         msgsSnap.docs.forEach(doc => {
           const msg = doc.data();
-          if (msg.type === 'call') {
-            const dur = msg.duration || 0;
-            if (msg.isVideo) totalVideoSecs += dur; else totalCallSecs += dur;
-            if (msg.senderId === childUid) { calls++; if (msg.isVideo) videos++; callSecs += dur; }
-          } else if (msg.senderId === childUid) { sentMsgs++; totalMessagesSent++; }
+          if (msg.senderId === childUid) { sentMsgs++; totalMessagesSent++; }
         });
-        if (sentMsgs > 0 || calls > 0) {
+        if (sentMsgs > 0) {
           if (!topContactsMap[key]) {
             const contactInfo = contactList.find(cl => cl.uid === otherUid) || {};
             topContactsMap[key] = {
@@ -628,20 +616,14 @@ module.exports = (io, onlineUsers) => {
               relation: contactInfo.relation || null,
               isGroup: !!convData.isGroup,
               messagesSent: 0,
-              callCount: 0,
-              videoCalls: 0,
-              totalCallSecs: 0,
             };
           }
           topContactsMap[key].messagesSent += sentMsgs;
-          topContactsMap[key].callCount += calls;
-          topContactsMap[key].videoCalls += videos;
-          topContactsMap[key].totalCallSecs += callSecs;
         }
       }));
 
       const topContacts = Object.values(topContactsMap)
-        .sort((a, b) => (b.messagesSent + b.callCount * 5) - (a.messagesSent + a.callCount * 5))
+        .sort((a, b) => b.messagesSent - a.messagesSent)
         .slice(0, 8);
 
       // Vul ontbrekende e-mailadressen op via users-document
@@ -668,7 +650,7 @@ module.exports = (io, onlineUsers) => {
         });
       }
 
-      const messaging = { totalMessagesSent, totalCallSecs, totalVideoSecs, topContacts };
+      const messaging = { totalMessagesSent, topContacts };
 
       res.json({ profile, contacts: { total: contactsSnap.size, list: contactList }, friendRequests, sessions, messaging });
     } catch (err) { console.error('Analytics error:', err); res.status(500).json({ error: 'Serverfout' }); }

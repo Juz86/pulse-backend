@@ -13,36 +13,18 @@ async function sendPush(uid, notification, data = {}) {
     ])];
     if (!tokens.length) return;
     const stringData = Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)]));
-    const isIncomingCall = stringData.type === 'incoming_call';
-    const isCallSignal = isIncomingCall || stringData.type === 'call_cancelled' || stringData.type === 'call_ended';
-    // Data-only is required for Android call UI while the app is backgrounded:
-    // notification payloads are otherwise handled by FCM's generic tray and
-    // never reach our FirebaseMessagingService.
-    if (isIncomingCall) {
-      stringData.title = notification?.title || 'Inkomende oproep';
-      stringData.body = notification?.body || 'Iemand belt je via Pulse.';
-    }
-    const callSessionId = stringData.callSessionId || stringData.sessionId || '';
     const response = await admin.messaging().sendEachForMulticast({
       tokens,
-      ...(isCallSignal ? {} : { notification }),
+      notification,
       data: stringData,
-      // Android WebViews are suspended in the background. A high-priority
-      // notification wakes the system UI, while the data payload lets Pulse
-      // restore the pending offer after the user taps it.
       android: {
-        priority: isCallSignal ? 'high' : 'normal',
-        ...(isCallSignal ? {
-          ttl: 35_000,
-          collapseKey: callSessionId ? `call_${callSessionId}` : 'pulse_call',
-        } : {
-          notification: {
-            channelId: 'pulse_messages',
-            priority: 'default',
-            visibility: 'public',
-            sound: 'default',
-          },
-        }),
+        priority: 'normal',
+        notification: {
+          channelId: 'pulse_messages',
+          priority: 'default',
+          visibility: 'public',
+          sound: 'default',
+        },
       },
       webpush: { fcmOptions: { link: APP_URL } },
     });

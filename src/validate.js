@@ -5,7 +5,7 @@ const schemas = {
     convId:  z.string().min(1).max(128),
     message: z.object({
       text: z.string().max(5000).optional(),
-      type: z.enum(['text', 'image', 'call', 'contact', 'file']).optional(),
+      type: z.enum(['text', 'image', 'contact', 'file']).optional(),
     }).passthrough(),
   }),
   messageEdit: z.object({

@@ -9,11 +9,6 @@ const FIREBASE_ENABLED = String(process.env.FIREBASE_ENABLED || '').toLowerCase(
 const COMM_RETENTION_DAYS = 30; // default voor communicatiegegevens
 const LOG_RETENTION_DAYS  = 7;  // technische metadata (sessies), OTP-codes
 const HISTORY_RETENTION_OPTIONS_DAYS = [0, 1, 7, 30];
-const HISTORY_RULE_KEYS = {
-  chat: 'chatRetentionDays',
-  call: 'callRetentionDays',
-  video: 'videoRetentionDays',
-};
 
 function firestoreCleanupEnabled() {
   return FIREBASE_ENABLED &&
@@ -38,29 +33,11 @@ function normalizeRetentionDays(value) {
 function normalizeHistoryRules(rules = {}) {
   return {
     chatRetentionDays: normalizeRetentionDays(rules?.chatRetentionDays),
-    callRetentionDays: normalizeRetentionDays(rules?.callRetentionDays),
-    videoRetentionDays: normalizeRetentionDays(rules?.videoRetentionDays),
   };
-}
-
-function getMessageHistoryType(message = {}) {
-  if (message.type === 'call') return message.isVideo ? 'video' : 'call';
-  return 'chat';
 }
 
 function summarizeMessageForConversation(data = {}) {
   if (data.type === 'contact') return `Contactpersoon: ${data.sharedContact?.name || ''}`;
-  if (data.type === 'call') {
-    const safeDuration = (typeof data.duration === 'number' && Number.isFinite(data.duration) && data.duration >= 0)
-      ? Math.round(data.duration)
-      : 0;
-    const dur = safeDuration > 0
-      ? (safeDuration >= 60 ? `${Math.floor(safeDuration / 60)} min` : `${safeDuration} sec`)
-      : '';
-    if (data.direction === 'completed') return `${data.isVideo ? 'Video-oproep' : 'Spraakoproep'}${dur ? ` · ${dur}` : ''}`;
-    if (data.direction === 'declined') return data.isVideo ? 'Video-oproep geweigerd' : 'Oproep geweigerd';
-    return data.isVideo ? 'Gemiste video-oproep' : 'Gemiste oproep';
-  }
   return data.text || '';
 }
 
@@ -84,8 +61,6 @@ async function resolveConversationHistoryRules(members = []) {
   const rulesList = await Promise.all(uniqueMembers.map(uid => getUserHistoryRules(uid)));
   return rulesList.reduce((acc, rules) => ({
     chatRetentionDays: Math.min(acc.chatRetentionDays, normalizeRetentionDays(rules.chatRetentionDays)),
-    callRetentionDays: Math.min(acc.callRetentionDays, normalizeRetentionDays(rules.callRetentionDays)),
-    videoRetentionDays: Math.min(acc.videoRetentionDays, normalizeRetentionDays(rules.videoRetentionDays)),
   }), normalizeHistoryRules());
 }
 
@@ -114,9 +89,6 @@ async function syncConversationSummary(convDoc, convData = {}) {
       lastMessage: null,
       lastMessageAt: null,
       updatedAt: convData.createdAt || null,
-      lastCallSenderId: admin.firestore.FieldValue.delete(),
-      lastCallDirection: admin.firestore.FieldValue.delete(),
-      lastCallIsVideo: admin.firestore.FieldValue.delete(),
     });
     return;
   }
@@ -128,16 +100,6 @@ async function syncConversationSummary(convDoc, convData = {}) {
     lastMessageAt: latestCreatedAt,
     updatedAt: latestCreatedAt,
   };
-
-  if (latestData.type === 'call') {
-    update.lastCallSenderId = latestData.senderId || null;
-    update.lastCallDirection = latestData.direction || null;
-    update.lastCallIsVideo = !!latestData.isVideo;
-  } else {
-    update.lastCallSenderId = admin.firestore.FieldValue.delete();
-    update.lastCallDirection = admin.firestore.FieldValue.delete();
-    update.lastCallIsVideo = admin.firestore.FieldValue.delete();
-  }
 
   await convDoc.ref.update(update);
 }
@@ -151,8 +113,7 @@ async function cleanConversation(convDoc) {
   const nowMs = Date.now();
   const docsToDelete = messagesSnap.docs.filter((doc) => {
     const data = doc.data() || {};
-    const historyType = getMessageHistoryType(data);
-    const days = normalizeRetentionDays(historyRules[HISTORY_RULE_KEYS[historyType]]);
+    const days = normalizeRetentionDays(historyRules.chatRetentionDays);
     if (days === 0) return true;
     const createdAt = data.createdAt?.toDate ? data.createdAt.toDate().getTime() : data.createdAt?._seconds ? data.createdAt._seconds * 1000 : new Date(data.createdAt || 0).getTime();
     if (!createdAt) return false;
@@ -165,10 +126,10 @@ async function cleanConversation(convDoc) {
   return deleted;
 }
 
-// ─── 1. Berichten (inclusief oproepen en videogesprekken) ─────────────────────
+// ─── 1. Berichten ─────────────────────────────────────────────────────────────
 // Collection: conversations/{convId}/messages
 // Veld: createdAt (Firestore serverTimestamp)
-// Alle berichttypen (text, call, video, contact) worden verwijderd volgens de
+// Alle berichttypen worden verwijderd volgens de
 // kortste bewaartermijn van de deelnemers: 24 uur, 7, 14 of standaard 30 dagen.
 async function cleanMessages() {
   let totalDeleted = 0;
@@ -376,7 +337,6 @@ module.exports = {
   cleanupCommunicationsForUser,
   normalizeRetentionDays,
   normalizeHistoryRules,
-  getMessageHistoryType,
   getUserHistoryRules,
   resolveConversationHistoryRules,
   HISTORY_RETENTION_OPTIONS_DAYS,

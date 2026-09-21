@@ -32,18 +32,6 @@ function isFirestoreMissingIndexError(error) {
     || message.includes('failed precondition');
 }
 
-function deriveCallDirectionForViewer(rawDirection, senderId, viewerUid) {
-  const normalized = String(rawDirection || '').toLowerCase();
-  const sentByViewer = senderId === viewerUid;
-
-  if (normalized === 'completed') return sentByViewer ? 'outgoing' : 'incoming';
-  if (normalized === 'declined' || normalized === 'no-answer' || normalized === 'no_answer') {
-    return sentByViewer ? 'outgoing' : 'missed';
-  }
-  if (normalized === 'incoming' || normalized === 'outgoing' || normalized === 'missed') return normalized;
-  return sentByViewer ? 'outgoing' : 'incoming';
-}
-
 async function getUserHistoryRules(uid) {
   const userDoc = await db.collection('users').doc(uid).get();
   const userData = userDoc.exists ? userDoc.data() || {} : {};
@@ -364,17 +352,10 @@ module.exports = (io, onlineUsers) => {
       await Promise.all(convs.map(async (conv) => {
         if (conv.isGroup) return;
         const historyRules = await resolveConversationHistoryRules(conv.members || []);
-        const isCallSummary = Boolean(conv.lastCallDirection) || conv.lastMessageType === 'call';
-        const isVideoCallSummary = isCallSummary && !!conv.lastCallIsVideo;
         const isAttachmentSummary = conv.lastMessageType === 'attachment';
         const isContactSummary = conv.lastMessageType === 'contact';
 
-        const shouldHidePreview = isCallSummary
-          ? Number(
-              historyRules?.[isVideoCallSummary ? 'videoRetentionDays' : 'callRetentionDays']
-                ?? COMM_RETENTION_DAYS
-            ) === 0
-          : Number(historyRules?.chatRetentionDays ?? COMM_RETENTION_DAYS) === 0;
+        const shouldHidePreview = Number(historyRules?.chatRetentionDays ?? COMM_RETENTION_DAYS) === 0;
 
         if (!shouldHidePreview || isAttachmentSummary || isContactSummary) return;
 
@@ -384,11 +365,6 @@ module.exports = (io, onlineUsers) => {
             lastMessageAt: admin.firestore.FieldValue.delete(),
             lastMessageType: admin.firestore.FieldValue.delete(),
           };
-          if (isCallSummary) {
-            update.lastCallSenderId = admin.firestore.FieldValue.delete();
-            update.lastCallDirection = admin.firestore.FieldValue.delete();
-            update.lastCallIsVideo = admin.firestore.FieldValue.delete();
-          }
           staleSummaryUpdates.push(
             db.collection('conversations').doc(conv.id).update(update).catch(() => {})
           );
@@ -397,11 +373,6 @@ module.exports = (io, onlineUsers) => {
         conv.lastMessage = '';
         delete conv.lastMessageAt;
         delete conv.lastMessageType;
-        if (isCallSummary) {
-          delete conv.lastCallSenderId;
-          delete conv.lastCallDirection;
-          delete conv.lastCallIsVideo;
-        }
       }));
 
       if (staleSummaryUpdates.length > 0) {
@@ -436,85 +407,6 @@ module.exports = (io, onlineUsers) => {
       res.json(convs);
     } catch (err) {
       console.error(err);
-      res.status(500).json({ error: 'Serverfout' });
-    }
-  });
-
-  router.get('/api/messages/recent-calls', verifyAuth, async (req, res) => {
-    try {
-      const uid = req.uid;
-      const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
-      const userDoc = await db.collection('users').doc(uid).get();
-      const clearedAfterMs = toMillis(userDoc.data()?.callLogClearedAt);
-
-      const convsSnap = await db.collection('conversations')
-        .where('members', 'array-contains', uid)
-        .get();
-      const conversations = convsSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-      const peerUids = Array.from(new Set(
-        conversations.flatMap((conv) => (conv.members || []).filter((memberUid) => memberUid && memberUid !== uid))
-      ));
-
-      const peerDocs = await Promise.all(peerUids.map((peerUid) => db.collection('users').doc(peerUid).get()));
-      const peerMap = {};
-      peerDocs.forEach((peerDoc, index) => {
-        peerMap[peerUids[index]] = peerDoc.exists ? (peerDoc.data() || {}) : {};
-      });
-
-      const entriesNested = await Promise.all(conversations.map(async (conv) => {
-        const snap = await db.collection('conversations')
-          .doc(conv.id)
-          .collection('messages')
-          .where('type', '==', 'call')
-          .get();
-
-        const otherUid = (conv.members || []).find((memberUid) => memberUid !== uid) || '';
-        const otherProfile = peerMap[otherUid] || {};
-        const fallbackName = conv.isGroup
-          ? (conv.groupName || 'Groepsgesprek')
-          : (conv.memberNames?.[otherUid] || otherProfile.displayName || otherProfile.email || 'Contactpersoon');
-        const fallbackPhoto = otherProfile.photoURL || '';
-
-        return snap.docs
-          .map((doc) => ({ id: doc.id, ...doc.data() }))
-          .filter((message) => !Array.isArray(message.deletedFor) || !message.deletedFor.includes(uid))
-          .map((message) => {
-            const ts = toMillis(message.createdAt);
-            return {
-              id: message.id,
-              convId: conv.id,
-              uid: otherUid,
-              name: fallbackName,
-              photoURL: fallbackPhoto,
-              isVideo: !!message.isVideo,
-              direction: deriveCallDirectionForViewer(message.direction, message.senderId, uid),
-              ts,
-            };
-          })
-          .filter((entry) => entry.uid && entry.ts > clearedAfterMs);
-      }));
-
-      const entries = entriesNested
-        .flat()
-        .sort((a, b) => Number(b.ts) - Number(a.ts))
-        .slice(0, limit);
-
-      res.json(entries);
-    } catch (err) {
-      console.error('recent-calls fout:', err);
-      res.status(500).json({ error: 'Serverfout' });
-    }
-  });
-
-  router.delete('/api/messages/recent-calls', verifyAuth, async (req, res) => {
-    try {
-      await db.collection('users').doc(req.uid).set({
-        callLogClearedAt: admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
-
-      res.json({ success: true });
-    } catch (err) {
-      console.error('recent-calls clear fout:', err);
       res.status(500).json({ error: 'Serverfout' });
     }
   });
@@ -715,9 +607,6 @@ module.exports = (io, onlineUsers) => {
         lastMessage: '',
         lastMessageAt: null,
         lastMessageType: null,
-        lastCallDirection: null,
-        lastCallIsVideo: false,
-        lastCallSenderId: null,
         deletedFor: admin.firestore.FieldValue.arrayRemove(uid),
         [`clearedAt.${uid}`]: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
@@ -760,9 +649,6 @@ module.exports = (io, onlineUsers) => {
         batch.set(convRef, {
           lastMessage: '',
           lastMessageAt: null,
-          lastCallDirection: null,
-          lastCallIsVideo: false,
-          lastCallSenderId: null,
           deletedFor: admin.firestore.FieldValue.delete(),
           clearedAt: admin.firestore.FieldValue.delete(),
         }, { merge: true });
