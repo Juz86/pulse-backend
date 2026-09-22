@@ -14,7 +14,7 @@ const jwt = require('jsonwebtoken');
 
 // ─── Core modules ─────────────────────────────────────────────────────────────
 const { admin, db } = require('./src/firebase');
-const { redisPub, redisSub, checkRateLimit } = require('./src/redis');
+const { redisPub, redisSub, getRedis, checkRateLimit } = require('./src/redis');
 const { onlineUsers, inactiveUsers, activeSessions } = require('./src/state');
 const { globalLimiter, securityHeaders, makeRateLimiter, makeSecondLimiter } = require('./src/middleware');
 
@@ -35,7 +35,13 @@ const e2eeRouter    = require('./src/routes/e2ee');
 const registerPresence      = require('./src/socket/presence');
 const registerMessages      = require('./src/socket/messages');
 const registerConversations = require('./src/socket/conversations');
+const registerCallingV2     = require('./src/socket/calling.v2');
 const { getSyncRequiredPayload } = require('./src/socket/sync');
+const { RedisCallV2Store } = require('./src/calling/v2/redisStore');
+const { CallV2Service } = require('./src/calling/v2/service');
+const { isCallingV2Enabled } = require('./src/calling/v2/config');
+
+const callV2Service = new CallV2Service(new RedisCallV2Store(getRedis));
 
 // ─── App URL ──────────────────────────────────────────────────────────────────
 const APP_URL = process.env.APP_URL || '';
@@ -216,11 +222,16 @@ io.on('connection', (socket) => {
     'typing:start':           makeRateLimiter(60),
     'conversation:create':    makeRateLimiter(10, 60 * 60 * 1000), // 10 per uur
     'conversation:addMember': makeRateLimiter(20),
+    'call:v2:start':          makeRateLimiter(5, 60 * 60 * 1000),
+    'call:v2:command':        makeRateLimiter(120),
+    'call:v2:snapshot':       makeRateLimiter(60),
   };
   // Redis-limieten voor cross-instance bescherming (tweede verdedigingslinie)
   const redisLimits = {
     'conversation:create': { max: 10, windowMs: 60 * 60 * 1000 },
     'message:send':        { max: 600, windowMs: 60 * 1000 },
+    'call:v2:start':       { max: 5, windowMs: 60 * 60 * 1000 },
+    'call:v2:command':     { max: 120, windowMs: 60 * 1000 },
   };
   // Middleware: in-memory check synchroon, Redis check asynchroon
   socket.use(async ([event, ...args], next) => {
@@ -284,6 +295,9 @@ io.on('connection', (socket) => {
   registerPresence(io, socket, uid);
   registerMessages(io, socket, uid);
   registerConversations(io, socket, uid);
+  if (isCallingV2Enabled()) {
+    registerCallingV2(io, socket, uid, { service: callV2Service });
+  }
 
   // ── Verbreken ──
   socket.on('disconnect', async () => {
