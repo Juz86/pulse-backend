@@ -1,15 +1,29 @@
 const registerCallingV2 = require('../src/socket/calling.v2');
 
-function harness({ service = {}, authorizeStart = async () => true } = {}) {
+function harness({
+  service = {},
+  authorizeStart = async () => true,
+  getTurnCredentials,
+} = {}) {
   const handlers = {};
-  const socket = { on: jest.fn((event, handler) => { handlers[event] = handler; }) };
+  const socket = {
+    join: jest.fn(),
+    on: jest.fn((event, handler) => { handlers[event] = handler; }),
+  };
   const emitToUser = jest.fn();
   const io = {};
-  registerCallingV2(io, socket, 'caller', { service, authorizeStart, emitToUser });
-  return { handlers, emitToUser, io };
+  registerCallingV2(io, socket, 'caller', {
+    service, authorizeStart, emitToUser, getTurnCredentials,
+  });
+  return { handlers, emitToUser, io, socket };
 }
 
 describe('Calling v2 socket contract', () => {
+  test('joins the authenticated user room for cross-instance delivery', () => {
+    const { socket } = harness();
+    expect(socket.join).toHaveBeenCalledWith('caller');
+  });
+
   test('rejects malformed start payloads before calling the service', async () => {
     const service = { start: jest.fn() };
     const { handlers } = harness({ service });
@@ -58,5 +72,84 @@ describe('Calling v2 socket contract', () => {
     await handlers['call:v2:snapshot']({ sessionId: 'session-123' }, callback);
     expect(service.snapshot).toHaveBeenCalledWith({ sessionId: 'session-123', actorUid: 'caller' });
     expect(callback).toHaveBeenCalledWith({ ok: false, status: 'FORBIDDEN' });
+  });
+
+  test('returns TURN configuration only after media access is authorized', async () => {
+    const service = { mediaAccess: jest.fn().mockResolvedValue({ status: 'FOUND' }) };
+    const getTurnCredentials = jest.fn().mockResolvedValue({
+      iceServers: [{ urls: ['turns:turn.cloudflare.com:443?transport=tcp'], username: 'u', credential: 'c' }],
+      expiresInSeconds: 7200,
+    });
+    const { handlers } = harness({ service, getTurnCredentials });
+    const callback = jest.fn();
+    await handlers['call:v2:ice-config']({ sessionId: 'session-123' }, callback);
+    expect(service.mediaAccess).toHaveBeenCalledWith({ sessionId: 'session-123', actorUid: 'caller' });
+    expect(getTurnCredentials).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledWith(expect.objectContaining({
+      ok: true,
+      status: 'FOUND',
+      expiresInSeconds: 7200,
+    }));
+  });
+
+  test('does not request TURN credentials for an unauthorized session', async () => {
+    const service = { mediaAccess: jest.fn().mockResolvedValue({ status: 'FORBIDDEN' }) };
+    const getTurnCredentials = jest.fn();
+    const { handlers } = harness({ service, getTurnCredentials });
+    const callback = jest.fn();
+    await handlers['call:v2:ice-config']({ sessionId: 'session-123' }, callback);
+    expect(getTurnCredentials).not.toHaveBeenCalled();
+    expect(callback).toHaveBeenCalledWith({ ok: false, status: 'FORBIDDEN' });
+  });
+
+  test('relays validated media only to the authorized peer', async () => {
+    const service = {
+      mediaRoute: jest.fn().mockResolvedValue({ status: 'FOUND', targetUid: 'callee' }),
+    };
+    const { handlers, emitToUser, io } = harness({ service });
+    const callback = jest.fn();
+    await handlers['call:v2:media']({
+      sessionId: 'session-123',
+      messageId: 'message-123',
+      type: 'offer',
+      description: 'v=0',
+    }, callback);
+    expect(service.mediaRoute).toHaveBeenCalledWith({
+      sessionId: 'session-123', actorUid: 'caller', type: 'offer',
+    });
+    expect(emitToUser).toHaveBeenCalledWith(io, 'callee', 'call:v2:media', {
+      protocolVersion: 2,
+      sessionId: 'session-123',
+      messageId: 'message-123',
+      type: 'offer',
+      description: 'v=0',
+      senderUid: 'caller',
+    });
+    expect(callback).toHaveBeenCalledWith({ ok: true, status: 'RELAYED' });
+  });
+
+  test('rejects oversized or malformed media before authorization', async () => {
+    const service = { mediaRoute: jest.fn() };
+    const { handlers } = harness({ service });
+    const callback = jest.fn();
+    await handlers['call:v2:media']({
+      sessionId: 'session-123',
+      messageId: 'message-123',
+      type: 'candidate',
+      candidate: { mediaStreamId: null, mediaLineIndex: -1, value: 'candidate' },
+    }, callback);
+    expect(service.mediaRoute).not.toHaveBeenCalled();
+    expect(callback).toHaveBeenCalledWith({ ok: false, status: 'INVALID_REQUEST' });
+  });
+
+  test('does not relay media when the session rejects it', async () => {
+    const service = { mediaRoute: jest.fn().mockResolvedValue({ status: 'INVALID_TRANSITION' }) };
+    const { handlers, emitToUser } = harness({ service });
+    const callback = jest.fn();
+    await handlers['call:v2:media']({
+      sessionId: 'session-123', messageId: 'message-123', type: 'answer', description: 'v=0',
+    }, callback);
+    expect(emitToUser).not.toHaveBeenCalled();
+    expect(callback).toHaveBeenCalledWith({ ok: false, status: 'INVALID_TRANSITION' });
   });
 });

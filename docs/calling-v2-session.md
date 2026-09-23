@@ -1,7 +1,7 @@
 # Calling v2 session layer
 
 Calling v2 is the authoritative server-side lifecycle for one-to-one Pulse
-calls. It contains no WebRTC media, FCM wake-up or TURN credentials.
+calls. WebRTC media remains peer-to-peer; Railway only relays ephemeral signaling.
 
 ## Rollout guard
 
@@ -15,6 +15,9 @@ audio client is ready for an end-to-end test.
 - `call:v2:command`: `{ sessionId, eventId, expectedRevision, command, reason? }`
 - `call:v2:snapshot`: `{ sessionId }`
 - `call:v2:updated`: authoritative session snapshot sent to both participants
+- `call:v2:ice-config`: returns short-lived Cloudflare STUN/TURN configuration
+- `call:v2:media`: relays an SDP offer, SDP answer or ICE candidate to the peer
+  after the call reaches `CONNECTING`
 
 Every request uses a Socket.IO acknowledgement containing `ok`, `status` and,
 when available, `session`. A stale `expectedRevision` returns `CONFLICT` with
@@ -46,4 +49,12 @@ both user leases immediately. The service fails closed when Redis is absent.
 The server derives the caller from the authenticated socket. The callee must be
 an allowed contact and neither participant may have blocked the other. Session
 snapshots are available only to participants. The protocol stores no SDP, ICE
-candidates, media, tokens or TURN credentials.
+candidates, media, tokens or TURN credentials. SDP and candidates are validated,
+size-limited and relayed without logging. Clients deduplicate `messageId` values.
+Only the caller can send an offer and only the callee can send an answer.
+
+Cloudflare's long-lived TURN key id and secret stay in Railway as
+`CLOUDFLARE_TURN_KEY_ID` and `CLOUDFLARE_TURN_KEY_SECRET`. The server exchanges
+them for short-lived credentials only after participant and session-state checks.
+TURN provides network relay only and never controls call state. Port 53 relay
+URLs are discarded because Cloudflare documents them as an emergency fallback.

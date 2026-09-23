@@ -40,8 +40,10 @@ const { getSyncRequiredPayload } = require('./src/socket/sync');
 const { RedisCallV2Store } = require('./src/calling/v2/redisStore');
 const { CallV2Service } = require('./src/calling/v2/service');
 const { isCallingV2Enabled } = require('./src/calling/v2/config');
+const { createCloudflareTurnCredentialsProvider } = require('./src/calling/v2/turnCredentials');
 
 const callV2Service = new CallV2Service(new RedisCallV2Store(getRedis));
+const getCallV2TurnCredentials = createCloudflareTurnCredentialsProvider();
 
 // ─── App URL ──────────────────────────────────────────────────────────────────
 const APP_URL = process.env.APP_URL || '';
@@ -225,6 +227,8 @@ io.on('connection', (socket) => {
     'call:v2:start':          makeRateLimiter(5, 60 * 60 * 1000),
     'call:v2:command':        makeRateLimiter(120),
     'call:v2:snapshot':       makeRateLimiter(60),
+    'call:v2:ice-config':     makeRateLimiter(6),
+    'call:v2:media':          makeSecondLimiter(80),
   };
   // Redis-limieten voor cross-instance bescherming (tweede verdedigingslinie)
   const redisLimits = {
@@ -232,6 +236,8 @@ io.on('connection', (socket) => {
     'message:send':        { max: 600, windowMs: 60 * 1000 },
     'call:v2:start':       { max: 5, windowMs: 60 * 60 * 1000 },
     'call:v2:command':     { max: 120, windowMs: 60 * 1000 },
+    'call:v2:ice-config':  { max: 12, windowMs: 60 * 1000 },
+    'call:v2:media':       { max: 4800, windowMs: 60 * 1000 },
   };
   // Middleware: in-memory check synchroon, Redis check asynchroon
   socket.use(async ([event, ...args], next) => {
@@ -296,7 +302,10 @@ io.on('connection', (socket) => {
   registerMessages(io, socket, uid);
   registerConversations(io, socket, uid);
   if (isCallingV2Enabled()) {
-    registerCallingV2(io, socket, uid, { service: callV2Service });
+    registerCallingV2(io, socket, uid, {
+      service: callV2Service,
+      getTurnCredentials: getCallV2TurnCredentials,
+    });
   }
 
   // ── Verbreken ──

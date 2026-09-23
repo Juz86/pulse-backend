@@ -1,5 +1,4 @@
 const { z } = require('zod');
-const { onlineUsers } = require('../state');
 const { CALL_COMMANDS, TERMINAL_REASONS } = require('../calling/v2/protocol');
 const { authorizeCallStart } = require('../calling/v2/authorization');
 
@@ -18,11 +17,32 @@ const commandSchema = z.object({
   reason: z.enum(TERMINAL_REASONS).optional(),
 }).strict();
 const snapshotSchema = z.object({ sessionId: id }).strict();
+const iceConfigSchema = snapshotSchema;
+const mediaBase = { sessionId: id, messageId: id };
+const mediaSchema = z.discriminatedUnion('type', [
+  z.object({
+    ...mediaBase,
+    type: z.literal('offer'),
+    description: z.string().min(1).max(100000),
+  }).strict(),
+  z.object({
+    ...mediaBase,
+    type: z.literal('answer'),
+    description: z.string().min(1).max(100000),
+  }).strict(),
+  z.object({
+    ...mediaBase,
+    type: z.literal('candidate'),
+    candidate: z.object({
+      mediaStreamId: z.string().max(256).nullable(),
+      mediaLineIndex: z.number().int().min(0).max(64),
+      value: z.string().min(1).max(4096),
+    }).strict(),
+  }).strict(),
+]);
 
 function defaultEmitToUser(io, targetUid, event, payload) {
-  const sockets = onlineUsers[targetUid];
-  if (!sockets) return;
-  sockets.forEach((socketId) => io.to(socketId).emit(event, payload));
+  io.to(targetUid).emit(event, payload);
 }
 
 function parse(schema, payload, callback) {
@@ -41,6 +61,8 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
   const service = options.service;
   const authorizeStart = options.authorizeStart || authorizeCallStart;
   const emitToUser = options.emitToUser || defaultEmitToUser;
+  const getTurnCredentials = options.getTurnCredentials;
+  socket.join(callerUid);
 
   socket.on('call:v2:start', async (payload, callback = () => {}) => {
     const input = parse(startSchema, payload, callback);
@@ -88,6 +110,53 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
       callback({ ok: false, status: 'SERVICE_UNAVAILABLE' });
     }
   });
+
+  socket.on('call:v2:ice-config', async (payload, callback = () => {}) => {
+    const input = parse(iceConfigSchema, payload, callback);
+    if (!input) return;
+    try {
+      const access = await service.mediaAccess({ ...input, actorUid: callerUid });
+      if (access.status !== 'FOUND') {
+        callback(response(access));
+        return;
+      }
+      if (typeof getTurnCredentials !== 'function') {
+        callback({ ok: false, status: 'SERVICE_UNAVAILABLE' });
+        return;
+      }
+      const configuration = await getTurnCredentials();
+      callback({ ok: true, status: 'FOUND', ...configuration });
+    } catch {
+      console.error('[Calling v2] TURN-configuratie ophalen mislukt');
+      callback({ ok: false, status: 'SERVICE_UNAVAILABLE' });
+    }
+  });
+
+  socket.on('call:v2:media', async (payload, callback = () => {}) => {
+    const input = parse(mediaSchema, payload, callback);
+    if (!input) return;
+    try {
+      const route = await service.mediaRoute({
+        sessionId: input.sessionId,
+        actorUid: callerUid,
+        type: input.type,
+      });
+      if (route.status !== 'FOUND') {
+        callback(response(route));
+        return;
+      }
+      const envelope = {
+        protocolVersion: 2,
+        ...input,
+        senderUid: callerUid,
+      };
+      emitToUser(io, route.targetUid, 'call:v2:media', envelope);
+      callback({ ok: true, status: 'RELAYED' });
+    } catch {
+      console.error('[Calling v2] Mediabericht doorsturen mislukt');
+      callback({ ok: false, status: 'SERVICE_UNAVAILABLE' });
+    }
+  });
 };
 
-module.exports.schemas = { startSchema, commandSchema, snapshotSchema };
+module.exports.schemas = { startSchema, commandSchema, snapshotSchema, iceConfigSchema, mediaSchema };

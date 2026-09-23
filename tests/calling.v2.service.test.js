@@ -109,6 +109,51 @@ describe('Calling v2 service', () => {
     expect((await service.command(command)).status).toBe('DUPLICATE');
   });
 
+  test('allows media only after acceptance and returns the other participant', async () => {
+    const { service, store } = makeService();
+    const started = await service.start({
+      requestId: 'request-123',
+      callerUid: 'a',
+      calleeUid: 'b',
+      mediaType: 'audio',
+    });
+    await expect(service.mediaAccess({ sessionId: started.session.sessionId, actorUid: 'a' }))
+      .resolves.toMatchObject({ status: 'INVALID_TRANSITION' });
+
+    store.sessions.set(started.session.sessionId, { ...started.session, state: 'CONNECTING' });
+    await expect(service.mediaAccess({ sessionId: started.session.sessionId, actorUid: 'a' }))
+      .resolves.toMatchObject({ status: 'FOUND', targetUid: 'b' });
+    await expect(service.mediaAccess({ sessionId: started.session.sessionId, actorUid: 'b' }))
+      .resolves.toMatchObject({ status: 'FOUND', targetUid: 'a' });
+  });
+
+  test('enforces offer and answer roles while allowing candidates from both peers', async () => {
+    const { service, store } = makeService();
+    const started = await service.start({
+      requestId: 'request-123',
+      callerUid: 'a',
+      calleeUid: 'b',
+      mediaType: 'audio',
+    });
+    store.sessions.set(started.session.sessionId, { ...started.session, state: 'CONNECTING' });
+
+    await expect(service.mediaRoute({ sessionId: started.session.sessionId, actorUid: 'b', type: 'offer' }))
+      .resolves.toEqual({ status: 'FORBIDDEN' });
+    await expect(service.mediaRoute({ sessionId: started.session.sessionId, actorUid: 'a', type: 'answer' }))
+      .resolves.toEqual({ status: 'FORBIDDEN' });
+    await expect(service.mediaRoute({ sessionId: started.session.sessionId, actorUid: 'a', type: 'candidate' }))
+      .resolves.toMatchObject({ status: 'FOUND', targetUid: 'b' });
+    await expect(service.mediaRoute({ sessionId: started.session.sessionId, actorUid: 'b', type: 'candidate' }))
+      .resolves.toMatchObject({ status: 'FOUND', targetUid: 'a' });
+  });
+
+  test('does not authorize media for a non-participant', async () => {
+    const { service } = makeService();
+    const started = await service.start({ requestId: 'request-123', callerUid: 'a', calleeUid: 'b', mediaType: 'audio' });
+    await expect(service.mediaAccess({ sessionId: started.session.sessionId, actorUid: 'outsider' }))
+      .resolves.toEqual({ status: 'FORBIDDEN' });
+  });
+
   test('fails closed when Redis is unavailable', async () => {
     const store = { create: async () => ({ status: 'UNAVAILABLE' }) };
     const { service } = makeService(store);
