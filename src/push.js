@@ -2,7 +2,7 @@ const { admin, db } = require('./firebase');
 
 const APP_URL = process.env.APP_URL;
 
-async function sendPush(uid, notification, data = {}) {
+async function sendPush(uid, notification, data = {}, options = {}) {
   try {
     const userDoc = await db.collection('users').doc(uid).get();
     if (!userDoc.exists) return;
@@ -13,21 +13,25 @@ async function sendPush(uid, notification, data = {}) {
     ])];
     if (!tokens.length) return;
     const stringData = Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)]));
-    const response = await admin.messaging().sendEachForMulticast({
+    const message = {
       tokens,
-      notification,
       data: stringData,
       android: {
-        priority: 'normal',
-        notification: {
-          channelId: 'pulse_messages',
-          priority: 'default',
-          visibility: 'public',
-          sound: 'default',
-        },
+        priority: options.androidPriority || 'normal',
+        ...(options.androidTtlMs ? { ttl: options.androidTtlMs } : {}),
       },
       webpush: { fcmOptions: { link: APP_URL } },
-    });
+    };
+    if (notification) {
+      message.notification = notification;
+      message.android.notification = {
+        channelId: 'pulse_messages',
+        priority: 'default',
+        visibility: 'public',
+        sound: 'default',
+      };
+    }
+    const response = await admin.messaging().sendEachForMulticast(message);
     const toRemove = [];
     response.responses.forEach((r, i) => {
       if (!r.success) {
@@ -48,4 +52,16 @@ async function sendPush(uid, notification, data = {}) {
   }
 }
 
-module.exports = { sendPush };
+async function sendIncomingCallPush(session) {
+  if (!session?.sessionId || !session?.calleeUid) return;
+  return sendPush(session.calleeUid, null, {
+    type: 'calling_v2_incoming',
+    protocolVersion: session.protocolVersion || 2,
+    sessionId: session.sessionId,
+  }, {
+    androidPriority: 'high',
+    androidTtlMs: 30 * 1000,
+  });
+}
+
+module.exports = { sendPush, sendIncomingCallPush };

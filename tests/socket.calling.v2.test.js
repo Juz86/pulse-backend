@@ -4,6 +4,7 @@ function harness({
   service = {},
   authorizeStart = async () => true,
   getTurnCredentials,
+  sendIncomingCallPush = jest.fn(),
 } = {}) {
   const handlers = {};
   const socket = {
@@ -13,9 +14,9 @@ function harness({
   const emitToUser = jest.fn();
   const io = {};
   registerCallingV2(io, socket, 'caller', {
-    service, authorizeStart, emitToUser, getTurnCredentials,
+    service, authorizeStart, emitToUser, getTurnCredentials, sendIncomingCallPush,
   });
-  return { handlers, emitToUser, io, socket };
+  return { handlers, emitToUser, io, socket, sendIncomingCallPush };
 }
 
 describe('Calling v2 socket contract', () => {
@@ -63,6 +64,37 @@ describe('Calling v2 socket contract', () => {
     expect(emitToUser).toHaveBeenCalledTimes(2);
     await handlers['call:v2:command'](payload, jest.fn());
     expect(emitToUser).toHaveBeenCalledTimes(2);
+  });
+
+  test('sends one incoming push only after an applied invite-ready transition', async () => {
+    const session = {
+      protocolVersion: 2,
+      sessionId: 'session-123',
+      callerUid: 'caller',
+      calleeUid: 'callee',
+      mediaType: 'audio',
+      revision: 2,
+      state: 'RINGING',
+    };
+    const service = {
+      command: jest.fn()
+        .mockResolvedValueOnce({ status: 'APPLIED', session })
+        .mockResolvedValueOnce({ status: 'DUPLICATE', session }),
+    };
+    const sendIncomingCallPush = jest.fn().mockResolvedValue(undefined);
+    const { handlers } = harness({ service, sendIncomingCallPush });
+    const payload = {
+      sessionId: 'session-123',
+      eventId: 'event-123',
+      expectedRevision: 1,
+      command: 'INVITE_READY',
+    };
+
+    await handlers['call:v2:command'](payload, jest.fn());
+    await handlers['call:v2:command'](payload, jest.fn());
+
+    expect(sendIncomingCallPush).toHaveBeenCalledTimes(1);
+    expect(sendIncomingCallPush).toHaveBeenCalledWith(session);
   });
 
   test('returns only participant-authorized snapshots from the service', async () => {

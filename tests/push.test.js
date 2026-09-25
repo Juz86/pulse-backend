@@ -52,4 +52,25 @@ describe('push notifications', () => {
       },
     }));
   });
+
+  test('sends incoming calls as short-lived high-priority data messages', async () => {
+    const { sendIncomingCallPush } = require('../src/push');
+
+    await sendIncomingCallPush({
+      protocolVersion: 2,
+      sessionId: 'session-123',
+      calleeUid: 'recipient',
+    });
+
+    expect(mockSendEachForMulticast).toHaveBeenCalledWith({
+      tokens: ['token-1'],
+      data: {
+        type: 'calling_v2_incoming',
+        protocolVersion: '2',
+        sessionId: 'session-123',
+      },
+      android: { priority: 'high', ttl: 30000 },
+      webpush: { fcmOptions: { link: 'http://localhost:3000' } },
+    });
+  });
 });

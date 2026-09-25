@@ -1,6 +1,7 @@
 const { z } = require('zod');
 const { CALL_COMMANDS, TERMINAL_REASONS } = require('../calling/v2/protocol');
 const { authorizeCallStart } = require('../calling/v2/authorization');
+const { sendIncomingCallPush: defaultSendIncomingCallPush } = require('../push');
 
 const id = z.string().trim().min(8).max(128);
 const uid = z.string().trim().min(1).max(128);
@@ -62,6 +63,7 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
   const authorizeStart = options.authorizeStart || authorizeCallStart;
   const emitToUser = options.emitToUser || defaultEmitToUser;
   const getTurnCredentials = options.getTurnCredentials;
+  const sendIncomingCallPush = options.sendIncomingCallPush || defaultSendIncomingCallPush;
   socket.join(callerUid);
 
   socket.on('call:v2:start', async (payload, callback = () => {}) => {
@@ -93,6 +95,9 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
       if (result.status === 'APPLIED') {
         emitToUser(io, result.session.callerUid, 'call:v2:updated', result.session);
         emitToUser(io, result.session.calleeUid, 'call:v2:updated', result.session);
+        if (input.command === CALL_COMMANDS.INVITE_READY) {
+          await sendIncomingCallPush(result.session);
+        }
       }
     } catch (error) {
       console.error('[Calling v2] Commando mislukt:', error.message);
