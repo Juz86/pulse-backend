@@ -14,6 +14,7 @@ function makeDisabledAdmin() {
     auth() {
       return {
         verifyIdToken: () => disabledPromise('auth.verifyIdToken'),
+        createCustomToken: () => disabledPromise('auth.createCustomToken'),
         createUser: () => disabledPromise('auth.createUser'),
         updateUser: () => disabledPromise('auth.updateUser'),
         deleteUser: () => disabledPromise('auth.deleteUser'),

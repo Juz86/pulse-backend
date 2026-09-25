@@ -30,6 +30,7 @@ const parentRouter  = require('./src/routes/parent');
 const friendsRouter = require('./src/routes/friends');
 const agendaRouter  = require('./src/routes/agenda');
 const e2eeRouter    = require('./src/routes/e2ee');
+const callingV2NativeAuthRouter = require('./src/routes/calling.v2.nativeAuth');
 
 // ─── Socket handler modules ───────────────────────────────────────────────────
 const registerPresence      = require('./src/socket/presence');
@@ -183,6 +184,7 @@ app.use(parentRouter(io, onlineUsers));
 app.use(friendsRouter(io, onlineUsers));
 app.use(agendaRouter(io));
 app.use(e2eeRouter(io));
+app.use(callingV2NativeAuthRouter());
 
 
 // ─── Socket.IO auth middleware ────────────────────────────────────────────────
