@@ -47,6 +47,16 @@ describe('Calling v2 protocol', () => {
     const result = apply(session, 'NETWORK_LOST', 'caller');
     expect(result.session.state).toBe(CALL_STATES.CONNECTING);
     expect(result.session.mediaReadyUids).toEqual(['callee']);
+    expect(result.session.iceRestartSequence).toBe(1);
+  });
+
+  test('each accepted network loss advances the authoritative ICE restart sequence', () => {
+    const active = { ...initial(), state: CALL_STATES.ACTIVE, mediaReadyUids: ['caller', 'callee'] };
+    const first = apply(active, 'NETWORK_LOST', 'callee').session;
+    const second = apply(first, 'NETWORK_LOST', 'caller').session;
+
+    expect(first.iceRestartSequence).toBe(1);
+    expect(second.iceRestartSequence).toBe(2);
   });
 
   test('records a shared hangup reason and the terminating participant', () => {

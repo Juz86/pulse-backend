@@ -20,6 +20,7 @@ function createSession({ sessionId, requestId, callerUid, calleeUid, mediaType, 
     state: CALL_STATES.PREPARING,
     revision: 1,
     mediaReadyUids: [],
+    iceRestartSequence: 0,
     terminalReason: null,
     terminalByUid: null,
     createdAt: now,
@@ -59,6 +60,7 @@ function applyCommand(session, { command, actorUid, reason, now }) {
     case CALL_COMMANDS.NETWORK_LOST:
       if (![CALL_STATES.CONNECTING, CALL_STATES.ACTIVE].includes(session.state)) return reject('INVALID_TRANSITION');
       next.mediaReadyUids = next.mediaReadyUids.filter((uid) => uid !== actorUid);
+      next.iceRestartSequence = (session.iceRestartSequence || 0) + 1;
       next.state = CALL_STATES.CONNECTING;
       break;
     case CALL_COMMANDS.DECLINE:
