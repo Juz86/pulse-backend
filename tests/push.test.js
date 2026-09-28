@@ -55,6 +55,7 @@ describe('push notifications', () => {
 
   test('sends incoming calls as short-lived high-priority data messages', async () => {
     const { sendIncomingCallPush } = require('../src/push');
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
 
     await sendIncomingCallPush({
       protocolVersion: 2,
@@ -72,5 +73,9 @@ describe('push notifications', () => {
       android: { priority: 'high', ttl: 30000 },
       webpush: { fcmOptions: { link: 'http://localhost:3000' } },
     });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining(
+      '"event":"FCM_SENT","sessionId":"session-123","status":"SENT"',
+    ));
+    log.mockRestore();
   });
 });

@@ -1,17 +1,24 @@
 const { admin, db } = require('./firebase');
+const { traceCall } = require('./calling/v2/diagnostics');
 
 const APP_URL = process.env.APP_URL;
 
 async function sendPush(uid, notification, data = {}, options = {}) {
   try {
     const userDoc = await db.collection('users').doc(uid).get();
-    if (!userDoc.exists) return;
+    if (!userDoc.exists) {
+      tracePushResult(options, 'USER_NOT_FOUND');
+      return;
+    }
     const userData = userDoc.data();
     const tokens = [...new Set([
       ...(Array.isArray(userData.fcmTokens) ? userData.fcmTokens : []),
       ...(userData.fcmToken ? [userData.fcmToken] : []),
     ])];
-    if (!tokens.length) return;
+    if (!tokens.length) {
+      tracePushResult(options, 'NO_TOKENS', { tokenCount: 0 });
+      return;
+    }
     const stringData = Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)]));
     const message = {
       tokens,
@@ -46,14 +53,30 @@ async function sendPush(uid, notification, data = {}, options = {}) {
       if (toRemove.includes(userData.fcmToken)) updates.fcmToken = admin.firestore.FieldValue.delete();
       await db.collection('users').doc(uid).update(updates).catch(e => console.warn('FCM token cleanup mislukt:', e.message));
     }
+    tracePushResult(options, response.failureCount ? 'PARTIAL' : 'SENT', {
+      tokenCount: tokens.length,
+      successCount: response.successCount,
+      failureCount: response.failureCount,
+    });
     console.log(`📬 Push → ${uid}: ${response.successCount}/${tokens.length} bezorgd`);
   } catch (e) {
+    tracePushResult(options, 'FAILED');
     console.warn(`Push mislukt voor ${uid}:`, e.message);
   }
 }
 
+function tracePushResult(options, status, counts = {}) {
+  if (!options.traceSessionId) return;
+  traceCall('FCM_SENT', { sessionId: options.traceSessionId, status, ...counts });
+}
+
 async function sendIncomingCallPush(session) {
   if (!session?.sessionId || !session?.calleeUid) return;
+  traceCall('FCM_SEND_REQUESTED', {
+    sessionId: session.sessionId,
+    state: session.state,
+    revision: session.revision,
+  });
   return sendPush(session.calleeUid, null, {
     type: 'calling_v2_incoming',
     protocolVersion: session.protocolVersion || 2,
@@ -61,6 +84,7 @@ async function sendIncomingCallPush(session) {
   }, {
     androidPriority: 'high',
     androidTtlMs: 30 * 1000,
+    traceSessionId: session.sessionId,
   });
 }
 

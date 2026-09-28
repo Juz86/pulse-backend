@@ -2,6 +2,7 @@ const { z } = require('zod');
 const { CALL_COMMANDS, TERMINAL_REASONS } = require('../calling/v2/protocol');
 const { authorizeCallStart } = require('../calling/v2/authorization');
 const { sendIncomingCallPush: defaultSendIncomingCallPush } = require('../push');
+const { traceCall } = require('../calling/v2/diagnostics');
 
 const id = z.string().trim().min(8).max(128);
 const uid = z.string().trim().min(1).max(128);
@@ -75,6 +76,11 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
         return;
       }
       const result = await service.start({ ...input, callerUid });
+      traceCall('SESSION_CREATED', {
+        sessionId: result.session?.sessionId, requestId: input.requestId,
+        status: result.status, state: result.session?.state,
+        revision: result.session?.revision, mediaType: input.mediaType,
+      });
       callback(response(result));
       if (['CREATED', 'IDEMPOTENT'].includes(result.status)) {
         emitToUser(io, callerUid, 'call:v2:updated', result.session);
@@ -91,6 +97,10 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
     if (!input) return;
     try {
       const result = await service.command({ ...input, actorUid: callerUid });
+      traceCall(input.command, {
+        sessionId: input.sessionId, command: input.command, status: result.status,
+        state: result.session?.state, revision: result.session?.revision,
+      });
       callback(response(result));
       if (result.status === 'APPLIED') {
         emitToUser(io, result.session.callerUid, 'call:v2:updated', result.session);
@@ -108,8 +118,14 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
   socket.on('call:v2:snapshot', async (payload, callback = () => {}) => {
     const input = parse(snapshotSchema, payload, callback);
     if (!input) return;
+    traceCall('SNAPSHOT_REQUESTED', { sessionId: input.sessionId });
     try {
-      callback(response(await service.snapshot({ ...input, actorUid: callerUid })));
+      const result = await service.snapshot({ ...input, actorUid: callerUid });
+      traceCall('SNAPSHOT_RECEIVED', {
+        sessionId: input.sessionId, status: result.status,
+        state: result.session?.state, revision: result.session?.revision,
+      });
+      callback(response(result));
     } catch (error) {
       console.error('[Calling v2] Snapshot mislukt:', error.message);
       callback({ ok: false, status: 'SERVICE_UNAVAILABLE' });
@@ -119,6 +135,7 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
   socket.on('call:v2:ice-config', async (payload, callback = () => {}) => {
     const input = parse(iceConfigSchema, payload, callback);
     if (!input) return;
+    traceCall('ICE_CONFIG_REQUESTED', { sessionId: input.sessionId });
     try {
       const access = await service.mediaAccess({ ...input, actorUid: callerUid });
       if (access.status !== 'FOUND') {
@@ -130,6 +147,13 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
         return;
       }
       const configuration = await getTurnCredentials();
+      const iceServers = Array.isArray(configuration.iceServers) ? configuration.iceServers : [];
+      const urls = iceServers.flatMap(server => Array.isArray(server.urls) ? server.urls : [server.urls]);
+      traceCall('ICE_CONFIG_RECEIVED', {
+        sessionId: input.sessionId, status: 'FOUND', iceServerCount: iceServers.length,
+        hasStun: urls.some(url => typeof url === 'string' && url.startsWith('stun:')),
+        hasTurn: urls.some(url => typeof url === 'string' && /^(turn|turns):/.test(url)),
+      });
       callback({ ok: true, status: 'FOUND', ...configuration });
     } catch {
       console.error('[Calling v2] TURN-configuratie ophalen mislukt');
@@ -156,6 +180,9 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
         senderUid: callerUid,
       };
       emitToUser(io, route.targetUid, 'call:v2:media', envelope);
+      traceCall(`${input.type.toUpperCase()}_SENT`, {
+        sessionId: input.sessionId, status: 'RELAYED', messageType: input.type,
+      });
       callback({ ok: true, status: 'RELAYED' });
     } catch {
       console.error('[Calling v2] Mediabericht doorsturen mislukt');
