@@ -1,5 +1,6 @@
 const { admin, db } = require('./firebase');
 const { traceCall } = require('./calling/v2/diagnostics');
+const { listPushDevices } = require('./pushDevices');
 
 const APP_URL = process.env.APP_URL;
 
@@ -11,12 +12,20 @@ async function sendPush(uid, notification, data = {}, options = {}) {
       return;
     }
     const userData = userDoc.data();
-    const tokens = [...new Set([
+    const devices = options.nativeAndroidOnly
+      ? await listPushDevices(uid, { transport: 'fcm_native', platform: 'android' })
+      : [];
+    const legacyTokens = options.nativeAndroidOnly ? [] : [
       ...(Array.isArray(userData.fcmTokens) ? userData.fcmTokens : []),
       ...(userData.fcmToken ? [userData.fcmToken] : []),
-    ])];
+    ];
+    const tokens = [...new Set([...devices.map((device) => device.token), ...legacyTokens])];
     if (!tokens.length) {
-      tracePushResult(options, 'NO_TOKENS', { tokenCount: 0 });
+      tracePushResult(
+        options,
+        options.nativeAndroidOnly ? 'NO_NATIVE_TOKENS' : 'NO_TOKENS',
+        { tokenCount: 0 },
+      );
       return;
     }
     const stringData = Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)]));
@@ -49,6 +58,9 @@ async function sendPush(uid, notification, data = {}, options = {}) {
       }
     });
     if (toRemove.length) {
+      await Promise.all(devices
+        .filter((device) => toRemove.includes(device.token))
+        .map((device) => device.ref.delete()));
       const updates = { fcmTokens: admin.firestore.FieldValue.arrayRemove(...toRemove) };
       if (toRemove.includes(userData.fcmToken)) updates.fcmToken = admin.firestore.FieldValue.delete();
       await db.collection('users').doc(uid).update(updates).catch(e => console.warn('FCM token cleanup mislukt:', e.message));
@@ -84,6 +96,7 @@ async function sendIncomingCallPush(session) {
   }, {
     androidPriority: 'high',
     androidTtlMs: 30 * 1000,
+    nativeAndroidOnly: true,
     traceSessionId: session.sessionId,
   });
 }

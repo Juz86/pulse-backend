@@ -3,6 +3,7 @@ const { db } = require('../firebase');
 const { verifyAuth } = require('../middleware');
 const { admin } = require('../firebase');
 const { readPublicFeatureFlags } = require('../featureFlags');
+const { registerPushDevice } = require('../pushDevices');
 
 function readVersionCode(value) {
   const parsed = Number.parseInt(String(value || ''), 10);
@@ -66,14 +67,21 @@ router.get('/api/feature-flags', (_req, res) => {
 // ─── FCM token opslaan ───────────────────────────────────────────────────────
 router.post('/api/fcm-token', verifyAuth, async (req, res) => {
   try {
-    const { uid, token } = req.body;
+    const { uid, token, installationId, transport, platform } = req.body;
     if (!uid || !token) return res.status(400).json({ error: 'uid en token verplicht' });
     if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
+    const device = await registerPushDevice(uid, {
+      installationId,
+      token,
+      transport,
+      platform,
+    });
+    if (!device) return res.status(400).json({ error: 'Ongeldige pushregistratie.' });
     await db.collection('users').doc(uid).update({
-      fcmToken:  token,  // legacy — backward compat
+      fcmToken: token, // legacy - backward compatibility for ordinary notifications
       fcmTokens: admin.firestore.FieldValue.arrayUnion(token),
     });
-    res.json({ ok: true });
+    res.json({ ok: true, stored: true });
   } catch (err) {
     res.status(500).json({ error: 'Serverfout' });
   }

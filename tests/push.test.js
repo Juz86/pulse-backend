@@ -1,6 +1,22 @@
 const mockSendEachForMulticast = jest.fn();
 const mockUpdate = jest.fn();
-const mockUserData = { fcmTokens: ['token-1'] };
+const mockDelete = jest.fn();
+const mockUserData = { fcmTokens: ['legacy-token'] };
+let mockPushDevices = [];
+
+function mockPushDeviceQuery(filters = []) {
+  return {
+    where: (field, _operator, value) => mockPushDeviceQuery([...filters, [field, value]]),
+    get: async () => ({
+      docs: mockPushDevices
+        .filter((device) => filters.every(([field, value]) => device[field] === value))
+        .map((device) => ({
+          ref: { delete: mockDelete },
+          data: () => device,
+        })),
+    }),
+  };
+}
 
 jest.mock('../src/firebase', () => ({
   admin: {
@@ -9,26 +25,40 @@ jest.mock('../src/firebase', () => ({
       FieldValue: {
         arrayRemove: jest.fn(),
         delete: jest.fn(),
+        serverTimestamp: jest.fn(),
       },
     },
   },
   db: {
-    collection: () => ({
-      doc: () => ({
-        get: async () => ({ exists: true, data: () => mockUserData }),
-        update: mockUpdate,
-      }),
-    }),
+    collection: (name) => {
+      if (name === 'pushDevices') return mockPushDeviceQuery();
+      return {
+        doc: () => ({
+          get: async () => ({ exists: true, data: () => mockUserData }),
+          update: mockUpdate,
+        }),
+      };
+    },
   },
 }));
 
 describe('push notifications', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockSendEachForMulticast.mockResolvedValue({ successCount: 1, responses: [{ success: true }] });
+    mockPushDevices = [{
+      uid: 'recipient',
+      token: 'native-token',
+      transport: 'fcm_native',
+      platform: 'android',
+    }];
+    mockSendEachForMulticast.mockResolvedValue({
+      successCount: 2,
+      failureCount: 0,
+      responses: [{ success: true }, { success: true }],
+    });
   });
 
-  test('sends ordinary Pulse notifications on the message channel', async () => {
+  test('keeps ordinary Pulse notifications on the legacy-compatible tokens', async () => {
     const { sendPush } = require('../src/push');
 
     await sendPush(
@@ -38,7 +68,7 @@ describe('push notifications', () => {
     );
 
     expect(mockSendEachForMulticast).toHaveBeenCalledWith(expect.objectContaining({
-      tokens: ['token-1'],
+      tokens: ['legacy-token'],
       notification: { title: 'Pulse', body: 'Je hebt een nieuw bericht.' },
       data: { type: 'message', conversationId: 'conversation-1' },
       android: {
@@ -53,7 +83,18 @@ describe('push notifications', () => {
     }));
   });
 
-  test('sends incoming calls as short-lived high-priority data messages', async () => {
+  test('sends incoming calls only to native Android device tokens', async () => {
+    mockPushDevices.push({
+      uid: 'recipient',
+      token: 'web-token',
+      transport: 'fcm_web',
+      platform: 'web',
+    });
+    mockSendEachForMulticast.mockResolvedValue({
+      successCount: 1,
+      failureCount: 0,
+      responses: [{ success: true }],
+    });
     const { sendIncomingCallPush } = require('../src/push');
     const log = jest.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -64,7 +105,7 @@ describe('push notifications', () => {
     });
 
     expect(mockSendEachForMulticast).toHaveBeenCalledWith({
-      tokens: ['token-1'],
+      tokens: ['native-token'],
       data: {
         type: 'calling_v2_incoming',
         protocolVersion: '2',
@@ -76,6 +117,29 @@ describe('push notifications', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining(
       '"event":"FCM_SENT","sessionId":"session-123","status":"SENT"',
     ));
+    log.mockRestore();
+  });
+
+  test('removes invalid structured device tokens', async () => {
+    mockSendEachForMulticast.mockResolvedValue({
+      successCount: 0,
+      failureCount: 1,
+      responses: [{
+        success: false,
+        error: { code: 'messaging/registration-token-not-registered' },
+      }],
+    });
+    const { sendIncomingCallPush } = require('../src/push');
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    await sendIncomingCallPush({
+      protocolVersion: 2,
+      sessionId: 'session-invalid',
+      calleeUid: 'recipient',
+    });
+
+    expect(mockDelete).toHaveBeenCalledTimes(1);
+    expect(mockUpdate).toHaveBeenCalled();
     log.mockRestore();
   });
 });
