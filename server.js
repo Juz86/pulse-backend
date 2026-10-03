@@ -40,12 +40,17 @@ const registerCallingV2     = require('./src/socket/calling.v2');
 const { getSyncRequiredPayload } = require('./src/socket/sync');
 const { RedisCallV2Store } = require('./src/calling/v2/redisStore');
 const { CallV2Service } = require('./src/calling/v2/service');
-const { getRingingTimeoutSeconds, isCallingV2Enabled } = require('./src/calling/v2/config');
+const {
+  getConnectingTimeoutSeconds,
+  getRingingTimeoutSeconds,
+  isCallingV2Enabled,
+} = require('./src/calling/v2/config');
 const { startCallV2TimeoutSweeper } = require('./src/calling/v2/timeouts');
 const { createCloudflareTurnCredentialsProvider } = require('./src/calling/v2/turnCredentials');
 
 const callV2Service = new CallV2Service(new RedisCallV2Store(getRedis), {
   ringingTimeoutMs: getRingingTimeoutSeconds() * 1000,
+  connectingTimeoutMs: getConnectingTimeoutSeconds() * 1000,
 });
 const getCallV2TurnCredentials = createCloudflareTurnCredentialsProvider();
 

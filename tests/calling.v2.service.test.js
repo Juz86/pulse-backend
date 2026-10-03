@@ -7,6 +7,7 @@ class MemoryStore {
     this.leases = new Map();
     this.events = new Set();
     this.ringingDeadlines = new Map();
+    this.connectingDeadlines = new Map();
   }
 
   async create(session) {
@@ -47,6 +48,11 @@ class MemoryStore {
     } else {
       this.ringingDeadlines.delete(nextSession.sessionId);
     }
+    if (nextSession.state === 'CONNECTING') {
+      this.connectingDeadlines.set(nextSession.sessionId, Date.parse(nextSession.connectingDeadlineAt));
+    } else {
+      this.connectingDeadlines.delete(nextSession.sessionId);
+    }
     return { status: 'APPLIED', session: nextSession };
   }
 
@@ -60,6 +66,19 @@ class MemoryStore {
 
   async removeRingingDeadline(sessionId) {
     this.ringingDeadlines.delete(sessionId);
+    return { status: 'APPLIED' };
+  }
+
+  async listDueConnecting(nowMs, limit) {
+    const sessionIds = [...this.connectingDeadlines.entries()]
+      .filter(([, deadline]) => deadline <= nowMs)
+      .slice(0, limit)
+      .map(([sessionId]) => sessionId);
+    return { status: 'FOUND', sessionIds };
+  }
+
+  async removeConnectingDeadline(sessionId) {
+    this.connectingDeadlines.delete(sessionId);
     return { status: 'APPLIED' };
   }
 }
@@ -177,6 +196,68 @@ describe('Calling v2 service', () => {
     });
 
     await expect(service.expireDueRinging({ nowMs: Date.parse('2026-01-01T00:01:00.000Z') }))
+      .resolves.toEqual({ status: 'APPLIED', sessions: [] });
+  });
+
+  test('ends a call that never becomes active after acceptance', async () => {
+    const { service, store } = makeService();
+    const started = await service.start({
+      requestId: 'request-123', callerUid: 'a', calleeUid: 'b', mediaType: 'audio',
+    });
+    const ringing = await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-invite',
+      expectedRevision: 1,
+      command: 'INVITE_READY',
+      actorUid: 'a',
+    });
+    const connecting = await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-accept',
+      expectedRevision: ringing.session.revision,
+      command: 'ACCEPT',
+      actorUid: 'b',
+    });
+
+    expect(connecting.session.connectingDeadlineAt).toBe('2026-01-01T00:00:30.000Z');
+    const expired = await service.expireDueConnecting({
+      nowMs: Date.parse('2026-01-01T00:00:30.000Z'),
+    });
+
+    expect(expired.sessions).toHaveLength(1);
+    expect(expired.sessions[0]).toMatchObject({
+      state: 'ENDED',
+      terminalReason: 'connect_timeout',
+      terminalByUid: null,
+    });
+    expect(store.leases.has('a')).toBe(false);
+    expect(store.leases.has('b')).toBe(false);
+  });
+
+  test('does not expire a call after both peers make it active', async () => {
+    const { service } = makeService();
+    const started = await service.start({
+      requestId: 'request-123', callerUid: 'a', calleeUid: 'b', mediaType: 'audio',
+    });
+    let result = await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-invite', expectedRevision: 1, command: 'INVITE_READY', actorUid: 'a',
+    });
+    result = await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-accept', expectedRevision: result.session.revision, command: 'ACCEPT', actorUid: 'b',
+    });
+    result = await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-media-a', expectedRevision: result.session.revision, command: 'MEDIA_CONNECTED', actorUid: 'a',
+    });
+    result = await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-media-b', expectedRevision: result.session.revision, command: 'MEDIA_CONNECTED', actorUid: 'b',
+    });
+
+    expect(result.session.state).toBe('ACTIVE');
+    await expect(service.expireDueConnecting({ nowMs: Date.parse('2026-01-01T00:01:00.000Z') }))
       .resolves.toEqual({ status: 'APPLIED', sessions: [] });
   });
 

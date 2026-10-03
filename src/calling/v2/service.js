@@ -1,16 +1,26 @@
 const { randomUUID } = require('crypto');
-const { CALL_STATES, CALL_COMMANDS, createSession, applyCommand, expireRinging, isParticipant } = require('./protocol');
+const {
+  CALL_STATES,
+  CALL_COMMANDS,
+  createSession,
+  applyCommand,
+  expireConnecting,
+  expireRinging,
+  isParticipant,
+} = require('./protocol');
 
 class CallV2Service {
   constructor(store, {
     createId = randomUUID,
     now = () => new Date().toISOString(),
     ringingTimeoutMs = 45_000,
+    connectingTimeoutMs = 30_000,
   } = {}) {
     this.store = store;
     this.createId = createId;
     this.now = now;
     this.ringingTimeoutMs = ringingTimeoutMs;
+    this.connectingTimeoutMs = connectingTimeoutMs;
   }
 
   async start({ requestId, callerUid, calleeUid, mediaType }) {
@@ -69,6 +79,9 @@ class CallV2Service {
       ringingDeadlineAt: command === CALL_COMMANDS.INVITE_READY
         ? new Date(Date.parse(transitionTime) + this.ringingTimeoutMs).toISOString()
         : undefined,
+      connectingDeadlineAt: [CALL_COMMANDS.ACCEPT, CALL_COMMANDS.NETWORK_LOST].includes(command)
+        ? new Date(Date.parse(transitionTime) + this.connectingTimeoutMs).toISOString()
+        : undefined,
     });
     if (!transition.ok) return { status: transition.code, session: snapshot.session };
     const result = await this.store.commit({ currentRevision: expectedRevision, nextSession: transition.session, eventId });
@@ -100,6 +113,35 @@ class CallV2Service {
         currentRevision: current.session.revision,
         nextSession: transition.session,
         eventId: `server:ringing-timeout:${current.session.revision}`,
+      });
+      if (result.status === 'APPLIED') sessions.push(result.session);
+    }
+    return { status: 'APPLIED', sessions };
+  }
+
+  async expireDueConnecting({ nowMs = Date.now(), limit = 100 } = {}) {
+    const due = await this.store.listDueConnecting(nowMs, limit);
+    if (due.status !== 'FOUND') return { status: 'SERVICE_UNAVAILABLE', sessions: [] };
+
+    const sessions = [];
+    for (const sessionId of due.sessionIds) {
+      const current = await this.store.get(sessionId);
+      if (current.status !== 'FOUND') {
+        if (current.status === 'NOT_FOUND') await this.store.removeConnectingDeadline(sessionId);
+        continue;
+      }
+      const deadlineMs = Date.parse(current.session.connectingDeadlineAt);
+      if (current.session.state !== CALL_STATES.CONNECTING || !Number.isFinite(deadlineMs)) {
+        await this.store.removeConnectingDeadline(sessionId);
+        continue;
+      }
+      if (deadlineMs > nowMs) continue;
+
+      const transition = expireConnecting(current.session, { now: new Date(nowMs).toISOString() });
+      const result = await this.store.commit({
+        currentRevision: current.session.revision,
+        nextSession: transition.session,
+        eventId: `server:connecting-timeout:${current.session.revision}`,
       });
       if (result.status === 'APPLIED') sessions.push(result.session);
     }

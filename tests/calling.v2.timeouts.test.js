@@ -11,6 +11,7 @@ describe('Calling v2 timeout sweeper', () => {
     };
     const service = {
       expireDueRinging: jest.fn().mockResolvedValue({ status: 'APPLIED', sessions: [session] }),
+      expireDueConnecting: jest.fn().mockResolvedValue({ status: 'APPLIED', sessions: [] }),
     };
     const onExpired = jest.fn();
     const sweeper = startCallV2TimeoutSweeper({
@@ -24,6 +25,7 @@ describe('Calling v2 timeout sweeper', () => {
     sweeper.stop();
 
     expect(service.expireDueRinging).toHaveBeenCalledWith({ nowMs: 1234 });
+    expect(service.expireDueConnecting).toHaveBeenCalledWith({ nowMs: 1234 });
     expect(onExpired).toHaveBeenCalledWith(session);
   });
 });

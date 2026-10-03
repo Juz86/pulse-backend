@@ -2,6 +2,7 @@ const {
   LIVE_SESSION_TTL_SECONDS,
   TERMINAL_SESSION_TTL_SECONDS,
   RINGING_DEADLINES_KEY,
+  CONNECTING_DEADLINES_KEY,
   RedisCallV2Store,
 } = require('../src/calling/v2/redisStore');
 
@@ -20,6 +21,8 @@ describe('Calling v2 Redis store', () => {
       .resolves.toEqual({ status: 'UNAVAILABLE' });
     await expect(store.listDueRinging(Date.now())).resolves.toEqual({ status: 'UNAVAILABLE' });
     await expect(store.removeRingingDeadline(session.sessionId)).resolves.toEqual({ status: 'UNAVAILABLE' });
+    await expect(store.listDueConnecting(Date.now())).resolves.toEqual({ status: 'UNAVAILABLE' });
+    await expect(store.removeConnectingDeadline(session.sessionId)).resolves.toEqual({ status: 'UNAVAILABLE' });
   });
 
   test('creates session, participant leases and idempotency key atomically', async () => {
@@ -45,8 +48,9 @@ describe('Calling v2 Redis store', () => {
     await store.commit({ currentRevision: 1, nextSession: ended, eventId: 'event-123' });
     const args = redis.eval.mock.calls[0];
     expect(args).toContain(TERMINAL_SESSION_TTL_SECONDS);
-    expect(args[11]).toBe('1');
-    expect(args[12]).toBe('');
+    expect(args[12]).toBe('1');
+    expect(args[13]).toBe('');
+    expect(args[14]).toBe('');
   });
 
   test('indexes ringing deadlines and returns due session ids', async () => {
@@ -67,13 +71,43 @@ describe('Calling v2 Redis store', () => {
       .resolves.toEqual({ status: 'FOUND', sessionIds: [session.sessionId] });
 
     const args = redis.eval.mock.calls[0];
-    expect(args[1]).toBe(5);
+    expect(args[1]).toBe(6);
     expect(args[6]).toBe(RINGING_DEADLINES_KEY);
-    expect(args[12]).toBe(Date.parse(ringing.ringingDeadlineAt));
+    expect(args[7]).toBe(CONNECTING_DEADLINES_KEY);
+    expect(args[13]).toBe(Date.parse(ringing.ringingDeadlineAt));
     expect(redis.zrangebyscore).toHaveBeenCalledWith(
       RINGING_DEADLINES_KEY,
       '-inf',
       Date.parse(ringing.ringingDeadlineAt),
+      'LIMIT',
+      0,
+      100,
+    );
+  });
+
+  test('indexes connecting deadlines and returns due session ids', async () => {
+    const connecting = {
+      ...session,
+      state: 'CONNECTING',
+      revision: 3,
+      connectingDeadlineAt: '2026-01-01T00:00:30.000Z',
+    };
+    const redis = {
+      eval: jest.fn().mockResolvedValue(JSON.stringify({ status: 'APPLIED', session: JSON.stringify(connecting) })),
+      zrangebyscore: jest.fn().mockResolvedValue([session.sessionId]),
+    };
+    const store = new RedisCallV2Store(() => redis);
+
+    await store.commit({ currentRevision: 2, nextSession: connecting, eventId: 'event-123' });
+    await expect(store.listDueConnecting(Date.parse(connecting.connectingDeadlineAt)))
+      .resolves.toEqual({ status: 'FOUND', sessionIds: [session.sessionId] });
+
+    const args = redis.eval.mock.calls[0];
+    expect(args[14]).toBe(Date.parse(connecting.connectingDeadlineAt));
+    expect(redis.zrangebyscore).toHaveBeenCalledWith(
+      CONNECTING_DEADLINES_KEY,
+      '-inf',
+      Date.parse(connecting.connectingDeadlineAt),
       'LIMIT',
       0,
       100,

@@ -2,6 +2,7 @@ const {
   CALL_STATES,
   createSession,
   applyCommand,
+  expireConnecting,
   expireRinging,
 } = require('../src/calling/v2/protocol');
 
@@ -23,6 +24,9 @@ function apply(session, command, actorUid, reason) {
     reason,
     now: '2026-01-01T00:00:01.000Z',
     ringingDeadlineAt: command === 'INVITE_READY' ? '2026-01-01T00:00:46.000Z' : undefined,
+    connectingDeadlineAt: ['ACCEPT', 'NETWORK_LOST'].includes(command)
+      ? '2026-01-01T00:00:31.000Z'
+      : undefined,
   });
 }
 
@@ -65,12 +69,36 @@ describe('Calling v2 protocol', () => {
     });
   });
 
+  test('expires a call that never finishes connecting', () => {
+    const ringing = apply(initial(), 'INVITE_READY', 'caller').session;
+    const connecting = apply(ringing, 'ACCEPT', 'callee').session;
+    const result = expireConnecting(connecting, { now: '2026-01-01T00:00:31.000Z' });
+    expect(result.session).toMatchObject({
+      state: CALL_STATES.ENDED,
+      revision: 4,
+      connectingDeadlineAt: null,
+      terminalReason: 'connect_timeout',
+      terminalByUid: null,
+    });
+  });
+
+  test('keeps the connecting deadline until both peers are ready', () => {
+    const ringing = apply(initial(), 'INVITE_READY', 'caller').session;
+    const connecting = apply(ringing, 'ACCEPT', 'callee').session;
+    const callerReady = apply(connecting, 'MEDIA_CONNECTED', 'caller').session;
+    const active = apply(callerReady, 'MEDIA_CONNECTED', 'callee').session;
+
+    expect(callerReady.connectingDeadlineAt).toBe('2026-01-01T00:00:31.000Z');
+    expect(active.connectingDeadlineAt).toBeNull();
+  });
+
   test('network loss returns an active session to connecting', () => {
     const session = { ...initial(), state: CALL_STATES.ACTIVE, mediaReadyUids: ['caller', 'callee'] };
     const result = apply(session, 'NETWORK_LOST', 'caller');
     expect(result.session.state).toBe(CALL_STATES.CONNECTING);
     expect(result.session.mediaReadyUids).toEqual(['callee']);
     expect(result.session.iceRestartSequence).toBe(1);
+    expect(result.session.connectingDeadlineAt).toBe('2026-01-01T00:00:31.000Z');
   });
 
   test('each accepted network loss advances the authoritative ICE restart sequence', () => {
@@ -80,6 +108,22 @@ describe('Calling v2 protocol', () => {
 
     expect(first.iceRestartSequence).toBe(1);
     expect(second.iceRestartSequence).toBe(2);
+  });
+
+  test('does not extend an existing connecting deadline on repeated network loss', () => {
+    const connecting = {
+      ...initial(),
+      state: CALL_STATES.CONNECTING,
+      connectingDeadlineAt: '2026-01-01T00:00:31.000Z',
+    };
+    const result = applyCommand(connecting, {
+      command: 'NETWORK_LOST',
+      actorUid: 'callee',
+      now: '2026-01-01T00:00:10.000Z',
+      connectingDeadlineAt: '2026-01-01T00:00:40.000Z',
+    });
+
+    expect(result.session.connectingDeadlineAt).toBe('2026-01-01T00:00:31.000Z');
   });
 
   test('records a shared hangup reason and the terminating participant', () => {

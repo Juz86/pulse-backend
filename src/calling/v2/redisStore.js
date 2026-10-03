@@ -3,6 +3,7 @@ const { CALL_STATES } = require('./protocol');
 const LIVE_SESSION_TTL_SECONDS = 2 * 60 * 60;
 const TERMINAL_SESSION_TTL_SECONDS = 5 * 60;
 const RINGING_DEADLINES_KEY = 'pulse:calling:v2:deadlines:ringing';
+const CONNECTING_DEADLINES_KEY = 'pulse:calling:v2:deadlines:connecting';
 
 const CREATE_SCRIPT = `
 local existingSessionId = redis.call('GET', KEYS[4])
@@ -41,6 +42,11 @@ if ARGV[6] ~= '' then
   redis.call('ZADD', KEYS[5], ARGV[6], ARGV[3])
 else
   redis.call('ZREM', KEYS[5], ARGV[3])
+end
+if ARGV[7] ~= '' then
+  redis.call('ZADD', KEYS[6], ARGV[7], ARGV[3])
+else
+  redis.call('ZREM', KEYS[6], ARGV[3])
 end
 return cjson.encode({ status = 'APPLIED', session = ARGV[2] })
 `;
@@ -106,12 +112,16 @@ class RedisCallV2Store {
       const ringingDeadline = nextSession.state === CALL_STATES.RINGING
         ? Date.parse(nextSession.ringingDeadlineAt)
         : NaN;
-      return parseRedisResult(await redis.eval(COMMIT_SCRIPT, 5,
+      const connectingDeadline = nextSession.state === CALL_STATES.CONNECTING
+        ? Date.parse(nextSession.connectingDeadlineAt)
+        : NaN;
+      return parseRedisResult(await redis.eval(COMMIT_SCRIPT, 6,
         this.sessionKey(nextSession.sessionId), this.eventKey(nextSession.sessionId, eventId),
         this.userLeaseKey(nextSession.callerUid), this.userLeaseKey(nextSession.calleeUid),
-        RINGING_DEADLINES_KEY,
+        RINGING_DEADLINES_KEY, CONNECTING_DEADLINES_KEY,
         currentRevision, JSON.stringify(nextSession), nextSession.sessionId, ttl,
-        terminal ? '1' : '0', Number.isFinite(ringingDeadline) ? ringingDeadline : ''));
+        terminal ? '1' : '0', Number.isFinite(ringingDeadline) ? ringingDeadline : '',
+        Number.isFinite(connectingDeadline) ? connectingDeadline : ''));
     } catch (error) {
       console.warn('[Calling v2] Redis commit mislukt:', error.message);
       return { status: 'UNAVAILABLE' };
@@ -148,11 +158,43 @@ class RedisCallV2Store {
       return { status: 'UNAVAILABLE' };
     }
   }
+
+  async listDueConnecting(nowMs, limit = 100) {
+    const redis = this.getRedisClient();
+    if (!redis) return { status: 'UNAVAILABLE' };
+    try {
+      const sessionIds = await redis.zrangebyscore(
+        CONNECTING_DEADLINES_KEY,
+        '-inf',
+        nowMs,
+        'LIMIT',
+        0,
+        limit,
+      );
+      return { status: 'FOUND', sessionIds };
+    } catch (error) {
+      console.warn('[Calling v2] Redis verbindingsdeadlinecontrole mislukt:', error.message);
+      return { status: 'UNAVAILABLE' };
+    }
+  }
+
+  async removeConnectingDeadline(sessionId) {
+    const redis = this.getRedisClient();
+    if (!redis) return { status: 'UNAVAILABLE' };
+    try {
+      await redis.zrem(CONNECTING_DEADLINES_KEY, sessionId);
+      return { status: 'APPLIED' };
+    } catch (error) {
+      console.warn('[Calling v2] Redis verbindingsdeadline verwijderen mislukt:', error.message);
+      return { status: 'UNAVAILABLE' };
+    }
+  }
 }
 
 module.exports = {
   LIVE_SESSION_TTL_SECONDS,
   TERMINAL_SESSION_TTL_SECONDS,
   RINGING_DEADLINES_KEY,
+  CONNECTING_DEADLINES_KEY,
   RedisCallV2Store,
 };
