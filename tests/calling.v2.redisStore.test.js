@@ -1,6 +1,7 @@
 const {
   LIVE_SESSION_TTL_SECONDS,
   TERMINAL_SESSION_TTL_SECONDS,
+  RINGING_DEADLINES_KEY,
   RedisCallV2Store,
 } = require('../src/calling/v2/redisStore');
 
@@ -17,6 +18,8 @@ describe('Calling v2 Redis store', () => {
     await expect(store.hasEvent(session.sessionId, 'event-123')).resolves.toEqual({ status: 'UNAVAILABLE' });
     await expect(store.commit({ currentRevision: 1, nextSession: session, eventId: 'event-123' }))
       .resolves.toEqual({ status: 'UNAVAILABLE' });
+    await expect(store.listDueRinging(Date.now())).resolves.toEqual({ status: 'UNAVAILABLE' });
+    await expect(store.removeRingingDeadline(session.sessionId)).resolves.toEqual({ status: 'UNAVAILABLE' });
   });
 
   test('creates session, participant leases and idempotency key atomically', async () => {
@@ -42,6 +45,38 @@ describe('Calling v2 Redis store', () => {
     await store.commit({ currentRevision: 1, nextSession: ended, eventId: 'event-123' });
     const args = redis.eval.mock.calls[0];
     expect(args).toContain(TERMINAL_SESSION_TTL_SECONDS);
-    expect(args[args.length - 1]).toBe('1');
+    expect(args[11]).toBe('1');
+    expect(args[12]).toBe('');
+  });
+
+  test('indexes ringing deadlines and returns due session ids', async () => {
+    const ringing = {
+      ...session,
+      state: 'RINGING',
+      revision: 2,
+      ringingDeadlineAt: '2026-01-01T00:00:45.000Z',
+    };
+    const redis = {
+      eval: jest.fn().mockResolvedValue(JSON.stringify({ status: 'APPLIED', session: JSON.stringify(ringing) })),
+      zrangebyscore: jest.fn().mockResolvedValue([session.sessionId]),
+    };
+    const store = new RedisCallV2Store(() => redis);
+
+    await store.commit({ currentRevision: 1, nextSession: ringing, eventId: 'event-123' });
+    await expect(store.listDueRinging(Date.parse(ringing.ringingDeadlineAt)))
+      .resolves.toEqual({ status: 'FOUND', sessionIds: [session.sessionId] });
+
+    const args = redis.eval.mock.calls[0];
+    expect(args[1]).toBe(5);
+    expect(args[6]).toBe(RINGING_DEADLINES_KEY);
+    expect(args[12]).toBe(Date.parse(ringing.ringingDeadlineAt));
+    expect(redis.zrangebyscore).toHaveBeenCalledWith(
+      RINGING_DEADLINES_KEY,
+      '-inf',
+      Date.parse(ringing.ringingDeadlineAt),
+      'LIMIT',
+      0,
+      100,
+    );
   });
 });

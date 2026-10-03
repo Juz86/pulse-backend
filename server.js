@@ -40,10 +40,13 @@ const registerCallingV2     = require('./src/socket/calling.v2');
 const { getSyncRequiredPayload } = require('./src/socket/sync');
 const { RedisCallV2Store } = require('./src/calling/v2/redisStore');
 const { CallV2Service } = require('./src/calling/v2/service');
-const { isCallingV2Enabled } = require('./src/calling/v2/config');
+const { getRingingTimeoutSeconds, isCallingV2Enabled } = require('./src/calling/v2/config');
+const { startCallV2TimeoutSweeper } = require('./src/calling/v2/timeouts');
 const { createCloudflareTurnCredentialsProvider } = require('./src/calling/v2/turnCredentials');
 
-const callV2Service = new CallV2Service(new RedisCallV2Store(getRedis));
+const callV2Service = new CallV2Service(new RedisCallV2Store(getRedis), {
+  ringingTimeoutMs: getRingingTimeoutSeconds() * 1000,
+});
 const getCallV2TurnCredentials = createCloudflareTurnCredentialsProvider();
 
 // ─── App URL ──────────────────────────────────────────────────────────────────
@@ -134,6 +137,16 @@ if (redisPub && redisSub) {
   } catch (e) {
     console.warn('⚠️ Socket.IO Redis adapter mislukt:', e.message);
   }
+}
+
+if (isCallingV2Enabled()) {
+  startCallV2TimeoutSweeper({
+    service: callV2Service,
+    onExpired(session) {
+      io.to(session.callerUid).emit('call:v2:updated', session);
+      io.to(session.calleeUid).emit('call:v2:updated', session);
+    },
+  });
 }
 
 // ─── Express middleware ───────────────────────────────────────────────────────

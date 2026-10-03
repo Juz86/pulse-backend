@@ -21,6 +21,7 @@ function createSession({ sessionId, requestId, callerUid, calleeUid, mediaType, 
     revision: 1,
     mediaReadyUids: [],
     iceRestartSequence: 0,
+    ringingDeadlineAt: null,
     terminalReason: null,
     terminalByUid: null,
     createdAt: now,
@@ -30,7 +31,7 @@ function createSession({ sessionId, requestId, callerUid, calleeUid, mediaType, 
 
 function reject(code) { return { ok: false, code }; }
 
-function applyCommand(session, { command, actorUid, reason, now }) {
+function applyCommand(session, { command, actorUid, reason, now, ringingDeadlineAt }) {
   if (!isParticipant(session, actorUid)) return reject('FORBIDDEN');
   if (session.state === CALL_STATES.ENDED) return reject('ALREADY_ENDED');
 
@@ -44,11 +45,14 @@ function applyCommand(session, { command, actorUid, reason, now }) {
   switch (command) {
     case CALL_COMMANDS.INVITE_READY:
       if (actorUid !== session.callerUid || session.state !== CALL_STATES.PREPARING) return reject('INVALID_TRANSITION');
+      if (!Number.isFinite(Date.parse(ringingDeadlineAt))) return reject('INVALID_REQUEST');
       next.state = CALL_STATES.RINGING;
+      next.ringingDeadlineAt = ringingDeadlineAt;
       break;
     case CALL_COMMANDS.ACCEPT:
       if (actorUid !== session.calleeUid || session.state !== CALL_STATES.RINGING) return reject('INVALID_TRANSITION');
       next.state = CALL_STATES.CONNECTING;
+      next.ringingDeadlineAt = null;
       break;
     case CALL_COMMANDS.MEDIA_CONNECTED: {
       if (![CALL_STATES.CONNECTING, CALL_STATES.ACTIVE].includes(session.state)) return reject('INVALID_TRANSITION');
@@ -66,17 +70,20 @@ function applyCommand(session, { command, actorUid, reason, now }) {
     case CALL_COMMANDS.DECLINE:
       if (actorUid !== session.calleeUid || session.state !== CALL_STATES.RINGING) return reject('INVALID_TRANSITION');
       next.state = CALL_STATES.ENDED;
+      next.ringingDeadlineAt = null;
       next.terminalReason = 'declined';
       next.terminalByUid = actorUid;
       break;
     case CALL_COMMANDS.END:
       next.state = CALL_STATES.ENDED;
+      next.ringingDeadlineAt = null;
       next.terminalReason = session.state === CALL_STATES.PREPARING ? 'cancelled' : 'hangup';
       next.terminalByUid = actorUid;
       break;
     case CALL_COMMANDS.FAIL:
       if (!CLIENT_FAILURE_REASONS.includes(reason)) return reject('INVALID_REASON');
       next.state = CALL_STATES.ENDED;
+      next.ringingDeadlineAt = null;
       next.terminalReason = reason;
       next.terminalByUid = actorUid;
       break;
@@ -86,4 +93,30 @@ function applyCommand(session, { command, actorUid, reason, now }) {
   return { ok: true, session: next };
 }
 
-module.exports = { CALL_PROTOCOL_VERSION, CALL_STATES, CALL_COMMANDS, TERMINAL_REASONS, CLIENT_FAILURE_REASONS, isParticipant, createSession, applyCommand };
+function expireRinging(session, { now }) {
+  if (session.state !== CALL_STATES.RINGING) return reject('INVALID_TRANSITION');
+  return {
+    ok: true,
+    session: {
+      ...session,
+      state: CALL_STATES.ENDED,
+      revision: session.revision + 1,
+      ringingDeadlineAt: null,
+      terminalReason: 'missed',
+      terminalByUid: null,
+      updatedAt: now,
+    },
+  };
+}
+
+module.exports = {
+  CALL_PROTOCOL_VERSION,
+  CALL_STATES,
+  CALL_COMMANDS,
+  TERMINAL_REASONS,
+  CLIENT_FAILURE_REASONS,
+  isParticipant,
+  createSession,
+  applyCommand,
+  expireRinging,
+};

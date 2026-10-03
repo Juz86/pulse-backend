@@ -1,11 +1,16 @@
 const { randomUUID } = require('crypto');
-const { CALL_STATES, createSession, applyCommand, isParticipant } = require('./protocol');
+const { CALL_STATES, CALL_COMMANDS, createSession, applyCommand, expireRinging, isParticipant } = require('./protocol');
 
 class CallV2Service {
-  constructor(store, { createId = randomUUID, now = () => new Date().toISOString() } = {}) {
+  constructor(store, {
+    createId = randomUUID,
+    now = () => new Date().toISOString(),
+    ringingTimeoutMs = 45_000,
+  } = {}) {
     this.store = store;
     this.createId = createId;
     this.now = now;
+    this.ringingTimeoutMs = ringingTimeoutMs;
   }
 
   async start({ requestId, callerUid, calleeUid, mediaType }) {
@@ -55,12 +60,50 @@ class CallV2Service {
     if (priorEvent.status === 'UNAVAILABLE') return { status: 'SERVICE_UNAVAILABLE' };
     if (priorEvent.status === 'FOUND') return { status: 'DUPLICATE', session: snapshot.session };
     if (snapshot.session.revision !== expectedRevision) return { status: 'CONFLICT', session: snapshot.session };
-    const transition = applyCommand(snapshot.session, { command, actorUid, reason, now: this.now() });
+    const transitionTime = this.now();
+    const transition = applyCommand(snapshot.session, {
+      command,
+      actorUid,
+      reason,
+      now: transitionTime,
+      ringingDeadlineAt: command === CALL_COMMANDS.INVITE_READY
+        ? new Date(Date.parse(transitionTime) + this.ringingTimeoutMs).toISOString()
+        : undefined,
+    });
     if (!transition.ok) return { status: transition.code, session: snapshot.session };
     const result = await this.store.commit({ currentRevision: expectedRevision, nextSession: transition.session, eventId });
     if (['APPLIED', 'DUPLICATE', 'CONFLICT'].includes(result.status)) return result;
     if (result.status === 'NOT_FOUND') return { status: 'NOT_FOUND' };
     return { status: 'SERVICE_UNAVAILABLE' };
+  }
+
+  async expireDueRinging({ nowMs = Date.now(), limit = 100 } = {}) {
+    const due = await this.store.listDueRinging(nowMs, limit);
+    if (due.status !== 'FOUND') return { status: 'SERVICE_UNAVAILABLE', sessions: [] };
+
+    const sessions = [];
+    for (const sessionId of due.sessionIds) {
+      const current = await this.store.get(sessionId);
+      if (current.status !== 'FOUND') {
+        if (current.status === 'NOT_FOUND') await this.store.removeRingingDeadline(sessionId);
+        continue;
+      }
+      const deadlineMs = Date.parse(current.session.ringingDeadlineAt);
+      if (current.session.state !== CALL_STATES.RINGING || !Number.isFinite(deadlineMs)) {
+        await this.store.removeRingingDeadline(sessionId);
+        continue;
+      }
+      if (deadlineMs > nowMs) continue;
+
+      const transition = expireRinging(current.session, { now: new Date(nowMs).toISOString() });
+      const result = await this.store.commit({
+        currentRevision: current.session.revision,
+        nextSession: transition.session,
+        eventId: `server:ringing-timeout:${current.session.revision}`,
+      });
+      if (result.status === 'APPLIED') sessions.push(result.session);
+    }
+    return { status: 'APPLIED', sessions };
   }
 }
 

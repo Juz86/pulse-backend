@@ -2,6 +2,7 @@ const { CALL_STATES } = require('./protocol');
 
 const LIVE_SESSION_TTL_SECONDS = 2 * 60 * 60;
 const TERMINAL_SESSION_TTL_SECONDS = 5 * 60;
+const RINGING_DEADLINES_KEY = 'pulse:calling:v2:deadlines:ringing';
 
 const CREATE_SCRIPT = `
 local existingSessionId = redis.call('GET', KEYS[4])
@@ -35,6 +36,11 @@ if ARGV[5] == '1' then
 else
   redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[4])
   redis.call('SET', KEYS[4], ARGV[3], 'EX', ARGV[4])
+end
+if ARGV[6] ~= '' then
+  redis.call('ZADD', KEYS[5], ARGV[6], ARGV[3])
+else
+  redis.call('ZREM', KEYS[5], ARGV[3])
 end
 return cjson.encode({ status = 'APPLIED', session = ARGV[2] })
 `;
@@ -97,15 +103,56 @@ class RedisCallV2Store {
     const terminal = nextSession.state === CALL_STATES.ENDED;
     const ttl = terminal ? TERMINAL_SESSION_TTL_SECONDS : LIVE_SESSION_TTL_SECONDS;
     try {
-      return parseRedisResult(await redis.eval(COMMIT_SCRIPT, 4,
+      const ringingDeadline = nextSession.state === CALL_STATES.RINGING
+        ? Date.parse(nextSession.ringingDeadlineAt)
+        : NaN;
+      return parseRedisResult(await redis.eval(COMMIT_SCRIPT, 5,
         this.sessionKey(nextSession.sessionId), this.eventKey(nextSession.sessionId, eventId),
         this.userLeaseKey(nextSession.callerUid), this.userLeaseKey(nextSession.calleeUid),
-        currentRevision, JSON.stringify(nextSession), nextSession.sessionId, ttl, terminal ? '1' : '0'));
+        RINGING_DEADLINES_KEY,
+        currentRevision, JSON.stringify(nextSession), nextSession.sessionId, ttl,
+        terminal ? '1' : '0', Number.isFinite(ringingDeadline) ? ringingDeadline : ''));
     } catch (error) {
       console.warn('[Calling v2] Redis commit mislukt:', error.message);
       return { status: 'UNAVAILABLE' };
     }
   }
+
+  async listDueRinging(nowMs, limit = 100) {
+    const redis = this.getRedisClient();
+    if (!redis) return { status: 'UNAVAILABLE' };
+    try {
+      const sessionIds = await redis.zrangebyscore(
+        RINGING_DEADLINES_KEY,
+        '-inf',
+        nowMs,
+        'LIMIT',
+        0,
+        limit,
+      );
+      return { status: 'FOUND', sessionIds };
+    } catch (error) {
+      console.warn('[Calling v2] Redis deadlinecontrole mislukt:', error.message);
+      return { status: 'UNAVAILABLE' };
+    }
+  }
+
+  async removeRingingDeadline(sessionId) {
+    const redis = this.getRedisClient();
+    if (!redis) return { status: 'UNAVAILABLE' };
+    try {
+      await redis.zrem(RINGING_DEADLINES_KEY, sessionId);
+      return { status: 'APPLIED' };
+    } catch (error) {
+      console.warn('[Calling v2] Redis deadline verwijderen mislukt:', error.message);
+      return { status: 'UNAVAILABLE' };
+    }
+  }
 }
 
-module.exports = { LIVE_SESSION_TTL_SECONDS, TERMINAL_SESSION_TTL_SECONDS, RedisCallV2Store };
+module.exports = {
+  LIVE_SESSION_TTL_SECONDS,
+  TERMINAL_SESSION_TTL_SECONDS,
+  RINGING_DEADLINES_KEY,
+  RedisCallV2Store,
+};

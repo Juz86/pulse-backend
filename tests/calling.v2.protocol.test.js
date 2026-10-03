@@ -2,6 +2,7 @@ const {
   CALL_STATES,
   createSession,
   applyCommand,
+  expireRinging,
 } = require('../src/calling/v2/protocol');
 
 function initial() {
@@ -21,6 +22,7 @@ function apply(session, command, actorUid, reason) {
     actorUid,
     reason,
     now: '2026-01-01T00:00:01.000Z',
+    ringingDeadlineAt: command === 'INVITE_READY' ? '2026-01-01T00:00:46.000Z' : undefined,
   });
 }
 
@@ -40,6 +42,27 @@ describe('Calling v2 protocol', () => {
   test('only the callee can accept a ringing call', () => {
     const ringing = apply(initial(), 'INVITE_READY', 'caller').session;
     expect(apply(ringing, 'ACCEPT', 'caller')).toEqual({ ok: false, code: 'INVALID_TRANSITION' });
+  });
+
+  test('does not enter ringing without a valid server deadline', () => {
+    const result = applyCommand(initial(), {
+      command: 'INVITE_READY',
+      actorUid: 'caller',
+      now: '2026-01-01T00:00:01.000Z',
+    });
+    expect(result).toEqual({ ok: false, code: 'INVALID_REQUEST' });
+  });
+
+  test('expires an unanswered ringing call as missed', () => {
+    const ringing = apply(initial(), 'INVITE_READY', 'caller').session;
+    const result = expireRinging(ringing, { now: '2026-01-01T00:00:46.000Z' });
+    expect(result.session).toMatchObject({
+      state: CALL_STATES.ENDED,
+      revision: 3,
+      ringingDeadlineAt: null,
+      terminalReason: 'missed',
+      terminalByUid: null,
+    });
   });
 
   test('network loss returns an active session to connecting', () => {

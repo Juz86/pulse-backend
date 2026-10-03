@@ -6,6 +6,7 @@ class MemoryStore {
     this.requests = new Map();
     this.leases = new Map();
     this.events = new Set();
+    this.ringingDeadlines = new Map();
   }
 
   async create(session) {
@@ -41,7 +42,25 @@ class MemoryStore {
       this.leases.delete(nextSession.callerUid);
       this.leases.delete(nextSession.calleeUid);
     }
+    if (nextSession.state === 'RINGING') {
+      this.ringingDeadlines.set(nextSession.sessionId, Date.parse(nextSession.ringingDeadlineAt));
+    } else {
+      this.ringingDeadlines.delete(nextSession.sessionId);
+    }
     return { status: 'APPLIED', session: nextSession };
+  }
+
+  async listDueRinging(nowMs, limit) {
+    const sessionIds = [...this.ringingDeadlines.entries()]
+      .filter(([, deadline]) => deadline <= nowMs)
+      .slice(0, limit)
+      .map(([sessionId]) => sessionId);
+    return { status: 'FOUND', sessionIds };
+  }
+
+  async removeRingingDeadline(sessionId) {
+    this.ringingDeadlines.delete(sessionId);
+    return { status: 'APPLIED' };
   }
 }
 
@@ -107,6 +126,58 @@ describe('Calling v2 service', () => {
     };
     expect((await service.command(command)).status).toBe('APPLIED');
     expect((await service.command(command)).status).toBe('DUPLICATE');
+  });
+
+  test('ends an unanswered ringing call as missed and releases both leases', async () => {
+    const { service, store } = makeService();
+    const started = await service.start({
+      requestId: 'request-123', callerUid: 'a', calleeUid: 'b', mediaType: 'audio',
+    });
+    const ringing = await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-invite',
+      expectedRevision: 1,
+      command: 'INVITE_READY',
+      actorUid: 'a',
+    });
+
+    expect(ringing.session.ringingDeadlineAt).toBe('2026-01-01T00:00:45.000Z');
+    await expect(service.expireDueRinging({ nowMs: Date.parse('2026-01-01T00:00:44.999Z') }))
+      .resolves.toEqual({ status: 'APPLIED', sessions: [] });
+    const expired = await service.expireDueRinging({ nowMs: Date.parse('2026-01-01T00:00:45.000Z') });
+
+    expect(expired.sessions).toHaveLength(1);
+    expect(expired.sessions[0]).toMatchObject({
+      state: 'ENDED',
+      terminalReason: 'missed',
+      terminalByUid: null,
+    });
+    expect(store.leases.has('a')).toBe(false);
+    expect(store.leases.has('b')).toBe(false);
+  });
+
+  test('does not expire a call that was accepted before its ringing deadline', async () => {
+    const { service } = makeService();
+    const started = await service.start({
+      requestId: 'request-123', callerUid: 'a', calleeUid: 'b', mediaType: 'audio',
+    });
+    const ringing = await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-invite',
+      expectedRevision: 1,
+      command: 'INVITE_READY',
+      actorUid: 'a',
+    });
+    await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-accept',
+      expectedRevision: ringing.session.revision,
+      command: 'ACCEPT',
+      actorUid: 'b',
+    });
+
+    await expect(service.expireDueRinging({ nowMs: Date.parse('2026-01-01T00:01:00.000Z') }))
+      .resolves.toEqual({ status: 'APPLIED', sessions: [] });
   });
 
   test('allows media only after acceptance and returns the other participant', async () => {
