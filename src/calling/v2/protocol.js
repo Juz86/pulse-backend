@@ -148,6 +148,23 @@ function expireConnecting(session, { now }) {
   };
 }
 
+function failInviteDelivery(session, { now }) {
+  if (session.state !== CALL_STATES.RINGING) return reject('INVALID_TRANSITION');
+  return {
+    ok: true,
+    session: {
+      ...session,
+      state: CALL_STATES.ENDED,
+      revision: session.revision + 1,
+      ringingDeadlineAt: null,
+      connectingDeadlineAt: null,
+      terminalReason: 'signaling_error',
+      terminalByUid: null,
+      updatedAt: now,
+    },
+  };
+}
+
 module.exports = {
   CALL_PROTOCOL_VERSION,
   CALL_STATES,
@@ -159,4 +176,5 @@ module.exports = {
   applyCommand,
   expireConnecting,
   expireRinging,
+  failInviteDelivery,
 };

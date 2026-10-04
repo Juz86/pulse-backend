@@ -9,7 +9,7 @@ async function sendPush(uid, notification, data = {}, options = {}) {
     const userDoc = await db.collection('users').doc(uid).get();
     if (!userDoc.exists) {
       tracePushResult(options, 'USER_NOT_FOUND');
-      return;
+      return pushResult('USER_NOT_FOUND');
     }
     const userData = userDoc.data();
     const devices = options.nativeAndroidOnly
@@ -26,7 +26,7 @@ async function sendPush(uid, notification, data = {}, options = {}) {
         options.nativeAndroidOnly ? 'NO_NATIVE_TOKENS' : 'NO_TOKENS',
         { tokenCount: 0 },
       );
-      return;
+      return pushResult(options.nativeAndroidOnly ? 'NO_NATIVE_TOKENS' : 'NO_TOKENS');
     }
     const stringData = Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)]));
     const message = {
@@ -71,10 +71,27 @@ async function sendPush(uid, notification, data = {}, options = {}) {
       failureCount: response.failureCount,
     });
     console.log(`📬 Push → ${uid}: ${response.successCount}/${tokens.length} bezorgd`);
+    return pushResult(response.failureCount ? 'PARTIAL' : 'SENT', {
+      tokenCount: tokens.length,
+      successCount: response.successCount,
+      failureCount: response.failureCount,
+    });
   } catch (e) {
     tracePushResult(options, 'FAILED');
     console.warn(`Push mislukt voor ${uid}:`, e.message);
+    return pushResult('FAILED');
   }
+}
+
+function pushResult(status, counts = {}) {
+  const successCount = counts.successCount || 0;
+  return {
+    status,
+    delivered: successCount > 0,
+    tokenCount: counts.tokenCount || 0,
+    successCount,
+    failureCount: counts.failureCount || 0,
+  };
 }
 
 function tracePushResult(options, status, counts = {}) {

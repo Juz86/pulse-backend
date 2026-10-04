@@ -1,5 +1,5 @@
 const mockSendEachForMulticast = jest.fn();
-const mockUpdate = jest.fn();
+const mockUpdate = jest.fn().mockResolvedValue(undefined);
 const mockDelete = jest.fn();
 const mockUserData = { fcmTokens: ['legacy-token'] };
 let mockPushDevices = [];
@@ -98,7 +98,7 @@ describe('push notifications', () => {
     const { sendIncomingCallPush } = require('../src/push');
     const log = jest.spyOn(console, 'log').mockImplementation(() => {});
 
-    await sendIncomingCallPush({
+    const result = await sendIncomingCallPush({
       protocolVersion: 2,
       sessionId: 'session-123',
       calleeUid: 'recipient',
@@ -117,6 +117,7 @@ describe('push notifications', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining(
       '"event":"FCM_SENT","sessionId":"session-123","status":"SENT"',
     ));
+    expect(result).toMatchObject({ status: 'SENT', delivered: true, successCount: 1 });
     log.mockRestore();
   });
 
@@ -132,7 +133,7 @@ describe('push notifications', () => {
     const { sendIncomingCallPush } = require('../src/push');
     const log = jest.spyOn(console, 'log').mockImplementation(() => {});
 
-    await sendIncomingCallPush({
+    const result = await sendIncomingCallPush({
       protocolVersion: 2,
       sessionId: 'session-invalid',
       calleeUid: 'recipient',
@@ -140,6 +141,29 @@ describe('push notifications', () => {
 
     expect(mockDelete).toHaveBeenCalledTimes(1);
     expect(mockUpdate).toHaveBeenCalled();
+    expect(result).toMatchObject({ status: 'PARTIAL', delivered: false, failureCount: 1 });
+    log.mockRestore();
+  });
+
+  test('reports when no native Android token exists', async () => {
+    mockPushDevices = [];
+    const { sendIncomingCallPush } = require('../src/push');
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    const result = await sendIncomingCallPush({
+      protocolVersion: 2,
+      sessionId: 'session-no-device',
+      calleeUid: 'recipient',
+    });
+
+    expect(result).toEqual({
+      status: 'NO_NATIVE_TOKENS',
+      delivered: false,
+      tokenCount: 0,
+      successCount: 0,
+      failureCount: 0,
+    });
+    expect(mockSendEachForMulticast).not.toHaveBeenCalled();
     log.mockRestore();
   });
 

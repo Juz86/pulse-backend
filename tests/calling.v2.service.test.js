@@ -199,6 +199,52 @@ describe('Calling v2 service', () => {
       .resolves.toEqual({ status: 'APPLIED', sessions: [] });
   });
 
+  test('ends a ringing session when no incoming push can be delivered', async () => {
+    const { service, store } = makeService();
+    const started = await service.start({
+      requestId: 'request-123', callerUid: 'a', calleeUid: 'b', mediaType: 'audio',
+    });
+    const ringing = await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-invite', expectedRevision: 1, command: 'INVITE_READY', actorUid: 'a',
+    });
+
+    const failed = await service.failIncomingDelivery({
+      sessionId: started.session.sessionId,
+      expectedRevision: ringing.session.revision,
+    });
+
+    expect(failed).toMatchObject({
+      status: 'APPLIED',
+      session: { state: 'ENDED', terminalReason: 'signaling_error', terminalByUid: null },
+    });
+    expect(store.leases.has('a')).toBe(false);
+    expect(store.leases.has('b')).toBe(false);
+  });
+
+  test('cannot fail incoming delivery after the callee already accepted', async () => {
+    const { service } = makeService();
+    const started = await service.start({
+      requestId: 'request-123', callerUid: 'a', calleeUid: 'b', mediaType: 'audio',
+    });
+    const ringing = await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-invite', expectedRevision: 1, command: 'INVITE_READY', actorUid: 'a',
+    });
+    const connecting = await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-accept', expectedRevision: ringing.session.revision, command: 'ACCEPT', actorUid: 'b',
+    });
+
+    const failed = await service.failIncomingDelivery({
+      sessionId: started.session.sessionId,
+      expectedRevision: ringing.session.revision,
+    });
+
+    expect(failed).toMatchObject({ status: 'CONFLICT', session: { state: 'CONNECTING' } });
+    expect(connecting.session.state).toBe('CONNECTING');
+  });
+
   test('ends a call that never becomes active after acceptance', async () => {
     const { service, store } = makeService();
     const started = await service.start({

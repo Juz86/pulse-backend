@@ -6,6 +6,7 @@ const {
   applyCommand,
   expireConnecting,
   expireRinging,
+  failInviteDelivery,
   isParticipant,
 } = require('./protocol');
 
@@ -146,6 +147,25 @@ class CallV2Service {
       if (result.status === 'APPLIED') sessions.push(result.session);
     }
     return { status: 'APPLIED', sessions };
+  }
+
+  async failIncomingDelivery({ sessionId, expectedRevision }) {
+    const current = await this.store.get(sessionId);
+    if (current.status === 'UNAVAILABLE') return { status: 'SERVICE_UNAVAILABLE' };
+    if (current.status !== 'FOUND') return { status: 'NOT_FOUND' };
+    if (current.session.revision !== expectedRevision) {
+      return { status: 'CONFLICT', session: current.session };
+    }
+    const transition = failInviteDelivery(current.session, { now: this.now() });
+    if (!transition.ok) return { status: transition.code, session: current.session };
+    const result = await this.store.commit({
+      currentRevision: expectedRevision,
+      nextSession: transition.session,
+      eventId: `server:incoming-delivery-failed:${expectedRevision}`,
+    });
+    if (['APPLIED', 'DUPLICATE', 'CONFLICT'].includes(result.status)) return result;
+    if (result.status === 'NOT_FOUND') return { status: 'NOT_FOUND' };
+    return { status: 'SERVICE_UNAVAILABLE' };
   }
 }
 

@@ -4,6 +4,7 @@ const {
   applyCommand,
   expireConnecting,
   expireRinging,
+  failInviteDelivery,
 } = require('../src/calling/v2/protocol');
 
 function initial() {
@@ -65,6 +66,17 @@ describe('Calling v2 protocol', () => {
       revision: 3,
       ringingDeadlineAt: null,
       terminalReason: 'missed',
+      terminalByUid: null,
+    });
+  });
+
+  test('ends an undeliverable incoming invite as a signaling error', () => {
+    const ringing = apply(initial(), 'INVITE_READY', 'caller').session;
+    const result = failInviteDelivery(ringing, { now: '2026-01-01T00:00:02.000Z' });
+    expect(result.session).toMatchObject({
+      state: CALL_STATES.ENDED,
+      revision: 3,
+      terminalReason: 'signaling_error',
       terminalByUid: null,
     });
   });

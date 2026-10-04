@@ -110,7 +110,24 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
         emitToUser(io, result.session.callerUid, 'call:v2:updated', result.session);
         emitToUser(io, result.session.calleeUid, 'call:v2:updated', result.session);
         if (input.command === CALL_COMMANDS.INVITE_READY) {
-          await sendIncomingCallPush(result.session);
+          const delivery = await sendIncomingCallPush(result.session);
+          if (delivery?.delivered === false) {
+            traceCall('FCM_INCOMING_DELIVERY_FAILED', {
+              sessionId: result.session.sessionId,
+              status: delivery.status,
+              state: result.session.state,
+              revision: result.session.revision,
+            });
+            const failed = await service.failIncomingDelivery({
+              sessionId: result.session.sessionId,
+              expectedRevision: result.session.revision,
+            });
+            if (failed.status === 'APPLIED') {
+              emitToUser(io, failed.session.callerUid, 'call:v2:updated', failed.session);
+              emitToUser(io, failed.session.calleeUid, 'call:v2:updated', failed.session);
+              await sendTerminalCallPush(failed.session);
+            }
+          }
         } else if (result.session.state === 'ENDED') {
           await sendTerminalCallPush(result.session);
         }

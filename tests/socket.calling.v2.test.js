@@ -99,6 +99,48 @@ describe('Calling v2 socket contract', () => {
     expect(sendIncomingCallPush).toHaveBeenCalledWith(session);
   });
 
+  test('ends ringing authoritatively when no incoming push is delivered', async () => {
+    const ringing = {
+      protocolVersion: 2,
+      sessionId: 'session-123',
+      callerUid: 'caller',
+      calleeUid: 'callee',
+      revision: 2,
+      state: 'RINGING',
+    };
+    const ended = {
+      ...ringing,
+      revision: 3,
+      state: 'ENDED',
+      terminalReason: 'signaling_error',
+    };
+    const service = {
+      command: jest.fn().mockResolvedValue({ status: 'APPLIED', session: ringing }),
+      failIncomingDelivery: jest.fn().mockResolvedValue({ status: 'APPLIED', session: ended }),
+    };
+    const sendIncomingCallPush = jest.fn().mockResolvedValue({
+      status: 'NO_NATIVE_TOKENS', delivered: false,
+    });
+    const sendTerminalCallPush = jest.fn().mockResolvedValue(undefined);
+    const { handlers, emitToUser } = harness({
+      service,
+      sendIncomingCallPush,
+      sendTerminalCallPush,
+    });
+
+    await handlers['call:v2:command']({
+      sessionId: 'session-123', eventId: 'event-123', expectedRevision: 1, command: 'INVITE_READY',
+    }, jest.fn());
+
+    expect(service.failIncomingDelivery).toHaveBeenCalledWith({
+      sessionId: 'session-123', expectedRevision: 2,
+    });
+    expect(emitToUser).toHaveBeenCalledTimes(4);
+    expect(emitToUser).toHaveBeenNthCalledWith(3, expect.anything(), 'caller', 'call:v2:updated', ended);
+    expect(emitToUser).toHaveBeenNthCalledWith(4, expect.anything(), 'callee', 'call:v2:updated', ended);
+    expect(sendTerminalCallPush).toHaveBeenCalledWith(ended);
+  });
+
   test('sends a terminal push to both participants after an applied ended transition', async () => {
     const session = {
       protocolVersion: 2,
