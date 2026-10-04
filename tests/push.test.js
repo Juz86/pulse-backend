@@ -142,4 +142,47 @@ describe('push notifications', () => {
     expect(mockUpdate).toHaveBeenCalled();
     log.mockRestore();
   });
+
+  test('sends terminal call wake-ups to both native Android participants', async () => {
+    mockPushDevices = [
+      { uid: 'caller', token: 'caller-token', transport: 'fcm_native', platform: 'android' },
+      { uid: 'callee', token: 'callee-token', transport: 'fcm_native', platform: 'android' },
+    ];
+    mockSendEachForMulticast.mockResolvedValue({
+      successCount: 1,
+      failureCount: 0,
+      responses: [{ success: true }],
+    });
+    const { sendTerminalCallPush } = require('../src/push');
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    await sendTerminalCallPush({
+      protocolVersion: 2,
+      sessionId: 'session-terminal',
+      callerUid: 'caller',
+      calleeUid: 'callee',
+      state: 'ENDED',
+      revision: 4,
+      terminalReason: 'missed',
+    });
+
+    expect(mockSendEachForMulticast).toHaveBeenCalledTimes(2);
+    expect(mockSendEachForMulticast).toHaveBeenNthCalledWith(1, {
+      tokens: ['caller-token'],
+      data: {
+        type: 'calling_v2_terminal',
+        protocolVersion: '2',
+        sessionId: 'session-terminal',
+        state: 'ENDED',
+        revision: '4',
+        terminalReason: 'missed',
+      },
+      android: { priority: 'high', ttl: 60000 },
+      webpush: { fcmOptions: { link: 'http://localhost:3000' } },
+    });
+    expect(mockSendEachForMulticast).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      tokens: ['callee-token'],
+    }));
+    log.mockRestore();
+  });
 });

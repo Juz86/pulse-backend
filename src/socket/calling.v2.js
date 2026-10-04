@@ -1,7 +1,10 @@
 const { z } = require('zod');
 const { CALL_COMMANDS, TERMINAL_REASONS } = require('../calling/v2/protocol');
 const { authorizeCallStart } = require('../calling/v2/authorization');
-const { sendIncomingCallPush: defaultSendIncomingCallPush } = require('../push');
+const {
+  sendIncomingCallPush: defaultSendIncomingCallPush,
+  sendTerminalCallPush: defaultSendTerminalCallPush,
+} = require('../push');
 const { traceCall } = require('../calling/v2/diagnostics');
 
 const id = z.string().trim().min(8).max(128);
@@ -65,6 +68,7 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
   const emitToUser = options.emitToUser || defaultEmitToUser;
   const getTurnCredentials = options.getTurnCredentials;
   const sendIncomingCallPush = options.sendIncomingCallPush || defaultSendIncomingCallPush;
+  const sendTerminalCallPush = options.sendTerminalCallPush || defaultSendTerminalCallPush;
   socket.join(callerUid);
 
   socket.on('call:v2:start', async (payload, callback = () => {}) => {
@@ -107,6 +111,8 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
         emitToUser(io, result.session.calleeUid, 'call:v2:updated', result.session);
         if (input.command === CALL_COMMANDS.INVITE_READY) {
           await sendIncomingCallPush(result.session);
+        } else if (result.session.state === 'ENDED') {
+          await sendTerminalCallPush(result.session);
         }
       }
     } catch (error) {

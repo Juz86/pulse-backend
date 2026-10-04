@@ -79,7 +79,11 @@ async function sendPush(uid, notification, data = {}, options = {}) {
 
 function tracePushResult(options, status, counts = {}) {
   if (!options.traceSessionId) return;
-  traceCall('FCM_SENT', { sessionId: options.traceSessionId, status, ...counts });
+  traceCall(options.traceEvent || 'FCM_SENT', {
+    sessionId: options.traceSessionId,
+    status,
+    ...counts,
+  });
 }
 
 async function sendIncomingCallPush(session) {
@@ -101,4 +105,28 @@ async function sendIncomingCallPush(session) {
   });
 }
 
-module.exports = { sendPush, sendIncomingCallPush };
+async function sendTerminalCallPush(session) {
+  if (!session?.sessionId || session.state !== 'ENDED' || !session.callerUid || !session.calleeUid) return;
+  traceCall('FCM_TERMINAL_SEND_REQUESTED', {
+    sessionId: session.sessionId,
+    state: session.state,
+    revision: session.revision,
+  });
+  const data = {
+    type: 'calling_v2_terminal',
+    protocolVersion: session.protocolVersion || 2,
+    sessionId: session.sessionId,
+    state: session.state,
+    revision: session.revision,
+    terminalReason: session.terminalReason || 'unknown',
+  };
+  return Promise.all([session.callerUid, session.calleeUid].map((uid) => sendPush(uid, null, data, {
+    androidPriority: 'high',
+    androidTtlMs: 60 * 1000,
+    nativeAndroidOnly: true,
+    traceSessionId: session.sessionId,
+    traceEvent: 'FCM_TERMINAL_SENT',
+  })));
+}
+
+module.exports = { sendPush, sendIncomingCallPush, sendTerminalCallPush };

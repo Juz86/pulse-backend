@@ -5,6 +5,7 @@ function harness({
   authorizeStart = async () => true,
   getTurnCredentials,
   sendIncomingCallPush = jest.fn(),
+  sendTerminalCallPush = jest.fn(),
 } = {}) {
   const handlers = {};
   const socket = {
@@ -14,9 +15,10 @@ function harness({
   const emitToUser = jest.fn();
   const io = {};
   registerCallingV2(io, socket, 'caller', {
-    service, authorizeStart, emitToUser, getTurnCredentials, sendIncomingCallPush,
+    service, authorizeStart, emitToUser, getTurnCredentials,
+    sendIncomingCallPush, sendTerminalCallPush,
   });
-  return { handlers, emitToUser, io, socket, sendIncomingCallPush };
+  return { handlers, emitToUser, io, socket, sendIncomingCallPush, sendTerminalCallPush };
 }
 
 describe('Calling v2 socket contract', () => {
@@ -95,6 +97,30 @@ describe('Calling v2 socket contract', () => {
 
     expect(sendIncomingCallPush).toHaveBeenCalledTimes(1);
     expect(sendIncomingCallPush).toHaveBeenCalledWith(session);
+  });
+
+  test('sends a terminal push to both participants after an applied ended transition', async () => {
+    const session = {
+      protocolVersion: 2,
+      sessionId: 'session-123',
+      callerUid: 'caller',
+      calleeUid: 'callee',
+      revision: 3,
+      state: 'ENDED',
+      terminalReason: 'declined',
+    };
+    const service = { command: jest.fn().mockResolvedValue({ status: 'APPLIED', session }) };
+    const sendTerminalCallPush = jest.fn().mockResolvedValue(undefined);
+    const { handlers } = harness({ service, sendTerminalCallPush });
+
+    await handlers['call:v2:command']({
+      sessionId: 'session-123',
+      eventId: 'event-123',
+      expectedRevision: 2,
+      command: 'DECLINE',
+    }, jest.fn());
+
+    expect(sendTerminalCallPush).toHaveBeenCalledWith(session);
   });
 
   test('returns only participant-authorized snapshots from the service', async () => {

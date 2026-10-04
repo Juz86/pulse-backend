@@ -47,6 +47,7 @@ const {
 } = require('./src/calling/v2/config');
 const { startCallV2TimeoutSweeper } = require('./src/calling/v2/timeouts');
 const { createCloudflareTurnCredentialsProvider } = require('./src/calling/v2/turnCredentials');
+const { sendTerminalCallPush } = require('./src/push');
 
 const callV2Service = new CallV2Service(new RedisCallV2Store(getRedis), {
   ringingTimeoutMs: getRingingTimeoutSeconds() * 1000,
@@ -147,9 +148,10 @@ if (redisPub && redisSub) {
 if (isCallingV2Enabled()) {
   startCallV2TimeoutSweeper({
     service: callV2Service,
-    onExpired(session) {
+    async onExpired(session) {
       io.to(session.callerUid).emit('call:v2:updated', session);
       io.to(session.calleeUid).emit('call:v2:updated', session);
+      await sendTerminalCallPush(session);
     },
   });
 }

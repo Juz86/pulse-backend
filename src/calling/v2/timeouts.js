@@ -29,7 +29,7 @@ function startCallV2TimeoutSweeper({
             state: session.state,
             revision: session.revision,
           });
-          onExpired(session);
+          await onExpired(session);
         }
       }
     } catch (error) {
