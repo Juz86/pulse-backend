@@ -12,9 +12,11 @@ async function sendPush(uid, notification, data = {}, options = {}) {
       return pushResult('USER_NOT_FOUND');
     }
     const userData = userDoc.data();
-    const devices = options.nativeAndroidOnly
+    const allDevices = options.nativeAndroidOnly
       ? await listPushDevices(uid, { transport: 'fcm_native', platform: 'android' })
       : [];
+    const excludedInstallationIds = new Set(options.excludeInstallationIds || []);
+    const devices = allDevices.filter(device => !excludedInstallationIds.has(device.installationId));
     const legacyTokens = options.nativeAndroidOnly ? [] : [
       ...(Array.isArray(userData.fcmTokens) ? userData.fcmTokens : []),
       ...(userData.fcmToken ? [userData.fcmToken] : []),
@@ -146,4 +148,32 @@ async function sendTerminalCallPush(session) {
   })));
 }
 
-module.exports = { sendPush, sendIncomingCallPush, sendTerminalCallPush };
+async function sendCallTakenElsewherePush(session) {
+  if (!session?.sessionId || !session?.calleeUid || !session?.acceptedInstallationId) return;
+  traceCall('FCM_TAKEN_ELSEWHERE_SEND_REQUESTED', {
+    sessionId: session.sessionId,
+    state: session.state,
+    revision: session.revision,
+  });
+  return sendPush(session.calleeUid, null, {
+    type: 'calling_v2_taken_elsewhere',
+    protocolVersion: session.protocolVersion || 2,
+    sessionId: session.sessionId,
+    revision: session.revision,
+    acceptedInstallationId: session.acceptedInstallationId,
+  }, {
+    androidPriority: 'high',
+    androidTtlMs: 60 * 1000,
+    nativeAndroidOnly: true,
+    excludeInstallationIds: [session.acceptedInstallationId],
+    traceSessionId: session.sessionId,
+    traceEvent: 'FCM_TAKEN_ELSEWHERE_SENT',
+  });
+}
+
+module.exports = {
+  sendPush,
+  sendIncomingCallPush,
+  sendTerminalCallPush,
+  sendCallTakenElsewherePush,
+};

@@ -36,6 +36,7 @@ async function registerPushDevice(uid, input) {
   const previous = previousSnapshot.exists ? previousSnapshot.data() : null;
   await ref.set({
     uid,
+    installationId: device.installationId,
     token: device.token,
     transport: device.transport,
     platform: device.platform,

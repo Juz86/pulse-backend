@@ -22,6 +22,7 @@ function apply(session, command, actorUid, reason) {
   return applyCommand(session, {
     command,
     actorUid,
+    installationId: command === 'ACCEPT' ? 'installation-callee' : undefined,
     reason,
     now: '2026-01-01T00:00:01.000Z',
     ringingDeadlineAt: command === 'INVITE_READY' ? '2026-01-01T00:00:46.000Z' : undefined,
@@ -37,6 +38,7 @@ describe('Calling v2 protocol', () => {
     expect(result.session.state).toBe(CALL_STATES.RINGING);
     result = apply(result.session, 'ACCEPT', 'callee');
     expect(result.session.state).toBe(CALL_STATES.CONNECTING);
+    expect(result.session.acceptedInstallationId).toBe('installation-callee');
     result = apply(result.session, 'MEDIA_CONNECTED', 'caller');
     expect(result.session.state).toBe(CALL_STATES.CONNECTING);
     result = apply(result.session, 'MEDIA_CONNECTED', 'callee');

@@ -93,7 +93,7 @@ describe('push device registry', () => {
     expect(mockSet).toHaveBeenNthCalledWith(
       1,
       expectedId,
-      expect.objectContaining({ uid: 'user-1' }),
+      expect.objectContaining({ uid: 'user-1', installationId: 'install-123' }),
     );
     expect(mockSet).toHaveBeenNthCalledWith(
       2,

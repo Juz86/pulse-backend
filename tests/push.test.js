@@ -47,6 +47,7 @@ describe('push notifications', () => {
     jest.clearAllMocks();
     mockPushDevices = [{
       uid: 'recipient',
+      installationId: 'installation-1',
       token: 'native-token',
       transport: 'fcm_native',
       platform: 'android',
@@ -206,6 +207,44 @@ describe('push notifications', () => {
     });
     expect(mockSendEachForMulticast).toHaveBeenNthCalledWith(2, expect.objectContaining({
       tokens: ['callee-token'],
+    }));
+    log.mockRestore();
+  });
+
+  test('sends taken-elsewhere only to non-winning Android installations', async () => {
+    mockPushDevices = [
+      {
+        uid: 'callee', installationId: 'winner-installation', token: 'winner-token',
+        transport: 'fcm_native', platform: 'android',
+      },
+      {
+        uid: 'callee', installationId: 'loser-installation', token: 'loser-token',
+        transport: 'fcm_native', platform: 'android',
+      },
+    ];
+    mockSendEachForMulticast.mockResolvedValue({
+      successCount: 1,
+      failureCount: 0,
+      responses: [{ success: true }],
+    });
+    const { sendCallTakenElsewherePush } = require('../src/push');
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    await sendCallTakenElsewherePush({
+      protocolVersion: 2,
+      sessionId: 'session-accepted',
+      calleeUid: 'callee',
+      state: 'CONNECTING',
+      revision: 3,
+      acceptedInstallationId: 'winner-installation',
+    });
+
+    expect(mockSendEachForMulticast).toHaveBeenCalledWith(expect.objectContaining({
+      tokens: ['loser-token'],
+      data: expect.objectContaining({
+        type: 'calling_v2_taken_elsewhere',
+        acceptedInstallationId: 'winner-installation',
+      }),
     }));
     log.mockRestore();
   });

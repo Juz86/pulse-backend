@@ -6,6 +6,7 @@ function harness({
   getTurnCredentials,
   sendIncomingCallPush = jest.fn(),
   sendTerminalCallPush = jest.fn(),
+  sendCallTakenElsewherePush = jest.fn(),
 } = {}) {
   const handlers = {};
   const socket = {
@@ -16,9 +17,12 @@ function harness({
   const io = {};
   registerCallingV2(io, socket, 'caller', {
     service, authorizeStart, emitToUser, getTurnCredentials,
-    sendIncomingCallPush, sendTerminalCallPush,
+    sendIncomingCallPush, sendTerminalCallPush, sendCallTakenElsewherePush,
   });
-  return { handlers, emitToUser, io, socket, sendIncomingCallPush, sendTerminalCallPush };
+  return {
+    handlers, emitToUser, io, socket,
+    sendIncomingCallPush, sendTerminalCallPush, sendCallTakenElsewherePush,
+  };
 }
 
 describe('Calling v2 socket contract', () => {
@@ -163,6 +167,35 @@ describe('Calling v2 socket contract', () => {
     }, jest.fn());
 
     expect(sendTerminalCallPush).toHaveBeenCalledWith(session);
+  });
+
+  test('notifies the other callee installations after the first accept wins', async () => {
+    const session = {
+      protocolVersion: 2,
+      sessionId: 'session-123',
+      callerUid: 'caller',
+      calleeUid: 'caller',
+      revision: 3,
+      state: 'CONNECTING',
+      acceptedInstallationId: 'installation-123',
+    };
+    const service = { command: jest.fn().mockResolvedValue({ status: 'APPLIED', session }) };
+    const sendCallTakenElsewherePush = jest.fn().mockResolvedValue(undefined);
+    const { handlers } = harness({ service, sendCallTakenElsewherePush });
+
+    await handlers['call:v2:command']({
+      sessionId: 'session-123',
+      eventId: 'event-123',
+      expectedRevision: 2,
+      command: 'ACCEPT',
+      installationId: 'installation-123',
+    }, jest.fn());
+
+    expect(service.command).toHaveBeenCalledWith(expect.objectContaining({
+      actorUid: 'caller',
+      installationId: 'installation-123',
+    }));
+    expect(sendCallTakenElsewherePush).toHaveBeenCalledWith(session);
   });
 
   test('returns only participant-authorized snapshots from the service', async () => {

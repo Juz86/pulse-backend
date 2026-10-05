@@ -35,6 +35,7 @@ function reject(code) { return { ok: false, code }; }
 function applyCommand(session, {
   command,
   actorUid,
+  installationId,
   reason,
   now,
   ringingDeadlineAt,
@@ -61,6 +62,7 @@ function applyCommand(session, {
       if (actorUid !== session.calleeUid || session.state !== CALL_STATES.RINGING) return reject('INVALID_TRANSITION');
       if (!Number.isFinite(Date.parse(connectingDeadlineAt))) return reject('INVALID_REQUEST');
       next.state = CALL_STATES.CONNECTING;
+      next.acceptedInstallationId = installationId || null;
       next.ringingDeadlineAt = null;
       next.connectingDeadlineAt = connectingDeadlineAt;
       break;

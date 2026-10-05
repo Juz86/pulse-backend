@@ -64,7 +64,7 @@ class CallV2Service {
     return access;
   }
 
-  async command({ sessionId, eventId, expectedRevision, command, actorUid, reason }) {
+  async command({ sessionId, eventId, expectedRevision, command, actorUid, reason, installationId }) {
     const snapshot = await this.snapshot({ sessionId, actorUid });
     if (snapshot.status !== 'FOUND') return snapshot;
     const priorEvent = await this.store.hasEvent(sessionId, eventId);
@@ -75,6 +75,7 @@ class CallV2Service {
     const transition = applyCommand(snapshot.session, {
       command,
       actorUid,
+      installationId,
       reason,
       now: transitionTime,
       ringingDeadlineAt: command === CALL_COMMANDS.INVITE_READY

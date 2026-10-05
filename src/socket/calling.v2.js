@@ -4,6 +4,7 @@ const { authorizeCallStart } = require('../calling/v2/authorization');
 const {
   sendIncomingCallPush: defaultSendIncomingCallPush,
   sendTerminalCallPush: defaultSendTerminalCallPush,
+  sendCallTakenElsewherePush: defaultSendCallTakenElsewherePush,
 } = require('../push');
 const { traceCall } = require('../calling/v2/diagnostics');
 
@@ -20,6 +21,7 @@ const commandSchema = z.object({
   expectedRevision: z.number().int().positive(),
   command: z.enum(Object.values(CALL_COMMANDS)),
   reason: z.enum(TERMINAL_REASONS).optional(),
+  installationId: id.optional(),
 }).strict();
 const snapshotSchema = z.object({ sessionId: id }).strict();
 const iceConfigSchema = snapshotSchema;
@@ -69,6 +71,7 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
   const getTurnCredentials = options.getTurnCredentials;
   const sendIncomingCallPush = options.sendIncomingCallPush || defaultSendIncomingCallPush;
   const sendTerminalCallPush = options.sendTerminalCallPush || defaultSendTerminalCallPush;
+  const sendCallTakenElsewherePush = options.sendCallTakenElsewherePush || defaultSendCallTakenElsewherePush;
   socket.join(callerUid);
 
   socket.on('call:v2:start', async (payload, callback = () => {}) => {
@@ -128,6 +131,8 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
               await sendTerminalCallPush(failed.session);
             }
           }
+        } else if (input.command === CALL_COMMANDS.ACCEPT && result.session.acceptedInstallationId) {
+          await sendCallTakenElsewherePush(result.session);
         } else if (result.session.state === 'ENDED') {
           await sendTerminalCallPush(result.session);
         }

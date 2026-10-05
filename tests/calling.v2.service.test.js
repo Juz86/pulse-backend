@@ -199,6 +199,37 @@ describe('Calling v2 service', () => {
       .resolves.toEqual({ status: 'APPLIED', sessions: [] });
   });
 
+  test('keeps the first accepting installation as the authoritative winner', async () => {
+    const { service } = makeService();
+    const started = await service.start({
+      requestId: 'request-123', callerUid: 'a', calleeUid: 'b', mediaType: 'audio',
+    });
+    const ringing = await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-invite', expectedRevision: 1, command: 'INVITE_READY', actorUid: 'a',
+    });
+
+    const winner = await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-accept-first', expectedRevision: ringing.session.revision,
+      command: 'ACCEPT', actorUid: 'b', installationId: 'installation-first',
+    });
+    const loser = await service.command({
+      sessionId: started.session.sessionId,
+      eventId: 'event-accept-second', expectedRevision: ringing.session.revision,
+      command: 'ACCEPT', actorUid: 'b', installationId: 'installation-second',
+    });
+
+    expect(winner).toMatchObject({
+      status: 'APPLIED',
+      session: { state: 'CONNECTING', acceptedInstallationId: 'installation-first' },
+    });
+    expect(loser).toMatchObject({
+      status: 'CONFLICT',
+      session: { state: 'CONNECTING', acceptedInstallationId: 'installation-first' },
+    });
+  });
+
   test('ends a ringing session when no incoming push can be delivered', async () => {
     const { service, store } = makeService();
     const started = await service.start({
