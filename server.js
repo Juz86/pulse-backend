@@ -229,6 +229,12 @@ io.use(async (socket, next) => {
 });
 
 // ─── Socket.IO connection handler ────────────────────────────────────────────
+const CALL_START_LIMITS = {
+  burst: { max: 5, windowMs: 60 * 1000 },
+  account: { max: 30, windowMs: 60 * 60 * 1000 },
+  recipient: { max: 6, windowMs: 10 * 60 * 1000 },
+};
+
 io.on('connection', (socket) => {
   const uid = socket.userId;
   console.log('🔌 Verbonden:', socket.id, uid);
@@ -246,7 +252,10 @@ io.on('connection', (socket) => {
     'typing:start':           makeRateLimiter(60),
     'conversation:create':    makeRateLimiter(10, 60 * 60 * 1000), // 10 per uur
     'conversation:addMember': makeRateLimiter(20),
-    'call:v2:start':          makeRateLimiter(5, 60 * 60 * 1000),
+    'call:v2:start':          makeRateLimiter(
+      CALL_START_LIMITS.burst.max,
+      CALL_START_LIMITS.burst.windowMs,
+    ),
     'call:v2:command':        makeRateLimiter(120),
     'call:v2:snapshot':       makeRateLimiter(60),
     'call:v2:ice-config':     makeRateLimiter(6),
@@ -256,7 +265,7 @@ io.on('connection', (socket) => {
   const redisLimits = {
     'conversation:create': { max: 10, windowMs: 60 * 60 * 1000 },
     'message:send':        { max: 600, windowMs: 60 * 1000 },
-    'call:v2:start':       { max: 5, windowMs: 60 * 60 * 1000 },
+    'call:v2:start':       CALL_START_LIMITS.account,
     'call:v2:command':     { max: 120, windowMs: 60 * 1000 },
     'call:v2:ice-config':  { max: 12, windowMs: 60 * 1000 },
     'call:v2:media':       { max: 4800, windowMs: 60 * 1000 },
@@ -268,15 +277,41 @@ io.on('connection', (socket) => {
     const check = limits[event];
     if (check && !check()) {
       console.warn(`[Pulse] Rate limit (lokaal): ${uid} → ${event}`);
-      if (cb) cb({ error: 'Te veel verzoeken. Wacht even.' });
+      if (cb) cb({
+        ok: false,
+        status: 'RATE_LIMITED',
+        error: 'Te veel verzoeken. Wacht even.',
+      });
       return;
     }
     // Redis cross-instance check
     const rDef = redisLimits[event];
     if (rDef && !(await checkRateLimit(uid, event, rDef.max, rDef.windowMs))) {
       console.warn(`[Pulse] Rate limit (Redis): ${uid} → ${event}`);
-      if (cb) cb({ error: 'Te veel verzoeken. Wacht even.' });
+      if (cb) cb({
+        ok: false,
+        status: 'RATE_LIMITED',
+        error: 'Te veel verzoeken. Wacht even.',
+      });
       return;
+    }
+    if (event === 'call:v2:start') {
+      const calleeUid = typeof args[0]?.calleeUid === 'string' ? args[0].calleeUid : '';
+      const recipientEvent = `call:v2:start:recipient:${calleeUid}`;
+      if (calleeUid && !(await checkRateLimit(
+        uid,
+        recipientEvent,
+        CALL_START_LIMITS.recipient.max,
+        CALL_START_LIMITS.recipient.windowMs,
+      ))) {
+        console.warn(`[Pulse] Rate limit (ontvanger): ${uid} → call:v2:start`);
+        if (cb) cb({
+          ok: false,
+          status: 'RATE_LIMITED',
+          error: 'Te veel verzoeken. Wacht even.',
+        });
+        return;
+      }
     }
     next();
   });
