@@ -14,6 +14,7 @@ function startCallV2TimeoutSweeper({
     try {
       const nowMs = now();
       const checks = [
+        ['PREPARING_TIMEOUT', await service.expireDuePreparing({ nowMs })],
         ['RINGING_TIMEOUT', await service.expireDueRinging({ nowMs })],
         ['CONNECTING_TIMEOUT', await service.expireDueConnecting({ nowMs })],
       ];

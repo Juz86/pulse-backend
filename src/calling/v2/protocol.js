@@ -9,7 +9,7 @@ function isParticipant(session, uid) {
   return session.callerUid === uid || session.calleeUid === uid;
 }
 
-function createSession({ sessionId, requestId, callerUid, calleeUid, mediaType, now }) {
+function createSession({ sessionId, requestId, callerUid, calleeUid, mediaType, now, preparingDeadlineAt }) {
   return {
     protocolVersion: CALL_PROTOCOL_VERSION,
     sessionId,
@@ -21,6 +21,7 @@ function createSession({ sessionId, requestId, callerUid, calleeUid, mediaType, 
     revision: 1,
     mediaReadyUids: [],
     iceRestartSequence: 0,
+    preparingDeadlineAt,
     ringingDeadlineAt: null,
     connectingDeadlineAt: null,
     terminalReason: null,
@@ -56,6 +57,7 @@ function applyCommand(session, {
       if (actorUid !== session.callerUid || session.state !== CALL_STATES.PREPARING) return reject('INVALID_TRANSITION');
       if (!Number.isFinite(Date.parse(ringingDeadlineAt))) return reject('INVALID_REQUEST');
       next.state = CALL_STATES.RINGING;
+      next.preparingDeadlineAt = null;
       next.ringingDeadlineAt = ringingDeadlineAt;
       break;
     case CALL_COMMANDS.ACCEPT:
@@ -90,6 +92,7 @@ function applyCommand(session, {
     case CALL_COMMANDS.DECLINE:
       if (actorUid !== session.calleeUid || session.state !== CALL_STATES.RINGING) return reject('INVALID_TRANSITION');
       next.state = CALL_STATES.ENDED;
+      next.preparingDeadlineAt = null;
       next.ringingDeadlineAt = null;
       next.connectingDeadlineAt = null;
       next.terminalReason = 'declined';
@@ -97,6 +100,7 @@ function applyCommand(session, {
       break;
     case CALL_COMMANDS.END:
       next.state = CALL_STATES.ENDED;
+      next.preparingDeadlineAt = null;
       next.ringingDeadlineAt = null;
       next.connectingDeadlineAt = null;
       next.terminalReason = session.state === CALL_STATES.PREPARING ? 'cancelled' : 'hangup';
@@ -105,6 +109,7 @@ function applyCommand(session, {
     case CALL_COMMANDS.FAIL:
       if (!CLIENT_FAILURE_REASONS.includes(reason)) return reject('INVALID_REASON');
       next.state = CALL_STATES.ENDED;
+      next.preparingDeadlineAt = null;
       next.ringingDeadlineAt = null;
       next.connectingDeadlineAt = null;
       next.terminalReason = reason;
@@ -116,6 +121,24 @@ function applyCommand(session, {
   return { ok: true, session: next };
 }
 
+function expirePreparing(session, { now }) {
+  if (session.state !== CALL_STATES.PREPARING) return reject('INVALID_TRANSITION');
+  return {
+    ok: true,
+    session: {
+      ...session,
+      state: CALL_STATES.ENDED,
+      revision: session.revision + 1,
+      preparingDeadlineAt: null,
+      ringingDeadlineAt: null,
+      connectingDeadlineAt: null,
+      terminalReason: 'invite_timeout',
+      terminalByUid: null,
+      updatedAt: now,
+    },
+  };
+}
+
 function expireRinging(session, { now }) {
   if (session.state !== CALL_STATES.RINGING) return reject('INVALID_TRANSITION');
   return {
@@ -124,6 +147,7 @@ function expireRinging(session, { now }) {
       ...session,
       state: CALL_STATES.ENDED,
       revision: session.revision + 1,
+      preparingDeadlineAt: null,
       ringingDeadlineAt: null,
       connectingDeadlineAt: null,
       terminalReason: 'missed',
@@ -141,6 +165,7 @@ function expireConnecting(session, { now }) {
       ...session,
       state: CALL_STATES.ENDED,
       revision: session.revision + 1,
+      preparingDeadlineAt: null,
       ringingDeadlineAt: null,
       connectingDeadlineAt: null,
       terminalReason: 'connect_timeout',
@@ -158,6 +183,7 @@ function failInviteDelivery(session, { now }) {
       ...session,
       state: CALL_STATES.ENDED,
       revision: session.revision + 1,
+      preparingDeadlineAt: null,
       ringingDeadlineAt: null,
       connectingDeadlineAt: null,
       terminalReason: 'signaling_error',
@@ -176,6 +202,7 @@ module.exports = {
   isParticipant,
   createSession,
   applyCommand,
+  expirePreparing,
   expireConnecting,
   expireRinging,
   failInviteDelivery,

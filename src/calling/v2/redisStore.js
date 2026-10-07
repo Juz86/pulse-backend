@@ -2,6 +2,7 @@ const { CALL_STATES } = require('./protocol');
 
 const LIVE_SESSION_TTL_SECONDS = 2 * 60 * 60;
 const TERMINAL_SESSION_TTL_SECONDS = 5 * 60;
+const PREPARING_DEADLINES_KEY = 'pulse:calling:v2:deadlines:preparing';
 const RINGING_DEADLINES_KEY = 'pulse:calling:v2:deadlines:ringing';
 const CONNECTING_DEADLINES_KEY = 'pulse:calling:v2:deadlines:connecting';
 
@@ -20,6 +21,7 @@ redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
 redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
 redis.call('SET', KEYS[3], ARGV[2], 'EX', ARGV[3])
 redis.call('SET', KEYS[4], ARGV[2], 'EX', ARGV[4])
+redis.call('ZADD', KEYS[5], ARGV[6], ARGV[2])
 return cjson.encode({ status = 'CREATED', session = ARGV[1] })
 `;
 
@@ -38,15 +40,16 @@ else
   redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[4])
   redis.call('SET', KEYS[4], ARGV[3], 'EX', ARGV[4])
 end
+redis.call('ZREM', KEYS[5], ARGV[3])
 if ARGV[6] ~= '' then
-  redis.call('ZADD', KEYS[5], ARGV[6], ARGV[3])
-else
-  redis.call('ZREM', KEYS[5], ARGV[3])
-end
-if ARGV[7] ~= '' then
-  redis.call('ZADD', KEYS[6], ARGV[7], ARGV[3])
+  redis.call('ZADD', KEYS[6], ARGV[6], ARGV[3])
 else
   redis.call('ZREM', KEYS[6], ARGV[3])
+end
+if ARGV[7] ~= '' then
+  redis.call('ZADD', KEYS[7], ARGV[7], ARGV[3])
+else
+  redis.call('ZREM', KEYS[7], ARGV[3])
 end
 return cjson.encode({ status = 'APPLIED', session = ARGV[2] })
 `;
@@ -58,7 +61,10 @@ function parseRedisResult(value) {
 }
 
 class RedisCallV2Store {
-  constructor(getRedisClient) { this.getRedisClient = getRedisClient; }
+  constructor(getRedisClient) {
+    this.getRedisClient = getRedisClient;
+    this.legacyPreparingScanComplete = false;
+  }
   sessionKey(sessionId) { return `pulse:calling:v2:session:${sessionId}`; }
   userLeaseKey(uid) { return `pulse:calling:v2:user:${uid}`; }
   requestKey(callerUid, requestId) { return `pulse:calling:v2:request:${callerUid}:${requestId}`; }
@@ -68,11 +74,13 @@ class RedisCallV2Store {
     const redis = this.getRedisClient();
     if (!redis) return { status: 'UNAVAILABLE' };
     try {
-      return parseRedisResult(await redis.eval(CREATE_SCRIPT, 4,
+      const preparingDeadline = Date.parse(session.preparingDeadlineAt);
+      return parseRedisResult(await redis.eval(CREATE_SCRIPT, 5,
         this.sessionKey(session.sessionId), this.userLeaseKey(session.callerUid),
         this.userLeaseKey(session.calleeUid), this.requestKey(session.callerUid, session.requestId),
+        PREPARING_DEADLINES_KEY,
         JSON.stringify(session), session.sessionId, LIVE_SESSION_TTL_SECONDS,
-        LIVE_SESSION_TTL_SECONDS, 'pulse:calling:v2:session:'));
+        LIVE_SESSION_TTL_SECONDS, 'pulse:calling:v2:session:', preparingDeadline));
     } catch (error) {
       console.warn('[Calling v2] Redis create mislukt:', error.message);
       return { status: 'UNAVAILABLE' };
@@ -115,15 +123,73 @@ class RedisCallV2Store {
       const connectingDeadline = nextSession.state === CALL_STATES.CONNECTING
         ? Date.parse(nextSession.connectingDeadlineAt)
         : NaN;
-      return parseRedisResult(await redis.eval(COMMIT_SCRIPT, 6,
+      return parseRedisResult(await redis.eval(COMMIT_SCRIPT, 7,
         this.sessionKey(nextSession.sessionId), this.eventKey(nextSession.sessionId, eventId),
         this.userLeaseKey(nextSession.callerUid), this.userLeaseKey(nextSession.calleeUid),
-        RINGING_DEADLINES_KEY, CONNECTING_DEADLINES_KEY,
+        PREPARING_DEADLINES_KEY, RINGING_DEADLINES_KEY, CONNECTING_DEADLINES_KEY,
         currentRevision, JSON.stringify(nextSession), nextSession.sessionId, ttl,
         terminal ? '1' : '0', Number.isFinite(ringingDeadline) ? ringingDeadline : '',
         Number.isFinite(connectingDeadline) ? connectingDeadline : ''));
     } catch (error) {
       console.warn('[Calling v2] Redis commit mislukt:', error.message);
+      return { status: 'UNAVAILABLE' };
+    }
+  }
+
+  async listDuePreparing(nowMs, limit = 100) {
+    const redis = this.getRedisClient();
+    if (!redis) return { status: 'UNAVAILABLE' };
+    try {
+      const sessionIds = await redis.zrangebyscore(
+        PREPARING_DEADLINES_KEY, '-inf', nowMs, 'LIMIT', 0, limit,
+      );
+      return { status: 'FOUND', sessionIds };
+    } catch (error) {
+      console.warn('[Calling v2] Redis voorbereidingsdeadlinecontrole mislukt:', error.message);
+      return { status: 'UNAVAILABLE' };
+    }
+  }
+
+  async listLegacyPreparing(limit = 100) {
+    if (this.legacyPreparingScanComplete) return { status: 'FOUND', sessions: [] };
+    const redis = this.getRedisClient();
+    if (!redis) return { status: 'UNAVAILABLE' };
+    try {
+      let cursor = '0';
+      const sessions = [];
+      do {
+        const [nextCursor, keys] = await redis.scan(
+          cursor, 'MATCH', 'pulse:calling:v2:session:*', 'COUNT', limit,
+        );
+        cursor = nextCursor;
+        if (keys.length > 0) {
+          const values = await redis.mget(...keys);
+          for (const value of values) {
+            if (!value) continue;
+            const session = JSON.parse(value);
+            if (session.state === CALL_STATES.PREPARING && !session.preparingDeadlineAt) {
+              sessions.push(session);
+              if (sessions.length >= limit) break;
+            }
+          }
+        }
+      } while (cursor !== '0' && sessions.length < limit);
+      if (cursor === '0' && sessions.length === 0) this.legacyPreparingScanComplete = true;
+      return { status: 'FOUND', sessions };
+    } catch (error) {
+      console.warn('[Calling v2] Redis oude voorbereidingssessies controleren mislukt:', error.message);
+      return { status: 'UNAVAILABLE' };
+    }
+  }
+
+  async removePreparingDeadline(sessionId) {
+    const redis = this.getRedisClient();
+    if (!redis) return { status: 'UNAVAILABLE' };
+    try {
+      await redis.zrem(PREPARING_DEADLINES_KEY, sessionId);
+      return { status: 'APPLIED' };
+    } catch (error) {
+      console.warn('[Calling v2] Redis voorbereidingsdeadline verwijderen mislukt:', error.message);
       return { status: 'UNAVAILABLE' };
     }
   }
@@ -194,6 +260,7 @@ class RedisCallV2Store {
 module.exports = {
   LIVE_SESSION_TTL_SECONDS,
   TERMINAL_SESSION_TTL_SECONDS,
+  PREPARING_DEADLINES_KEY,
   RINGING_DEADLINES_KEY,
   CONNECTING_DEADLINES_KEY,
   RedisCallV2Store,

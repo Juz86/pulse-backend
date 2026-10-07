@@ -10,6 +10,7 @@ describe('Calling v2 timeout sweeper', () => {
       revision: 3,
     };
     const service = {
+      expireDuePreparing: jest.fn().mockResolvedValue({ status: 'APPLIED', sessions: [] }),
       expireDueRinging: jest.fn().mockResolvedValue({ status: 'APPLIED', sessions: [session] }),
       expireDueConnecting: jest.fn().mockResolvedValue({ status: 'APPLIED', sessions: [] }),
     };
@@ -24,6 +25,7 @@ describe('Calling v2 timeout sweeper', () => {
     await new Promise(setImmediate);
     sweeper.stop();
 
+    expect(service.expireDuePreparing).toHaveBeenCalledWith({ nowMs: 1234 });
     expect(service.expireDueRinging).toHaveBeenCalledWith({ nowMs: 1234 });
     expect(service.expireDueConnecting).toHaveBeenCalledWith({ nowMs: 1234 });
     expect(onExpired).toHaveBeenCalledWith(session);

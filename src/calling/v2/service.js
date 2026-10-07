@@ -4,6 +4,7 @@ const {
   CALL_COMMANDS,
   createSession,
   applyCommand,
+  expirePreparing,
   expireConnecting,
   expireRinging,
   failInviteDelivery,
@@ -14,19 +15,30 @@ class CallV2Service {
   constructor(store, {
     createId = randomUUID,
     now = () => new Date().toISOString(),
+    preparingTimeoutMs = 30_000,
     ringingTimeoutMs = 45_000,
     connectingTimeoutMs = 30_000,
   } = {}) {
     this.store = store;
     this.createId = createId;
     this.now = now;
+    this.preparingTimeoutMs = preparingTimeoutMs;
     this.ringingTimeoutMs = ringingTimeoutMs;
     this.connectingTimeoutMs = connectingTimeoutMs;
   }
 
   async start({ requestId, callerUid, calleeUid, mediaType }) {
     if (!requestId || !callerUid || !calleeUid || callerUid === calleeUid) return { status: 'INVALID_REQUEST' };
-    const session = createSession({ sessionId: this.createId(), requestId, callerUid, calleeUid, mediaType, now: this.now() });
+    const createdAt = this.now();
+    const session = createSession({
+      sessionId: this.createId(),
+      requestId,
+      callerUid,
+      calleeUid,
+      mediaType,
+      now: createdAt,
+      preparingDeadlineAt: new Date(Date.parse(createdAt) + this.preparingTimeoutMs).toISOString(),
+    });
     const result = await this.store.create(session);
     if (['CREATED', 'IDEMPOTENT'].includes(result.status)) return result;
     if (result.status === 'BUSY') return { status: 'BUSY' };
@@ -115,6 +127,49 @@ class CallV2Service {
         currentRevision: current.session.revision,
         nextSession: transition.session,
         eventId: `server:ringing-timeout:${current.session.revision}`,
+      });
+      if (result.status === 'APPLIED') sessions.push(result.session);
+    }
+    return { status: 'APPLIED', sessions };
+  }
+
+  async expireDuePreparing({ nowMs = Date.now(), limit = 100 } = {}) {
+    const due = await this.store.listDuePreparing(nowMs, limit);
+    if (due.status !== 'FOUND') return { status: 'SERVICE_UNAVAILABLE', sessions: [] };
+
+    const sessions = [];
+    for (const sessionId of due.sessionIds) {
+      const current = await this.store.get(sessionId);
+      if (current.status !== 'FOUND') {
+        if (current.status === 'NOT_FOUND') await this.store.removePreparingDeadline(sessionId);
+        continue;
+      }
+      const deadlineMs = Date.parse(current.session.preparingDeadlineAt);
+      if (current.session.state !== CALL_STATES.PREPARING || !Number.isFinite(deadlineMs)) {
+        await this.store.removePreparingDeadline(sessionId);
+        continue;
+      }
+      if (deadlineMs > nowMs) continue;
+
+      const transition = expirePreparing(current.session, { now: new Date(nowMs).toISOString() });
+      const result = await this.store.commit({
+        currentRevision: current.session.revision,
+        nextSession: transition.session,
+        eventId: `server:preparing-timeout:${current.session.revision}`,
+      });
+      if (result.status === 'APPLIED') sessions.push(result.session);
+    }
+
+    const legacy = await this.store.listLegacyPreparing(limit);
+    if (legacy.status !== 'FOUND') return { status: 'SERVICE_UNAVAILABLE', sessions };
+    for (const current of legacy.sessions) {
+      const createdAtMs = Date.parse(current.createdAt);
+      if (!Number.isFinite(createdAtMs) || createdAtMs + this.preparingTimeoutMs > nowMs) continue;
+      const transition = expirePreparing(current, { now: new Date(nowMs).toISOString() });
+      const result = await this.store.commit({
+        currentRevision: current.revision,
+        nextSession: transition.session,
+        eventId: `server:legacy-preparing-timeout:${current.revision}`,
       });
       if (result.status === 'APPLIED') sessions.push(result.session);
     }

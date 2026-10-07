@@ -3,6 +3,7 @@ const {
   createSession,
   applyCommand,
   expireConnecting,
+  expirePreparing,
   expireRinging,
   failInviteDelivery,
 } = require('../src/calling/v2/protocol');
@@ -15,6 +16,7 @@ function initial() {
     calleeUid: 'callee',
     mediaType: 'audio',
     now: '2026-01-01T00:00:00.000Z',
+    preparingDeadlineAt: '2026-01-01T00:00:30.000Z',
   });
 }
 
@@ -33,6 +35,16 @@ function apply(session, command, actorUid, reason) {
 }
 
 describe('Calling v2 protocol', () => {
+  test('expires a call that remains in preparing', () => {
+    const result = expirePreparing(initial(), { now: '2026-01-01T00:00:30.000Z' });
+    expect(result.session).toMatchObject({
+      state: CALL_STATES.ENDED,
+      revision: 2,
+      preparingDeadlineAt: null,
+      terminalReason: 'invite_timeout',
+      terminalByUid: null,
+    });
+  });
   test('requires both peers before an accepted call becomes active', () => {
     let result = apply(initial(), 'INVITE_READY', 'caller');
     expect(result.session.state).toBe(CALL_STATES.RINGING);

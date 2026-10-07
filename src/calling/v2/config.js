@@ -9,6 +9,13 @@ function getRingingTimeoutSeconds() {
     : 45;
 }
 
+function getPreparingTimeoutSeconds() {
+  const configured = Number(process.env.PULSE_CALLING_V2_PREPARING_TIMEOUT_SECONDS);
+  return Number.isInteger(configured) && configured >= 10 && configured <= 120
+    ? configured
+    : 30;
+}
+
 function getConnectingTimeoutSeconds() {
   const configured = Number(process.env.PULSE_CALLING_V2_CONNECTING_TIMEOUT_SECONDS);
   return Number.isInteger(configured) && configured >= 10 && configured <= 120
@@ -16,4 +23,9 @@ function getConnectingTimeoutSeconds() {
     : 30;
 }
 
-module.exports = { getConnectingTimeoutSeconds, getRingingTimeoutSeconds, isCallingV2Enabled };
+module.exports = {
+  getConnectingTimeoutSeconds,
+  getPreparingTimeoutSeconds,
+  getRingingTimeoutSeconds,
+  isCallingV2Enabled,
+};

@@ -6,6 +6,7 @@ class MemoryStore {
     this.requests = new Map();
     this.leases = new Map();
     this.events = new Set();
+    this.preparingDeadlines = new Map();
     this.ringingDeadlines = new Map();
     this.connectingDeadlines = new Map();
   }
@@ -19,6 +20,7 @@ class MemoryStore {
     this.requests.set(requestKey, session.sessionId);
     this.leases.set(session.callerUid, session.sessionId);
     this.leases.set(session.calleeUid, session.sessionId);
+    this.preparingDeadlines.set(session.sessionId, Date.parse(session.preparingDeadlineAt));
     return { status: 'CREATED', session };
   }
 
@@ -43,6 +45,11 @@ class MemoryStore {
       this.leases.delete(nextSession.callerUid);
       this.leases.delete(nextSession.calleeUid);
     }
+    if (nextSession.state === 'PREPARING') {
+      this.preparingDeadlines.set(nextSession.sessionId, Date.parse(nextSession.preparingDeadlineAt));
+    } else {
+      this.preparingDeadlines.delete(nextSession.sessionId);
+    }
     if (nextSession.state === 'RINGING') {
       this.ringingDeadlines.set(nextSession.sessionId, Date.parse(nextSession.ringingDeadlineAt));
     } else {
@@ -62,6 +69,26 @@ class MemoryStore {
       .slice(0, limit)
       .map(([sessionId]) => sessionId);
     return { status: 'FOUND', sessionIds };
+  }
+
+  async listDuePreparing(nowMs, limit) {
+    const sessionIds = [...this.preparingDeadlines.entries()]
+      .filter(([, deadline]) => deadline <= nowMs)
+      .slice(0, limit)
+      .map(([sessionId]) => sessionId);
+    return { status: 'FOUND', sessionIds };
+  }
+
+  async listLegacyPreparing() {
+    const sessions = [...this.sessions.values()].filter(
+      (session) => session.state === 'PREPARING' && !session.preparingDeadlineAt,
+    );
+    return { status: 'FOUND', sessions };
+  }
+
+  async removePreparingDeadline(sessionId) {
+    this.preparingDeadlines.delete(sessionId);
+    return { status: 'APPLIED' };
   }
 
   async removeRingingDeadline(sessionId) {
@@ -110,6 +137,47 @@ describe('Calling v2 service', () => {
     await service.start({ requestId: 'request-123', callerUid: 'a', calleeUid: 'b', mediaType: 'audio' });
     await expect(service.start({ requestId: 'request-456', callerUid: 'c', calleeUid: 'b', mediaType: 'video' }))
       .resolves.toEqual({ status: 'BUSY' });
+  });
+
+  test('ends a call stuck in preparing and releases both leases', async () => {
+    const { service, store } = makeService();
+    const started = await service.start({
+      requestId: 'request-123', callerUid: 'a', calleeUid: 'b', mediaType: 'audio',
+    });
+
+    expect(started.session.preparingDeadlineAt).toBe('2026-01-01T00:00:30.000Z');
+    await expect(service.expireDuePreparing({ nowMs: Date.parse('2026-01-01T00:00:29.999Z') }))
+      .resolves.toEqual({ status: 'APPLIED', sessions: [] });
+    const expired = await service.expireDuePreparing({
+      nowMs: Date.parse('2026-01-01T00:00:30.000Z'),
+    });
+
+    expect(expired.sessions).toHaveLength(1);
+    expect(expired.sessions[0]).toMatchObject({
+      state: 'ENDED', terminalReason: 'invite_timeout', terminalByUid: null,
+    });
+    expect(store.leases.has('a')).toBe(false);
+    expect(store.leases.has('b')).toBe(false);
+  });
+
+  test('releases a legacy preparing call that has no deadline index', async () => {
+    const { service, store } = makeService();
+    const started = await service.start({
+      requestId: 'request-123', callerUid: 'a', calleeUid: 'b', mediaType: 'audio',
+    });
+    const legacy = { ...started.session };
+    delete legacy.preparingDeadlineAt;
+    store.sessions.set(legacy.sessionId, legacy);
+    store.preparingDeadlines.delete(legacy.sessionId);
+
+    const expired = await service.expireDuePreparing({
+      nowMs: Date.parse('2026-01-01T00:00:30.000Z'),
+    });
+
+    expect(expired.sessions).toHaveLength(1);
+    expect(expired.sessions[0]).toMatchObject({ state: 'ENDED', terminalReason: 'invite_timeout' });
+    expect(store.leases.has('a')).toBe(false);
+    expect(store.leases.has('b')).toBe(false);
   });
 
   test('prevents non-participants from reading a session', async () => {
