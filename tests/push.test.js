@@ -1,7 +1,7 @@
 const mockSendEachForMulticast = jest.fn();
 const mockUpdate = jest.fn().mockResolvedValue(undefined);
 const mockDelete = jest.fn();
-const mockUserData = { fcmTokens: ['legacy-token'] };
+const mockUserData = { fcmTokens: ['legacy-token'], displayName: 'Yushua' };
 let mockPushDevices = [];
 
 function mockPushDeviceQuery(filters = []) {
@@ -102,6 +102,7 @@ describe('push notifications', () => {
     const result = await sendIncomingCallPush({
       protocolVersion: 2,
       sessionId: 'session-123',
+      callerUid: 'caller',
       calleeUid: 'recipient',
     });
 
@@ -111,6 +112,7 @@ describe('push notifications', () => {
         type: 'calling_v2_incoming',
         protocolVersion: '2',
         sessionId: 'session-123',
+        callerDisplayName: 'Yushua',
       },
       android: { priority: 'high', ttl: 30000 },
       webpush: { fcmOptions: { link: 'http://localhost:3000' } },
@@ -137,6 +139,7 @@ describe('push notifications', () => {
     const result = await sendIncomingCallPush({
       protocolVersion: 2,
       sessionId: 'session-invalid',
+      callerUid: 'caller',
       calleeUid: 'recipient',
     });
 
@@ -154,6 +157,7 @@ describe('push notifications', () => {
     const result = await sendIncomingCallPush({
       protocolVersion: 2,
       sessionId: 'session-no-device',
+      callerUid: 'caller',
       calleeUid: 'recipient',
     });
 

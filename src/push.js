@@ -105,17 +105,34 @@ function tracePushResult(options, status, counts = {}) {
   });
 }
 
+async function callDisplayName(uid) {
+  if (!uid) return 'Pulse-gebruiker';
+  try {
+    const snapshot = await db.collection('users').doc(uid).get();
+    if (!snapshot.exists) return 'Pulse-gebruiker';
+    const user = snapshot.data() || {};
+    const candidate = [user.displayName, user.name, user.username]
+      .find((value) => typeof value === 'string' && value.trim());
+    return candidate ? candidate.trim().slice(0, 160) : 'Pulse-gebruiker';
+  } catch (error) {
+    console.warn(`Bellernaam ophalen mislukt voor ${uid}:`, error.message);
+    return 'Pulse-gebruiker';
+  }
+}
+
 async function sendIncomingCallPush(session) {
-  if (!session?.sessionId || !session?.calleeUid) return;
+  if (!session?.sessionId || !session?.callerUid || !session?.calleeUid) return;
   traceCall('FCM_SEND_REQUESTED', {
     sessionId: session.sessionId,
     state: session.state,
     revision: session.revision,
   });
+  const callerDisplayName = await callDisplayName(session.callerUid);
   return sendPush(session.calleeUid, null, {
     type: 'calling_v2_incoming',
     protocolVersion: session.protocolVersion || 2,
     sessionId: session.sessionId,
+    callerDisplayName,
   }, {
     androidPriority: 'high',
     androidTtlMs: 30 * 1000,
