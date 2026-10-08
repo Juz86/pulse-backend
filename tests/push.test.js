@@ -1,7 +1,11 @@
 const mockSendEachForMulticast = jest.fn();
 const mockUpdate = jest.fn().mockResolvedValue(undefined);
 const mockDelete = jest.fn();
-const mockUserData = { fcmTokens: ['legacy-token'], displayName: 'Yushua' };
+const mockUserData = {
+  fcmTokens: ['legacy-token'],
+  displayName: 'Yushua',
+  photoURL: 'https://cdn.pulse.test/yushua.jpg',
+};
 let mockPushDevices = [];
 
 function mockPushDeviceQuery(filters = []) {
@@ -113,6 +117,7 @@ describe('push notifications', () => {
         protocolVersion: '2',
         sessionId: 'session-123',
         callerDisplayName: 'Yushua',
+        callerPhotoURL: 'https://cdn.pulse.test/yushua.jpg',
       },
       android: { priority: 'high', ttl: 30000 },
       webpush: { fcmOptions: { link: 'http://localhost:3000' } },

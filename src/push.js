@@ -105,18 +105,31 @@ function tracePushResult(options, status, counts = {}) {
   });
 }
 
-async function callDisplayName(uid) {
-  if (!uid) return 'Pulse-gebruiker';
+async function callProfile(uid) {
+  const fallback = { displayName: 'Pulse-gebruiker', photoURL: '' };
+  if (!uid) return fallback;
   try {
     const snapshot = await db.collection('users').doc(uid).get();
-    if (!snapshot.exists) return 'Pulse-gebruiker';
+    if (!snapshot.exists) return fallback;
     const user = snapshot.data() || {};
     const candidate = [user.displayName, user.name, user.username]
       .find((value) => typeof value === 'string' && value.trim());
-    return candidate ? candidate.trim().slice(0, 160) : 'Pulse-gebruiker';
+    let photoURL = '';
+    if (typeof user.photoURL === 'string' && user.photoURL.length <= 2_048) {
+      try {
+        const parsed = new URL(user.photoURL);
+        if (parsed.protocol === 'https:') photoURL = parsed.toString();
+      } catch {
+        photoURL = '';
+      }
+    }
+    return {
+      displayName: candidate ? candidate.trim().slice(0, 160) : fallback.displayName,
+      photoURL,
+    };
   } catch (error) {
-    console.warn(`Bellernaam ophalen mislukt voor ${uid}:`, error.message);
-    return 'Pulse-gebruiker';
+    console.warn(`Bellerprofiel ophalen mislukt voor ${uid}:`, error.message);
+    return fallback;
   }
 }
 
@@ -127,12 +140,13 @@ async function sendIncomingCallPush(session) {
     state: session.state,
     revision: session.revision,
   });
-  const callerDisplayName = await callDisplayName(session.callerUid);
+  const caller = await callProfile(session.callerUid);
   return sendPush(session.calleeUid, null, {
     type: 'calling_v2_incoming',
     protocolVersion: session.protocolVersion || 2,
     sessionId: session.sessionId,
-    callerDisplayName,
+    callerDisplayName: caller.displayName,
+    callerPhotoURL: caller.photoURL,
   }, {
     androidPriority: 'high',
     androidTtlMs: 30 * 1000,
