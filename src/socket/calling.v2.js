@@ -7,6 +7,7 @@ const {
   sendCallTakenElsewherePush: defaultSendCallTakenElsewherePush,
 } = require('../push');
 const { traceCall } = require('../calling/v2/diagnostics');
+const { recordCallHistory: defaultRecordCallHistory } = require('../calling/v2/callHistory');
 
 const id = z.string().trim().min(8).max(128);
 const uid = z.string().trim().min(1).max(128);
@@ -25,6 +26,12 @@ const commandSchema = z.object({
 }).strict();
 const snapshotSchema = z.object({ sessionId: id }).strict();
 const iceConfigSchema = snapshotSchema;
+const browserClientSchema = z.object({
+  platform: z.literal('web'),
+  capability: z.literal('audio'),
+  installationId: id,
+  available: z.boolean(),
+}).strict();
 const mediaBase = { sessionId: id, messageId: id };
 const mediaSchema = z.discriminatedUnion('type', [
   z.object({
@@ -52,6 +59,19 @@ function defaultEmitToUser(io, targetUid, event, payload) {
   io.to(targetUid).emit(event, payload);
 }
 
+async function defaultHasBrowserCallReceiver(io, targetUid) {
+  if (typeof io?.in !== 'function') return false;
+  try {
+    const sockets = await io.in(targetUid).fetchSockets();
+    return sockets.some((candidate) => (
+      candidate.data?.callPlatform === 'web'
+      && candidate.data?.canReceiveAudioCalls === true
+    ));
+  } catch {
+    return false;
+  }
+}
+
 function parse(schema, payload, callback) {
   const result = schema.safeParse(payload);
   if (result.success) return result.data;
@@ -72,7 +92,19 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
   const sendIncomingCallPush = options.sendIncomingCallPush || defaultSendIncomingCallPush;
   const sendTerminalCallPush = options.sendTerminalCallPush || defaultSendTerminalCallPush;
   const sendCallTakenElsewherePush = options.sendCallTakenElsewherePush || defaultSendCallTakenElsewherePush;
+  const recordCallHistory = options.recordCallHistory || defaultRecordCallHistory;
+  const hasBrowserCallReceiver = options.hasBrowserCallReceiver || defaultHasBrowserCallReceiver;
   socket.join(callerUid);
+
+  socket.on('call:v2:client-ready', (payload, callback = () => {}) => {
+    const input = parse(browserClientSchema, payload, callback);
+    if (!input) return;
+    socket.data = socket.data || {};
+    socket.data.callPlatform = input.platform;
+    socket.data.callInstallationId = input.installationId;
+    socket.data.canReceiveAudioCalls = input.available;
+    callback({ ok: true, status: input.available ? 'AVAILABLE' : 'UNAVAILABLE' });
+  });
 
   socket.on('call:v2:start', async (payload, callback = () => {}) => {
     const input = parse(startSchema, payload, callback);
@@ -113,8 +145,16 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
         emitToUser(io, result.session.callerUid, 'call:v2:updated', result.session);
         emitToUser(io, result.session.calleeUid, 'call:v2:updated', result.session);
         if (input.command === CALL_COMMANDS.INVITE_READY) {
-          const delivery = await sendIncomingCallPush(result.session);
-          if (delivery?.delivered === false) {
+          const [delivery, browserDeliveryAvailable] = await Promise.all([
+            sendIncomingCallPush(result.session),
+            hasBrowserCallReceiver(io, result.session.calleeUid),
+          ]);
+          traceCall('INCOMING_ROUTES_RESOLVED', {
+            sessionId: result.session.sessionId,
+            nativeDelivered: delivery?.delivered === true,
+            browserAvailable: browserDeliveryAvailable,
+          });
+          if (delivery?.delivered === false && !browserDeliveryAvailable) {
             traceCall('FCM_INCOMING_DELIVERY_FAILED', {
               sessionId: result.session.sessionId,
               status: delivery.status,
@@ -135,6 +175,24 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
           await sendCallTakenElsewherePush(result.session);
         } else if (result.session.state === 'ENDED') {
           await sendTerminalCallPush(result.session);
+          if (['missed', 'declined'].includes(result.session.terminalReason)) {
+            try {
+              const history = await recordCallHistory(result.session);
+              if (['CREATED', 'DUPLICATE'].includes(history.status)) {
+                const historyPayload = {
+                  conversationId: history.conversationId,
+                  sessionId: result.session.sessionId,
+                };
+                if (history.status === 'CREATED' && history.message) {
+                  io.to(history.conversationId).emit('message:received', history.message);
+                }
+                emitToUser(io, result.session.callerUid, 'call-history:updated', historyPayload);
+                emitToUser(io, result.session.calleeUid, 'call-history:updated', historyPayload);
+              }
+            } catch (error) {
+              console.error('[Calling v2] Oproepgeschiedenis opslaan mislukt:', error.message);
+            }
+          }
         }
       }
     } catch (error) {
@@ -219,4 +277,7 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
   });
 };
 
-module.exports.schemas = { startSchema, commandSchema, snapshotSchema, iceConfigSchema, mediaSchema };
+module.exports.schemas = {
+  startSchema, commandSchema, snapshotSchema, iceConfigSchema, mediaSchema, browserClientSchema,
+};
+module.exports.defaultHasBrowserCallReceiver = defaultHasBrowserCallReceiver;

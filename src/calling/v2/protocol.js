@@ -103,7 +103,11 @@ function applyCommand(session, {
       next.preparingDeadlineAt = null;
       next.ringingDeadlineAt = null;
       next.connectingDeadlineAt = null;
-      next.terminalReason = session.state === CALL_STATES.PREPARING ? 'cancelled' : 'hangup';
+      next.terminalReason = session.state === CALL_STATES.PREPARING
+        ? 'cancelled'
+        : session.state === CALL_STATES.RINGING && actorUid === session.callerUid
+          ? 'missed'
+          : 'hangup';
       next.terminalByUid = actorUid;
       break;
     case CALL_COMMANDS.FAIL:

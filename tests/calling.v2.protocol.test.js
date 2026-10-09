@@ -162,6 +162,17 @@ describe('Calling v2 protocol', () => {
     });
   });
 
+  test('records caller hangup while ringing as a missed incoming call', () => {
+    const ringing = apply(initial(), 'INVITE_READY', 'caller').session;
+    const result = apply(ringing, 'END', 'caller');
+
+    expect(result.session).toMatchObject({
+      state: CALL_STATES.ENDED,
+      terminalReason: 'missed',
+      terminalByUid: 'caller',
+    });
+  });
+
   test('rejects unsupported failure reasons', () => {
     expect(apply(initial(), 'FAIL', 'caller', 'made_up')).toEqual({ ok: false, code: 'INVALID_REASON' });
     expect(apply(initial(), 'FAIL', 'caller', 'declined')).toEqual({ ok: false, code: 'INVALID_REASON' });

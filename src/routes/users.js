@@ -354,10 +354,11 @@ module.exports = (io, onlineUsers) => {
         const historyRules = await resolveConversationHistoryRules(conv.members || []);
         const isAttachmentSummary = conv.lastMessageType === 'attachment';
         const isContactSummary = conv.lastMessageType === 'contact';
+        const isCallSummary = conv.lastMessageType === 'call';
 
         const shouldHidePreview = Number(historyRules?.chatRetentionDays ?? COMM_RETENTION_DAYS) === 0;
 
-        if (!shouldHidePreview || isAttachmentSummary || isContactSummary) return;
+        if (!shouldHidePreview || isAttachmentSummary || isContactSummary || isCallSummary) return;
 
         if (conv.lastMessage || conv.lastMessageAt || conv.lastMessageType) {
           const update = {

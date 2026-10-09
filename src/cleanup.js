@@ -88,6 +88,8 @@ async function syncConversationSummary(convDoc, convData = {}) {
     await convDoc.ref.update({
       lastMessage: null,
       lastMessageAt: null,
+      lastMessageType: admin.firestore.FieldValue.delete(),
+      lastCallEvent: admin.firestore.FieldValue.delete(),
       updatedAt: convData.createdAt || null,
     });
     return;
@@ -95,9 +97,22 @@ async function syncConversationSummary(convDoc, convData = {}) {
 
   const latestData = latestSnap.docs[0].data() || {};
   const latestCreatedAt = latestData.createdAt || convData.updatedAt || convData.createdAt || null;
+  const latestType = latestData.type || latestData.messageType || 'text';
   const update = {
     lastMessage: summarizeMessageForConversation(latestData),
     lastMessageAt: latestCreatedAt,
+    lastMessageType: latestType,
+    lastCallEvent: latestType === 'call'
+      ? {
+          sessionId: latestData.sessionId,
+          mediaType: latestData.mediaType || 'audio',
+          terminalReason: latestData.terminalReason || 'missed',
+          callerUid: latestData.callerUid,
+          calleeUid: latestData.calleeUid,
+          occurredAt: latestData.occurredAt,
+          presentations: latestData.presentations || {},
+        }
+      : admin.firestore.FieldValue.delete(),
     updatedAt: latestCreatedAt,
   };
 

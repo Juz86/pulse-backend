@@ -1,4 +1,5 @@
 const registerCallingV2 = require('../src/socket/calling.v2');
+const { defaultHasBrowserCallReceiver } = registerCallingV2;
 
 function harness({
   service = {},
@@ -7,6 +8,8 @@ function harness({
   sendIncomingCallPush = jest.fn(),
   sendTerminalCallPush = jest.fn(),
   sendCallTakenElsewherePush = jest.fn(),
+  recordCallHistory = jest.fn(),
+  hasBrowserCallReceiver = jest.fn().mockResolvedValue(false),
 } = {}) {
   const handlers = {};
   const socket = {
@@ -14,14 +17,17 @@ function harness({
     on: jest.fn((event, handler) => { handlers[event] = handler; }),
   };
   const emitToUser = jest.fn();
-  const io = {};
+  const roomEmit = jest.fn();
+  const io = { to: jest.fn(() => ({ emit: roomEmit })) };
   registerCallingV2(io, socket, 'caller', {
     service, authorizeStart, emitToUser, getTurnCredentials,
-    sendIncomingCallPush, sendTerminalCallPush, sendCallTakenElsewherePush,
+    sendIncomingCallPush, sendTerminalCallPush, sendCallTakenElsewherePush, recordCallHistory,
+    hasBrowserCallReceiver,
   });
   return {
-    handlers, emitToUser, io, socket,
-    sendIncomingCallPush, sendTerminalCallPush, sendCallTakenElsewherePush,
+    handlers, emitToUser, roomEmit, io, socket,
+    sendIncomingCallPush, sendTerminalCallPush, sendCallTakenElsewherePush, recordCallHistory,
+    hasBrowserCallReceiver,
   };
 }
 
@@ -29,6 +35,36 @@ describe('Calling v2 socket contract', () => {
   test('joins the authenticated user room for cross-instance delivery', () => {
     const { socket } = harness();
     expect(socket.join).toHaveBeenCalledWith('caller');
+  });
+
+  test('marks a browser available only after its call listener is ready', () => {
+    const { handlers, socket } = harness();
+    const callback = jest.fn();
+    handlers['call:v2:client-ready']({
+      platform: 'web',
+      capability: 'audio',
+      installationId: 'installation-123',
+      available: true,
+    }, callback);
+
+    expect(socket.data).toMatchObject({
+      callPlatform: 'web',
+      callInstallationId: 'installation-123',
+      canReceiveAudioCalls: true,
+    });
+    expect(callback).toHaveBeenCalledWith({ ok: true, status: 'AVAILABLE' });
+  });
+
+  test('detects call-ready browser sockets in a user room', async () => {
+    const io = {
+      in: jest.fn(() => ({
+        fetchSockets: jest.fn().mockResolvedValue([
+          { data: { callPlatform: 'web', canReceiveAudioCalls: false } },
+          { data: { callPlatform: 'web', canReceiveAudioCalls: true } },
+        ]),
+      })),
+    };
+    await expect(defaultHasBrowserCallReceiver(io, 'callee')).resolves.toBe(true);
   });
 
   test('rejects malformed start payloads before calling the service', async () => {
@@ -145,6 +181,33 @@ describe('Calling v2 socket contract', () => {
     expect(sendTerminalCallPush).toHaveBeenCalledWith(ended);
   });
 
+  test('keeps ringing when an active browser can receive the call', async () => {
+    const ringing = {
+      protocolVersion: 2,
+      sessionId: 'session-123',
+      callerUid: 'caller',
+      calleeUid: 'callee',
+      revision: 2,
+      state: 'RINGING',
+    };
+    const service = {
+      command: jest.fn().mockResolvedValue({ status: 'APPLIED', session: ringing }),
+      failIncomingDelivery: jest.fn(),
+    };
+    const sendIncomingCallPush = jest.fn().mockResolvedValue({
+      status: 'NO_NATIVE_TOKENS', delivered: false,
+    });
+    const hasBrowserCallReceiver = jest.fn().mockResolvedValue(true);
+    const { handlers } = harness({ service, sendIncomingCallPush, hasBrowserCallReceiver });
+
+    await handlers['call:v2:command']({
+      sessionId: 'session-123', eventId: 'event-123', expectedRevision: 1, command: 'INVITE_READY',
+    }, jest.fn());
+
+    expect(hasBrowserCallReceiver).toHaveBeenCalledWith(expect.anything(), 'callee');
+    expect(service.failIncomingDelivery).not.toHaveBeenCalled();
+  });
+
   test('sends a terminal push to both participants after an applied ended transition', async () => {
     const session = {
       protocolVersion: 2,
@@ -167,6 +230,78 @@ describe('Calling v2 socket contract', () => {
     }, jest.fn());
 
     expect(sendTerminalCallPush).toHaveBeenCalledWith(session);
+  });
+
+  test('publishes a durable missed-call update when the caller ends a ringing call', async () => {
+    const session = {
+      protocolVersion: 2,
+      sessionId: 'session-123',
+      callerUid: 'caller',
+      calleeUid: 'callee',
+      revision: 3,
+      state: 'ENDED',
+      terminalReason: 'missed',
+    };
+    const service = { command: jest.fn().mockResolvedValue({ status: 'APPLIED', session }) };
+    const recordCallHistory = jest.fn().mockResolvedValue({
+      status: 'CREATED',
+      conversationId: 'conversation-123',
+      message: { id: 'call-message-123', type: 'call' },
+    });
+    const { handlers, emitToUser, io, roomEmit } = harness({ service, recordCallHistory });
+
+    await handlers['call:v2:command']({
+      sessionId: 'session-123',
+      eventId: 'event-123',
+      expectedRevision: 2,
+      command: 'END',
+    }, jest.fn());
+
+    expect(recordCallHistory).toHaveBeenCalledWith(session);
+    expect(emitToUser.mock.calls).toHaveLength(4);
+    expect(io.to).toHaveBeenCalledWith('conversation-123');
+    expect(roomEmit).toHaveBeenCalledWith(
+      'message:received',
+      { id: 'call-message-123', type: 'call' },
+    );
+    expect(emitToUser).toHaveBeenCalledWith(
+      expect.anything(),
+      'callee',
+      'call-history:updated',
+      { conversationId: 'conversation-123', sessionId: 'session-123' },
+    );
+  });
+
+  test('stores and publishes declined calls', async () => {
+    const session = {
+      protocolVersion: 2,
+      sessionId: 'session-123',
+      callerUid: 'caller',
+      calleeUid: 'callee',
+      revision: 3,
+      state: 'ENDED',
+      terminalReason: 'declined',
+    };
+    const service = { command: jest.fn().mockResolvedValue({ status: 'APPLIED', session }) };
+    const recordCallHistory = jest.fn().mockResolvedValue({
+      status: 'CREATED',
+      conversationId: 'conversation-123',
+      message: { id: 'declined-call-123', type: 'call', text: 'Oproep geweigerd' },
+    });
+    const { handlers, roomEmit } = harness({ service, recordCallHistory });
+
+    await handlers['call:v2:command']({
+      sessionId: 'session-123',
+      eventId: 'event-123',
+      expectedRevision: 2,
+      command: 'DECLINE',
+    }, jest.fn());
+
+    expect(recordCallHistory).toHaveBeenCalledWith(session);
+    expect(roomEmit).toHaveBeenCalledWith(
+      'message:received',
+      { id: 'declined-call-123', type: 'call', text: 'Oproep geweigerd' },
+    );
   });
 
   test('notifies the other callee installations after the first accept wins', async () => {

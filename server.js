@@ -49,6 +49,7 @@ const {
 const { startCallV2TimeoutSweeper } = require('./src/calling/v2/timeouts');
 const { createCloudflareTurnCredentialsProvider } = require('./src/calling/v2/turnCredentials');
 const { sendTerminalCallPush } = require('./src/push');
+const { recordCallHistory } = require('./src/calling/v2/callHistory');
 
 const callV2Service = new CallV2Service(new RedisCallV2Store(getRedis), {
   preparingTimeoutMs: getPreparingTimeoutSeconds() * 1000,
@@ -154,6 +155,26 @@ if (isCallingV2Enabled()) {
       io.to(session.callerUid).emit('call:v2:updated', session);
       io.to(session.calleeUid).emit('call:v2:updated', session);
       await sendTerminalCallPush(session);
+      if (session.terminalReason === 'missed') {
+        try {
+          const history = await recordCallHistory(session);
+          if (['CREATED', 'DUPLICATE'].includes(history.status)) {
+            const payload = {
+              conversationId: history.conversationId,
+              sessionId: session.sessionId,
+            };
+            if (history.status === 'CREATED' && history.message) {
+              io.to(history.conversationId).emit('message:received', history.message);
+            }
+            io.to(session.callerUid).emit('call-history:updated', payload);
+            io.to(session.calleeUid).emit('call-history:updated', payload);
+          } else if (history.status === 'CONVERSATION_NOT_FOUND') {
+            console.warn(`[Calling v2] Geen gesprek gevonden voor gemiste oproep ${session.sessionId}`);
+          }
+        } catch (error) {
+          console.error('[Calling v2] Gemiste oproep opslaan mislukt:', error.message);
+        }
+      }
     },
   });
 }
@@ -216,6 +237,8 @@ io.use(async (socket, next) => {
   try {
     const decoded = await admin.auth().verifyIdToken(token);
     socket.userId = decoded.uid;
+    socket.data.callPlatform = socket.handshake.auth?.callPlatform === 'web' ? 'web' : null;
+    socket.data.canReceiveAudioCalls = false;
     next();
   } catch {
     try {
@@ -223,6 +246,8 @@ io.use(async (socket, next) => {
       const decodedNative = jwt.verify(token, nativeSecret);
       if (!decodedNative?.sub) return next(new Error('Ongeldig token.'));
       socket.userId = String(decodedNative.sub);
+      socket.data.callPlatform = null;
+      socket.data.canReceiveAudioCalls = false;
       next();
     } catch {
       next(new Error('Ongeldig token.'));
