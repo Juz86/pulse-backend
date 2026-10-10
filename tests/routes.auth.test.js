@@ -73,6 +73,13 @@ function buildApp() {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 describe('POST /api/send-code', () => {
+  const { transporter, otpDel } = require('../src/email');
+
+  beforeEach(() => {
+    transporter.sendMail.mockResolvedValue({ messageId: 'test' });
+    otpDel.mockClear();
+  });
+
   it('weigert ongeldig e-mailadres', async () => {
     const res = await request(buildApp()).post('/api/send-code').send({ email: 'geen-email' });
     expect(res.status).toBe(400);
@@ -83,6 +90,16 @@ describe('POST /api/send-code', () => {
     const res = await request(buildApp()).post('/api/send-code').send({ email: 'test@example.com' });
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
+  });
+
+  it('meldt geen succes wanneer de verificatiemail niet kan worden bezorgd', async () => {
+    transporter.sendMail.mockRejectedValueOnce(new Error('Provider weigert e-mail'));
+
+    const res = await request(buildApp()).post('/api/send-code').send({ email: 'test@example.com' });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('E-mail versturen mislukt.');
+    expect(otpDel).toHaveBeenCalledWith('test@example.com');
   });
 });
 
