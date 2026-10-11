@@ -23,6 +23,12 @@ Every request uses a Socket.IO acknowledgement containing `ok`, `status` and,
 when available, `session`. A stale `expectedRevision` returns `CONFLICT` with
 the latest snapshot. Retrying the same `requestId` or `eventId` is idempotent.
 
+After `INVITE_READY`, native Android installations receive a high-priority,
+data-only FCM wake-up containing `sessionId`, caller presentation fields and
+`mediaType`. The media type is an early UI hint so a background video call can
+open with the correct permissions; the authenticated session snapshot remains
+authoritative.
+
 ## Authoritative states
 
 `PREPARING -> RINGING -> CONNECTING -> ACTIVE -> ENDED`

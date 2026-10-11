@@ -108,6 +108,7 @@ describe('push notifications', () => {
       sessionId: 'session-123',
       callerUid: 'caller',
       calleeUid: 'recipient',
+      mediaType: 'video',
     });
 
     expect(mockSendEachForMulticast).toHaveBeenCalledWith({
@@ -118,6 +119,7 @@ describe('push notifications', () => {
         sessionId: 'session-123',
         callerDisplayName: 'Yushua',
         callerPhotoURL: 'https://cdn.pulse.test/yushua.jpg',
+        mediaType: 'video',
       },
       android: { priority: 'high', ttl: 30000 },
       webpush: { fcmOptions: { link: 'http://localhost:3000' } },

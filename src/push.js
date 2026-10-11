@@ -147,6 +147,7 @@ async function sendIncomingCallPush(session) {
     sessionId: session.sessionId,
     callerDisplayName: caller.displayName,
     callerPhotoURL: caller.photoURL,
+    mediaType: session.mediaType === 'video' ? 'video' : 'audio',
   }, {
     androidPriority: 'high',
     androidTtlMs: 30 * 1000,
