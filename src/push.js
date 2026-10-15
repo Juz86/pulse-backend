@@ -160,6 +160,7 @@ async function sendMessagePush({
     type: 'pulse_message',
     convId: conversationId,
     messageId,
+    senderUid,
     senderDisplayName: displayName,
     senderPhotoURL: sender.photoURL,
     body: notificationBody,
@@ -218,14 +219,29 @@ async function sendTerminalCallPush(session) {
     state: session.state,
     revision: session.revision,
     terminalReason: session.terminalReason || 'unknown',
+    mediaType: session.mediaType === 'video' ? 'video' : 'audio',
   };
-  return Promise.all([session.callerUid, session.calleeUid].map((uid) => sendPush(uid, null, data, {
-    androidPriority: 'high',
-    androidTtlMs: 60 * 1000,
-    nativeAndroidOnly: true,
-    traceSessionId: session.sessionId,
-    traceEvent: 'FCM_TERMINAL_SENT',
-  })));
+  const caller = session.terminalReason === 'missed'
+    ? await callProfile(session.callerUid)
+    : null;
+  return Promise.all([session.callerUid, session.calleeUid].map((uid) => {
+    const recipientData = uid === session.calleeUid && caller
+      ? {
+          ...data,
+          peerUid: session.callerUid,
+          peerDisplayName: caller.displayName,
+          peerPhotoURL: caller.photoURL,
+          showMissedNotification: session.terminalReason === 'missed',
+        }
+      : data;
+    return sendPush(uid, null, recipientData, {
+      androidPriority: 'high',
+      androidTtlMs: 60 * 1000,
+      nativeAndroidOnly: true,
+      traceSessionId: session.sessionId,
+      traceEvent: 'FCM_TERMINAL_SENT',
+    });
+  }));
 }
 
 async function sendCallTakenElsewherePush(session) {

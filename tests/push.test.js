@@ -113,6 +113,7 @@ describe('push notifications', () => {
         type: 'pulse_message',
         convId: 'conversation-1',
         messageId: 'message-1',
+        senderUid: 'sender',
         senderDisplayName: 'Yousef',
         senderPhotoURL: 'https://cdn.pulse.test/yushua.jpg',
         body: 'Hallo',
@@ -252,7 +253,7 @@ describe('push notifications', () => {
     });
 
     expect(mockSendEachForMulticast).toHaveBeenCalledTimes(2);
-    expect(mockSendEachForMulticast).toHaveBeenNthCalledWith(1, {
+    expect(mockSendEachForMulticast.mock.calls).toEqual(expect.arrayContaining([[{
       tokens: ['caller-token'],
       data: {
         type: 'calling_v2_terminal',
@@ -261,13 +262,28 @@ describe('push notifications', () => {
         state: 'ENDED',
         revision: '4',
         terminalReason: 'missed',
+        mediaType: 'audio',
       },
       android: { priority: 'high', ttl: 60000 },
       webpush: { fcmOptions: { link: 'http://localhost:3000' } },
-    });
-    expect(mockSendEachForMulticast).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    }], [{
       tokens: ['callee-token'],
-    }));
+      data: {
+        type: 'calling_v2_terminal',
+        protocolVersion: '2',
+        sessionId: 'session-terminal',
+        state: 'ENDED',
+        revision: '4',
+        terminalReason: 'missed',
+        mediaType: 'audio',
+        peerUid: 'caller',
+        peerDisplayName: 'Yushua',
+        peerPhotoURL: 'https://cdn.pulse.test/yushua.jpg',
+        showMissedNotification: 'true',
+      },
+      android: { priority: 'high', ttl: 60000 },
+      webpush: { fcmOptions: { link: 'http://localhost:3000' } },
+    }]]));
     log.mockRestore();
   });
 
