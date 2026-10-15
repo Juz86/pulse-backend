@@ -2,6 +2,7 @@ const { randomUUID } = require('crypto');
 const { admin, db } = require('../firebase');
 const { verifyAuth } = require('../middleware');
 const { onlineUsers } = require('../state');
+const { sendMessagePush } = require('../push');
 
 function isServiceReady() {
   return String(process.env.FIREBASE_ENABLED || '').toLowerCase() === 'true';
@@ -383,6 +384,22 @@ module.exports = (io) => {
         if (!sockets) return;
         sockets.forEach((sid) => io.to(sid).emit('message:received', realtimePayload));
       });
+
+      const offlineRecipients = (convData.members || []).filter((memberUid) => (
+        memberUid !== req.uid && !onlineUsers[memberUid]?.size
+      ));
+      if (offlineRecipients.length > 0) {
+        const safePreview = buildEncryptedPreview({ messageType, sharedContact });
+        Promise.all(offlineRecipients.map((recipientUid) => sendMessagePush({
+          recipientUid,
+          senderUid: req.uid,
+          conversationId,
+          messageId: msgRef.id,
+          body: safePreview,
+        }))).catch((error) => {
+          console.warn('Versleutelde bericht-push mislukt:', error.message);
+        });
+      }
 
       res.json({ ok: true, messageId: msgRef.id });
     } catch (err) {

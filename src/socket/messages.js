@@ -1,6 +1,6 @@
 const { admin, db } = require('../firebase');
 const { queueMessage } = require('../redis');
-const { sendPush } = require('../push');
+const { sendPush, sendMessagePush } = require('../push');
 const { schemas, validate } = require('../validate');
 const { resolveConversationHistoryRules } = require('../cleanup');
 const { isFeatureEnabled } = require('../featureFlags');
@@ -187,10 +187,14 @@ module.exports = function registerMessages(io, socket, uid) {
             const batch = offlineMembers.slice(i, i + BATCH_SIZE);
             await Promise.all(batch.map(async (memberUid) => {
               await queueMessage(memberUid, savedMsg);
-              await sendPush(memberUid,
-                { title: senderName, body: verifiedMessage.text?.substring(0, 100) || 'Nieuw bericht' },
-                { convId }
-              );
+              await sendMessagePush({
+                recipientUid: memberUid,
+                senderUid: verifiedMessage.senderId,
+                senderDisplayName: senderName,
+                conversationId: convId,
+                messageId: savedMsg.id,
+                body: verifiedMessage.text?.substring(0, 100) || 'Nieuw bericht',
+              });
             }));
           }
 

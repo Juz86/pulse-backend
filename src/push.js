@@ -16,12 +16,14 @@ async function sendPush(uid, notification, data = {}, options = {}) {
       ? await listPushDevices(uid, { transport: 'fcm_native', platform: 'android' })
       : [];
     const excludedInstallationIds = new Set(options.excludeInstallationIds || []);
+    const excludedTokens = new Set(options.excludeTokens || []);
     const devices = allDevices.filter(device => !excludedInstallationIds.has(device.installationId));
     const legacyTokens = options.nativeAndroidOnly ? [] : [
       ...(Array.isArray(userData.fcmTokens) ? userData.fcmTokens : []),
       ...(userData.fcmToken ? [userData.fcmToken] : []),
     ];
-    const tokens = [...new Set([...devices.map((device) => device.token), ...legacyTokens])];
+    const tokens = [...new Set([...devices.map((device) => device.token), ...legacyTokens])]
+      .filter(token => !excludedTokens.has(token));
     if (!tokens.length) {
       tracePushResult(
         options,
@@ -133,6 +135,52 @@ async function callProfile(uid) {
   }
 }
 
+async function sendMessagePush({
+  recipientUid,
+  senderUid,
+  senderDisplayName,
+  conversationId,
+  messageId,
+  body,
+  sentAtMs = Date.now(),
+}) {
+  if (!recipientUid || !senderUid || !conversationId || !messageId) return;
+  const [sender, nativeDevices] = await Promise.all([
+    callProfile(senderUid),
+    listPushDevices(recipientUid, { transport: 'fcm_native', platform: 'android' }),
+  ]);
+  const displayName = (typeof senderDisplayName === 'string' && senderDisplayName.trim())
+    ? senderDisplayName.trim().slice(0, 160)
+    : sender.displayName;
+  const notificationBody = (typeof body === 'string' && body.trim())
+    ? body.trim().slice(0, 500)
+    : 'Nieuw bericht';
+  const nativeTokens = [...new Set(nativeDevices.map(device => device.token).filter(Boolean))];
+  const nativeData = {
+    type: 'pulse_message',
+    convId: conversationId,
+    messageId,
+    senderDisplayName: displayName,
+    senderPhotoURL: sender.photoURL,
+    body: notificationBody,
+    sentAt: sentAtMs,
+  };
+
+  const [nativeResult, compatibleResult] = await Promise.all([
+    sendPush(recipientUid, null, nativeData, {
+      androidPriority: 'high',
+      nativeAndroidOnly: true,
+    }),
+    sendPush(
+      recipientUid,
+      { title: displayName, body: notificationBody },
+      { convId: conversationId },
+      { excludeTokens: nativeTokens },
+    ),
+  ]);
+  return { native: nativeResult, compatible: compatibleResult };
+}
+
 async function sendIncomingCallPush(session) {
   if (!session?.sessionId || !session?.callerUid || !session?.calleeUid) return;
   traceCall('FCM_SEND_REQUESTED', {
@@ -205,6 +253,7 @@ async function sendCallTakenElsewherePush(session) {
 
 module.exports = {
   sendPush,
+  sendMessagePush,
   sendIncomingCallPush,
   sendTerminalCallPush,
   sendCallTakenElsewherePush,

@@ -88,6 +88,55 @@ describe('push notifications', () => {
     }));
   });
 
+  test('sends message avatars to native Android and keeps compatible push for web', async () => {
+    mockSendEachForMulticast.mockResolvedValue({
+      successCount: 1,
+      failureCount: 0,
+      responses: [{ success: true }],
+    });
+    const { sendMessagePush } = require('../src/push');
+
+    await sendMessagePush({
+      recipientUid: 'recipient',
+      senderUid: 'sender',
+      senderDisplayName: 'Yousef',
+      conversationId: 'conversation-1',
+      messageId: 'message-1',
+      body: 'Hallo',
+      sentAtMs: 1728936780000,
+    });
+
+    expect(mockSendEachForMulticast).toHaveBeenCalledTimes(2);
+    expect(mockSendEachForMulticast.mock.calls).toEqual(expect.arrayContaining([[{
+      tokens: ['native-token'],
+      data: {
+        type: 'pulse_message',
+        convId: 'conversation-1',
+        messageId: 'message-1',
+        senderDisplayName: 'Yousef',
+        senderPhotoURL: 'https://cdn.pulse.test/yushua.jpg',
+        body: 'Hallo',
+        sentAt: '1728936780000',
+      },
+      android: { priority: 'high' },
+      webpush: { fcmOptions: { link: 'http://localhost:3000' } },
+    }], [{
+      tokens: ['legacy-token'],
+      notification: { title: 'Yousef', body: 'Hallo' },
+      data: { convId: 'conversation-1' },
+      android: {
+        priority: 'normal',
+        notification: {
+          channelId: 'pulse_messages',
+          priority: 'default',
+          visibility: 'public',
+          sound: 'default',
+        },
+      },
+      webpush: { fcmOptions: { link: 'http://localhost:3000' } },
+    }]]));
+  });
+
   test('sends incoming calls only to native Android device tokens', async () => {
     mockPushDevices.push({
       uid: 'recipient',
