@@ -50,6 +50,7 @@ const { startCallV2TimeoutSweeper } = require('./src/calling/v2/timeouts');
 const { createCloudflareTurnCredentialsProvider } = require('./src/calling/v2/turnCredentials');
 const { sendTerminalCallPush } = require('./src/push');
 const { recordCallHistory } = require('./src/calling/v2/callHistory');
+const { verifySocketDevice } = require('./src/e2ee/v2/deviceAudience');
 
 const callV2Service = new CallV2Service(new RedisCallV2Store(getRedis), {
   preparingTimeoutMs: getPreparingTimeoutSeconds() * 1000,
@@ -234,25 +235,49 @@ app.use(callingV2NativeAuthRouter());
 io.use(async (socket, next) => {
   const token = socket.handshake.auth?.token;
   if (!token) return next(new Error('Authenticatie vereist.'));
+  let userId = null;
+  let callPlatform = null;
   try {
     const decoded = await admin.auth().verifyIdToken(token);
-    socket.userId = decoded.uid;
-    socket.data.callPlatform = socket.handshake.auth?.callPlatform === 'web' ? 'web' : null;
-    socket.data.canReceiveAudioCalls = false;
-    next();
+    userId = decoded.uid;
+    callPlatform = socket.handshake.auth?.callPlatform === 'web' ? 'web' : null;
   } catch {
     try {
       const nativeSecret = process.env.NATIVE_AUTH_JWT_SECRET || process.env.JWT_SECRET || 'dev-native-secret-change-me';
       const decodedNative = jwt.verify(token, nativeSecret);
       if (!decodedNative?.sub) return next(new Error('Ongeldig token.'));
-      socket.userId = String(decodedNative.sub);
-      socket.data.callPlatform = null;
-      socket.data.canReceiveAudioCalls = false;
-      next();
+      userId = String(decodedNative.sub);
     } catch {
-      next(new Error('Ongeldig token.'));
+      return next(new Error('Ongeldig token.'));
     }
   }
+
+  socket.userId = userId;
+  socket.data.callPlatform = callPlatform;
+  socket.data.canReceiveAudioCalls = false;
+
+  const requestedDeviceId = socket.handshake.auth?.e2eeDeviceId;
+  const v2Enabled = String(process.env.E2EE_V2_ENABLED || '').toLowerCase() === 'true';
+  if (requestedDeviceId && v2Enabled) {
+    try {
+      const binding = await verifySocketDevice({
+        database: db,
+        userId,
+        deviceId: requestedDeviceId,
+      });
+      if (
+        binding.platform === 'web'
+        && String(process.env.E2EE_V2_WEB_PROVIDER_ENABLED || '').toLowerCase() !== 'true'
+      ) {
+        return next(new Error('E2EE v2 is niet beschikbaar voor dit platform.'));
+      }
+      socket.data.e2eeDeviceId = binding.deviceId;
+      socket.data.e2eeDeviceRoom = binding.room;
+    } catch {
+      return next(new Error('E2EE-apparaat is niet geautoriseerd.'));
+    }
+  }
+  return next();
 });
 
 // ─── Socket.IO connection handler ────────────────────────────────────────────
@@ -265,6 +290,10 @@ const CALL_START_LIMITS = {
 io.on('connection', (socket) => {
   const uid = socket.userId;
   console.log('🔌 Verbonden:', socket.id, uid);
+
+  if (socket.data.e2eeDeviceRoom) {
+    socket.join(socket.data.e2eeDeviceRoom);
+  }
 
   // Socket.IO may not replay events that happened while this device was
   // offline. The client uses this versioned signal to reconcile its cached

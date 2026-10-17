@@ -336,6 +336,28 @@ describe('e2ee routes', () => {
     ]));
   });
 
+  test('POST /messages/send blocks the legacy protocol for a v2_required conversation', async () => {
+    mockState.conversations['conv-1'].e2eeState = 'v2_required';
+    const messageCount = mockState.messages['conv-1'].length;
+    const response = await request(buildApp())
+      .post('/messages/send')
+      .set('x-test-uid', 'user-1')
+      .send({
+        conversationId: 'conv-1',
+        senderDeviceId: 'dev-sender',
+        ciphertext: 'Zm9v',
+        recipientPayloads: [{
+          recipientUserId: 'user-2',
+          recipientDeviceId: 'dev-recipient',
+          encryptedMessageKey: 'mock-key-1',
+        }],
+      });
+
+    expect(response.status).toBe(409);
+    expect(response.body).toEqual({ error: 'v2_required' });
+    expect(mockState.messages['conv-1']).toHaveLength(messageCount);
+  });
+
   test('GET /messages/feed/:convId returns encrypted feed view for recipient device', async () => {
     mockState.messages['conv-1'].push({
       id: 'msg-1',

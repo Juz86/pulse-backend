@@ -3,6 +3,7 @@ const { admin, db } = require('../firebase');
 const { verifyAuth } = require('../middleware');
 const { onlineUsers } = require('../state');
 const { sendMessagePush } = require('../push');
+const { isE2EEV2Enabled, registerE2EEV2Routes } = require('../e2ee/v2/routes');
 
 function isServiceReady() {
   return String(process.env.FIREBASE_ENABLED || '').toLowerCase() === 'true';
@@ -134,6 +135,8 @@ function buildRealtimeServicePayload(message) {
 module.exports = (io) => {
   const router = require('express').Router();
 
+  registerE2EEV2Routes(router, io);
+
   router.get('/readyz', (_req, res) => {
     const ready = isServiceReady();
     res.json({
@@ -145,6 +148,7 @@ module.exports = (io) => {
         keyBundles: ready,
         encryptedMessages: ready,
         receipts: ready,
+        e2eeV2: ready && isE2EEV2Enabled(),
       },
     });
   });
@@ -322,6 +326,9 @@ module.exports = (io) => {
       if (!convDoc.exists) return res.status(404).json({ error: 'conversation_not_found' });
       const convData = convDoc.data() || {};
       if (!(convData.members || []).includes(req.uid)) return res.status(403).json({ error: 'Geen toegang.' });
+      if (convData.e2eeState === 'v2_required') {
+        return res.status(409).json({ error: 'v2_required' });
+      }
 
       const senderDeviceDoc = await db.collection('users').doc(req.uid).collection('devices').doc(senderDeviceId).get();
       if (!senderDeviceDoc.exists || senderDeviceDoc.data()?.status !== 'active') {

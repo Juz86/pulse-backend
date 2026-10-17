@@ -59,6 +59,13 @@ module.exports = function registerMessages(io, socket, uid) {
         if (typeof callback === 'function') callback({ error: 'Geen toegang tot dit gesprek.' });
         return;
       }
+      if (convMemberDoc.data()?.e2eeState === 'v2_required') {
+        if (typeof callback === 'function') callback({
+          error: 'Dit gesprek vereist end-to-end versleuteling.',
+          code: 'v2_required',
+        });
+        return;
+      }
 
       // Blokkeer check (alleen 1-op-1 gesprekken)
       const convDataCheck = convMemberDoc.data();
