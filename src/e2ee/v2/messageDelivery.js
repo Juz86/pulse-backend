@@ -62,6 +62,7 @@ function assertExpectedEnvelopes(submitted, expected) {
 function createMessageDeliveryService({ database, firebaseAdmin }) {
   const serverTimestamp = () => firebaseAdmin.firestore.FieldValue.serverTimestamp();
   const deleteField = () => firebaseAdmin.firestore.FieldValue.delete();
+  const arrayRemove = (value) => firebaseAdmin.firestore.FieldValue.arrayRemove(value);
 
   async function sendMessage(senderUserId, message) {
     const conversationRef = database.collection('conversations').doc(message.conversationId);
@@ -182,6 +183,7 @@ function createMessageDeliveryService({ database, firebaseAdmin }) {
         messageType: message.messageType,
         requestDigest,
         recipientAudiences,
+        pendingRecipientAudiences: recipientAudiences,
         recipientDeviceCount: recipientAudiences.length,
         text: 'Versleuteld bericht',
         createdAt: timestamp,
@@ -206,6 +208,7 @@ function createMessageDeliveryService({ database, firebaseAdmin }) {
           messageType: message.messageType,
           envelopeType: envelope.envelopeType,
           ciphertext: envelope.ciphertext,
+          deliveryState: 'pending',
           createdAt: timestamp,
         });
       });
@@ -262,12 +265,107 @@ function createMessageDeliveryService({ database, firebaseAdmin }) {
       throw new E2EEV2Error(403, 'v2_message_access_denied');
     }
     return {
-      ...envelope,
+      protocol: envelope.protocol,
+      protocolVersion: envelope.protocolVersion,
+      messageId: envelope.messageId,
+      conversationId: envelope.conversationId,
+      clientMessageId: envelope.clientMessageId,
+      senderUserId: envelope.senderUserId,
+      senderDeviceId: envelope.senderDeviceId,
+      senderSignalDeviceId: envelope.senderSignalDeviceId,
+      senderIdentityVersion: envelope.senderIdentityVersion,
+      recipientUserId: envelope.recipientUserId,
+      recipientDeviceId: envelope.recipientDeviceId,
+      messageType: envelope.messageType,
+      envelopeType: envelope.envelopeType,
+      ciphertext: envelope.ciphertext,
       createdAt: normalizeTimestamp(envelope.createdAt),
     };
   }
 
-  return { getEnvelope, sendMessage };
+  async function listMessageFeed({ userId, deviceId, conversationId, limit = 50, offset = 0 }) {
+    const conversationRef = database.collection('conversations').doc(conversationId);
+    const [conversationSnapshot, deviceSnapshot] = await Promise.all([
+      conversationRef.get(),
+      deviceRef(database, userId, deviceId).get(),
+    ]);
+    if (!conversationSnapshot.exists) {
+      throw new E2EEV2Error(404, 'conversation_not_found');
+    }
+    if (!(conversationSnapshot.data()?.members || []).includes(userId)) {
+      throw new E2EEV2Error(403, 'v2_message_access_denied');
+    }
+    if (!deviceSnapshot.exists || !isActiveV2Device(deviceSnapshot.data())) {
+      throw new E2EEV2Error(403, 'v2_recipient_device_not_capable');
+    }
+
+    const audience = { recipientUserId: userId, recipientDeviceId: deviceId };
+    const snapshot = await conversationRef.collection('messages')
+      .where('pendingRecipientAudiences', 'array-contains', audience)
+      .get();
+
+    return snapshot.docs.map((messageSnapshot) => {
+      const message = messageSnapshot.data() || {};
+      return {
+        protocol: message.protocol,
+        protocolVersion: message.protocolVersion,
+        conversationId,
+        messageId: messageSnapshot.id,
+        createdAt: normalizeTimestamp(message.createdAt),
+      };
+    }).sort((left, right) => {
+      const timeDiff = Date.parse(left.createdAt || '') - Date.parse(right.createdAt || '');
+      return timeDiff || left.messageId.localeCompare(right.messageId);
+    }).slice(offset, offset + limit);
+  }
+
+  async function acknowledgeMessage({ userId, deviceId, conversationId, messageId }) {
+    const conversationRef = database.collection('conversations').doc(conversationId);
+    const messageRef = conversationRef.collection('messages').doc(messageId);
+    const envelopeRef = messageRef.collection('deviceEnvelopes').doc(
+      deviceAudienceId(userId, deviceId),
+    );
+    const audience = { recipientUserId: userId, recipientDeviceId: deviceId };
+
+    return database.runTransaction(async (transaction) => {
+      const [conversationSnapshot, deviceSnapshot, messageSnapshot, envelopeSnapshot] = await Promise.all([
+        transaction.get(conversationRef),
+        transaction.get(deviceRef(database, userId, deviceId)),
+        transaction.get(messageRef),
+        transaction.get(envelopeRef),
+      ]);
+      if (!conversationSnapshot.exists || !messageSnapshot.exists || !envelopeSnapshot.exists) {
+        throw new E2EEV2Error(404, 'v2_message_not_found');
+      }
+      if (!(conversationSnapshot.data()?.members || []).includes(userId)) {
+        throw new E2EEV2Error(403, 'v2_message_access_denied');
+      }
+      if (!deviceSnapshot.exists || !isActiveV2Device(deviceSnapshot.data())) {
+        throw new E2EEV2Error(403, 'v2_recipient_device_not_capable');
+      }
+      const envelope = envelopeSnapshot.data() || {};
+      if (envelope.recipientUserId !== userId || envelope.recipientDeviceId !== deviceId) {
+        throw new E2EEV2Error(403, 'v2_message_access_denied');
+      }
+      if (envelope.deliveryState === 'decrypted') {
+        return { messageId, idempotent: true };
+      }
+      if (envelope.deliveryState !== 'pending') {
+        throw new E2EEV2Error(409, 'v2_delivery_state_invalid');
+      }
+
+      transaction.update(envelopeRef, {
+        deliveryState: 'decrypted',
+        decryptedAt: serverTimestamp(),
+      });
+      transaction.update(messageRef, {
+        pendingRecipientAudiences: arrayRemove(audience),
+      });
+      return { messageId, idempotent: false };
+    });
+  }
+
+  return { acknowledgeMessage, getEnvelope, listMessageFeed, sendMessage };
 }
 
 module.exports = {

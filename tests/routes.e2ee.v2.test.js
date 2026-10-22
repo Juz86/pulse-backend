@@ -9,7 +9,9 @@ const mockLifecycleService = {
   rotateDeviceKeys: jest.fn(),
 };
 const mockMessageService = {
+  acknowledgeMessage: jest.fn(),
   getEnvelope: jest.fn(),
+  listMessageFeed: jest.fn(),
   sendMessage: jest.fn(),
 };
 const mockIoEmit = jest.fn();
@@ -144,6 +146,17 @@ describe('pulse_e2ee_v2 routes', () => {
       envelopeType: 'prekey',
       ciphertext: 'ZW5jcnlwdGVk',
       createdAt: '2026-10-17T08:00:00.000Z',
+    });
+    mockMessageService.listMessageFeed.mockResolvedValue([{
+      protocol: 'pulse_e2ee_v2',
+      protocolVersion: 2,
+      conversationId: 'conversation-1',
+      messageId: 'message-1',
+      createdAt: '2026-10-17T08:00:00.000Z',
+    }]);
+    mockMessageService.acknowledgeMessage.mockResolvedValue({
+      messageId: 'message-1',
+      idempotent: false,
     });
   });
 
@@ -337,5 +350,47 @@ describe('pulse_e2ee_v2 routes', () => {
       messageId: 'message-1',
     });
     expect(response.body.recipientDeviceId).toBe('device-b1');
+  });
+
+  test('acknowledges a decrypted envelope for the authenticated device', async () => {
+    const response = await request(buildApp())
+      .post('/v2/conversations/conversation-1/messages/message-1/ack')
+      .set('x-test-uid', 'user-b')
+      .send({ deviceId: 'device-b1' });
+
+    expect(response.status).toBe(200);
+    expect(mockMessageService.acknowledgeMessage).toHaveBeenCalledWith({
+      userId: 'user-b',
+      deviceId: 'device-b1',
+      conversationId: 'conversation-1',
+      messageId: 'message-1',
+    });
+    expect(response.body).toEqual({ ok: true, messageId: 'message-1', idempotent: false });
+  });
+
+  test('returns a contentless message feed for the authenticated device', async () => {
+    const response = await request(buildApp())
+      .get('/v2/conversations/conversation-1/messages?deviceId=device-b1&limit=25&offset=0')
+      .set('x-test-uid', 'user-b');
+
+    expect(response.status).toBe(200);
+    expect(mockMessageService.listMessageFeed).toHaveBeenCalledWith({
+      userId: 'user-b',
+      deviceId: 'device-b1',
+      conversationId: 'conversation-1',
+      limit: 25,
+      offset: 0,
+    });
+    expect(response.body.messages).toHaveLength(1);
+    expect(JSON.stringify(response.body)).not.toContain('ciphertext');
+  });
+
+  test('rejects invalid feed pagination before calling the message service', async () => {
+    const response = await request(buildApp())
+      .get('/v2/conversations/conversation-1/messages?deviceId=device-b1&limit=101');
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({ error: 'v2_limit_invalid' });
+    expect(mockMessageService.listMessageFeed).not.toHaveBeenCalled();
   });
 });

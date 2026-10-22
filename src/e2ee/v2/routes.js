@@ -241,6 +241,59 @@ function registerE2EEV2Routes(router, io) {
   });
 
   router.get(
+    '/v2/conversations/:conversationId/messages',
+    verifyAuth,
+    async (req, res) => {
+      const deviceId = String(req.query.deviceId || '');
+      const limit = Number(req.query.limit || 50);
+      const offset = Number(req.query.offset || 0);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deviceId)) {
+        return res.status(400).json({ error: 'v2_device_id_invalid' });
+      }
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return res.status(400).json({ error: 'v2_limit_invalid' });
+      }
+      if (!Number.isInteger(offset) || offset < 0 || offset > 1000) {
+        return res.status(400).json({ error: 'v2_offset_invalid' });
+      }
+      try {
+        const messages = await messageService.listMessageFeed({
+          userId: req.uid,
+          deviceId,
+          conversationId: req.params.conversationId,
+          limit,
+          offset,
+        });
+        res.json({ messages });
+      } catch (error) {
+        sendError(res, error, 'v2 berichtenfeed ophalen fout:');
+      }
+    },
+  );
+
+  router.post(
+    '/v2/conversations/:conversationId/messages/:messageId/ack',
+    verifyAuth,
+    async (req, res) => {
+      const deviceId = String(req.body?.deviceId || '');
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deviceId)) {
+        return res.status(400).json({ error: 'v2_device_id_invalid' });
+      }
+      try {
+        const result = await messageService.acknowledgeMessage({
+          userId: req.uid,
+          deviceId,
+          conversationId: req.params.conversationId,
+          messageId: req.params.messageId,
+        });
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        sendError(res, error, 'v2 berichtbevestiging fout:');
+      }
+    },
+  );
+
+  router.get(
     '/v2/conversations/:conversationId/messages/:messageId/envelope',
     verifyAuth,
     async (req, res) => {

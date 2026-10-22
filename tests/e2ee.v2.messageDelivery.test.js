@@ -4,6 +4,7 @@ const { createMessageDeliveryService } = require('../src/e2ee/v2/messageDelivery
 const UUID = '123e4567-e89b-42d3-a456-426614174000';
 const SERVER_TIMESTAMP = 'server-ts';
 const DELETE_FIELD = { __delete: true };
+const ARRAY_REMOVE = '__arrayRemove';
 
 function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -34,7 +35,9 @@ function collectionRef(store, path) {
       return documentRef(store, [...path, id]);
     },
     where(field, operator, value) {
-      return { kind: 'query', path, field, operator, value };
+      const query = { kind: 'query', path, field, operator, value };
+      query.get = async () => querySnapshot(store, query);
+      return query;
     },
   };
 }
@@ -55,8 +58,14 @@ function querySnapshot(store, query) {
     .filter(([key, value]) => (
       key.startsWith(prefix)
       && key.slice(prefix.length).indexOf('/') === -1
-      && query.operator === '=='
-      && value?.[query.field] === query.value
+      && (
+        (query.operator === '==' && value?.[query.field] === query.value)
+        || (
+          query.operator === 'array-contains'
+          && Array.isArray(value?.[query.field])
+          && value[query.field].some((item) => JSON.stringify(item) === JSON.stringify(query.value))
+        )
+      )
     ))
     .map(([key]) => documentRef(store, key.split('/')))
     .map((ref) => snapshot(store, ref));
@@ -66,6 +75,10 @@ function querySnapshot(store, query) {
 function applyPatch(target, patch) {
   Object.entries(patch).forEach(([key, value]) => {
     if (value?.__delete) delete target[key];
+    else if (value?.[ARRAY_REMOVE]) {
+      const removed = JSON.stringify(value[ARRAY_REMOVE]);
+      target[key] = (target[key] || []).filter((item) => JSON.stringify(item) !== removed);
+    }
     else target[key] = clone(value);
   });
 }
@@ -134,6 +147,7 @@ function fixture() {
       FieldValue: {
         serverTimestamp: () => SERVER_TIMESTAMP,
         delete: () => DELETE_FIELD,
+        arrayRemove: (value) => ({ [ARRAY_REMOVE]: value }),
       },
     },
   };
@@ -279,11 +293,77 @@ describe('pulse_e2ee_v2 per-device storage', () => {
       senderIdentityVersion: 1,
       ciphertext: 'cmVjaXBpZW50LWNvcHk=',
     });
+    expect(envelope).not.toHaveProperty('deliveryState');
+    expect(envelope).not.toHaveProperty('decryptedAt');
     await expectError(service.getEnvelope({
       userId: 'user-a',
       deviceId: 'device-a1',
       conversationId: 'conversation-1',
       messageId: UUID,
     }), 404, 'v2_envelope_not_found');
+  });
+
+  test('lists only contentless messages addressed to the authenticated device', async () => {
+    const { database, service } = fixture();
+    await service.sendMessage('user-a', validMessage());
+
+    const feed = await service.listMessageFeed({
+      userId: 'user-b',
+      deviceId: 'device-b1',
+      conversationId: 'conversation-1',
+      limit: 50,
+      offset: 0,
+    });
+
+    expect(feed).toEqual([{
+      protocol: PROTOCOL,
+      protocolVersion: PROTOCOL_VERSION,
+      conversationId: 'conversation-1',
+      messageId: UUID,
+      createdAt: SERVER_TIMESTAMP,
+    }]);
+    expect(JSON.stringify(feed)).not.toContain('cmVjaXBpZW50LWNvcHk=');
+  });
+
+  test('removes a decrypted device envelope from its pending feed idempotently', async () => {
+    const { service } = fixture();
+    await service.sendMessage('user-a', validMessage());
+
+    await expect(service.acknowledgeMessage({
+      userId: 'user-b',
+      deviceId: 'device-b1',
+      conversationId: 'conversation-1',
+      messageId: UUID,
+    })).resolves.toEqual({ messageId: UUID, idempotent: false });
+    await expect(service.listMessageFeed({
+      userId: 'user-b',
+      deviceId: 'device-b1',
+      conversationId: 'conversation-1',
+    })).resolves.toEqual([]);
+    await expect(service.acknowledgeMessage({
+      userId: 'user-b',
+      deviceId: 'device-b1',
+      conversationId: 'conversation-1',
+      messageId: UUID,
+    })).resolves.toEqual({ messageId: UUID, idempotent: true });
+  });
+
+  test('rejects feed access for another user or an inactive device', async () => {
+    const { database, service } = fixture();
+    await service.sendMessage('user-a', validMessage());
+    database.store.set('users/user-c/devices/device-c1', activeDevice({ signalDeviceId: 4 }));
+
+    await expectError(service.listMessageFeed({
+      userId: 'user-c',
+      deviceId: 'device-c1',
+      conversationId: 'conversation-1',
+    }), 403, 'v2_message_access_denied');
+
+    database.store.get('users/user-b/devices/device-b1').status = 'revoked';
+    await expectError(service.listMessageFeed({
+      userId: 'user-b',
+      deviceId: 'device-b1',
+      conversationId: 'conversation-1',
+    }), 403, 'v2_recipient_device_not_capable');
   });
 });
