@@ -1,6 +1,7 @@
 {
   "name": "pulse-backend",
   "version": "1.0.0",
+  "license": "AGPL-3.0-only",
   "description": "Pulse Messenger backend server",
   "main": "server.js",
   "scripts": {
