@@ -5,9 +5,16 @@ const { PROTOCOL, PROTOCOL_VERSION, schemas } = require('./contracts');
 const { E2EEV2Error, createDeviceLifecycleService } = require('./deviceLifecycle');
 const { deviceRoomName } = require('./deviceAudience');
 const { createMessageDeliveryService } = require('./messageDelivery');
+const { createE2EEV2TelemetryMiddleware } = require('./pilotTelemetry');
+const {
+  evaluateE2EEV2Access,
+  evaluateE2EEV2SendAccess,
+  getE2EEV2PilotStatus,
+  readE2EEV2RolloutPolicy,
+} = require('./rolloutPolicy');
 
 function isE2EEV2Enabled() {
-  return String(process.env.E2EE_V2_ENABLED || '').toLowerCase() === 'true';
+  return readE2EEV2RolloutPolicy().configured;
 }
 
 function isE2EEV2PlatformEnabled(platform) {
@@ -76,18 +83,67 @@ function scheduleSecurityEvent(io, event) {
   });
 }
 
+function requireE2EEV2Access(conversationIdFromRequest = null, userIdsFromRequest = null) {
+  return (req, res, next) => {
+    const conversationId = conversationIdFromRequest
+      ? conversationIdFromRequest(req)
+      : null;
+    const access = evaluateE2EEV2Access({ userId: req.uid, conversationId });
+    if (!access.allowed) return res.status(access.status).json({ error: access.error });
+    const additionalUserIds = userIdsFromRequest ? userIdsFromRequest(req) : [];
+    for (const userId of new Set(additionalUserIds || [])) {
+      const participantAccess = evaluateE2EEV2Access({ userId, conversationId });
+      if (!participantAccess.allowed) {
+        return res.status(participantAccess.status).json({ error: participantAccess.error });
+      }
+    }
+    return next();
+  };
+}
+
+const requirePilotUser = requireE2EEV2Access();
+const requirePilotConversation = requireE2EEV2Access((req) => req.params.conversationId);
+const requirePilotKeyBundleParticipants = requireE2EEV2Access(
+  (req) => req.params.conversationId,
+  (req) => [req.params.recipientUserId],
+);
+const requirePilotMessageParticipants = requireE2EEV2Access(
+  (req) => req.body?.conversationId,
+  (req) => (Array.isArray(req.body?.recipientEnvelopes)
+    ? req.body.recipientEnvelopes.map((envelope) => envelope?.recipientUserId)
+    : []),
+);
+
+function requireE2EEV2SendAccess(req, res, next) {
+  const access = evaluateE2EEV2SendAccess({
+    userId: req.uid,
+    conversationId: req.body?.conversationId,
+  });
+  if (!access.allowed) return res.status(access.status).json({ error: access.error });
+  return next();
+}
+
 function registerE2EEV2Routes(router, io) {
   const service = createDeviceLifecycleService({ database: db, firebaseAdmin: admin });
   const messageService = createMessageDeliveryService({ database: db, firebaseAdmin: admin });
 
+  router.use('/v2', createE2EEV2TelemetryMiddleware(
+    () => readE2EEV2RolloutPolicy().mode,
+  ));
+
   router.use('/v2', (_req, res, next) => {
-    if (!isE2EEV2Enabled()) {
-      return res.status(503).json({ error: 'v2_not_enabled' });
+    const policy = readE2EEV2RolloutPolicy();
+    if (!policy.configured) {
+      return res.status(503).json({ error: policy.reason });
     }
     return next();
   });
 
-  router.get('/v2/devices', verifyAuth, async (req, res) => {
+  router.get('/v2/pilot/status', verifyAuth, (req, res) => {
+    res.json(getE2EEV2PilotStatus(req.uid));
+  });
+
+  router.get('/v2/devices', verifyAuth, requirePilotUser, async (req, res) => {
     try {
       const snapshot = await db.collection('users').doc(req.uid).collection('devices').get();
       const devices = snapshot.docs
@@ -114,7 +170,7 @@ function registerE2EEV2Routes(router, io) {
     }
   });
 
-  router.post('/v2/devices/register', verifyAuth, async (req, res) => {
+  router.post('/v2/devices/register', verifyAuth, requirePilotUser, async (req, res) => {
     const registration = parseBody(schemas.deviceRegistration, req.body, res);
     if (!registration) return;
     if (!isE2EEV2PlatformEnabled(registration.platform)) {
@@ -128,7 +184,7 @@ function registerE2EEV2Routes(router, io) {
     }
   });
 
-  router.put('/v2/devices/:deviceId/keys', verifyAuth, async (req, res) => {
+  router.put('/v2/devices/:deviceId/keys', verifyAuth, requirePilotUser, async (req, res) => {
     const rotation = parseBody(schemas.keyRotation, req.body, res);
     if (!rotation) return;
     try {
@@ -140,7 +196,7 @@ function registerE2EEV2Routes(router, io) {
     }
   });
 
-  router.post('/v2/devices/:deviceId/prekeys', verifyAuth, async (req, res) => {
+  router.post('/v2/devices/:deviceId/prekeys', verifyAuth, requirePilotUser, async (req, res) => {
     const refill = parseBody(schemas.preKeyRefill, req.body, res);
     if (!refill) return;
     try {
@@ -155,7 +211,7 @@ function registerE2EEV2Routes(router, io) {
     }
   });
 
-  router.post('/v2/devices/:deviceId/revoke', verifyAuth, async (req, res) => {
+  router.post('/v2/devices/:deviceId/revoke', verifyAuth, requirePilotUser, async (req, res) => {
     const action = parseBody(schemas.lifecycleAction, req.body, res);
     if (!action) return;
     try {
@@ -170,6 +226,7 @@ function registerE2EEV2Routes(router, io) {
   router.post(
     '/v2/conversations/:conversationId/users/:recipientUserId/key-bundles/claim',
     verifyAuth,
+    requirePilotKeyBundleParticipants,
     async (req, res) => {
       const claimRequest = parseBody(schemas.keyBundleClaim, req.body, res);
       if (!claimRequest) return;
@@ -191,6 +248,7 @@ function registerE2EEV2Routes(router, io) {
   router.post(
     '/v2/conversations/:conversationId/own-device-key-bundles/claim',
     verifyAuth,
+    requirePilotConversation,
     async (req, res) => {
       const claimRequest = parseBody(schemas.keyBundleClaim, req.body, res);
       if (!claimRequest) return;
@@ -210,7 +268,12 @@ function registerE2EEV2Routes(router, io) {
     },
   );
 
-  router.post('/v2/messages/send', verifyAuth, async (req, res) => {
+  router.post(
+    '/v2/messages/send',
+    verifyAuth,
+    requirePilotMessageParticipants,
+    requireE2EEV2SendAccess,
+    async (req, res) => {
     const message = parseBody(schemas.messageSend, req.body, res);
     if (!message) return;
     try {
@@ -238,11 +301,13 @@ function registerE2EEV2Routes(router, io) {
     } catch (error) {
       sendError(res, error, 'v2 message send fout:');
     }
-  });
+    },
+  );
 
   router.get(
     '/v2/conversations/:conversationId/messages',
     verifyAuth,
+    requirePilotConversation,
     async (req, res) => {
       const deviceId = String(req.query.deviceId || '');
       const limit = Number(req.query.limit || 50);
@@ -274,6 +339,7 @@ function registerE2EEV2Routes(router, io) {
   router.post(
     '/v2/conversations/:conversationId/messages/:messageId/ack',
     verifyAuth,
+    requirePilotConversation,
     async (req, res) => {
       const deviceId = String(req.body?.deviceId || '');
       if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deviceId)) {
@@ -296,6 +362,7 @@ function registerE2EEV2Routes(router, io) {
   router.get(
     '/v2/conversations/:conversationId/messages/:messageId/envelope',
     verifyAuth,
+    requirePilotConversation,
     async (req, res) => {
       const deviceId = String(req.query.deviceId || '');
       if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deviceId)) {
@@ -324,5 +391,6 @@ module.exports = {
   broadcastSecurityEvent,
   isE2EEV2Enabled,
   isE2EEV2PlatformEnabled,
+  requireE2EEV2Access,
   registerE2EEV2Routes,
 };

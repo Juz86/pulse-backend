@@ -108,7 +108,16 @@ function buildApp() {
 describe('pulse_e2ee_v2 routes', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    delete process.env.E2EE_V2_PILOT_USER_IDS;
+    delete process.env.E2EE_V2_PILOT_CONVERSATION_IDS;
+    delete process.env.E2EE_V2_REVIEW_ATTESTATION_SHA256;
+    delete process.env.E2EE_V2_REVIEW_FRONTEND_COMMIT;
+    delete process.env.E2EE_V2_REVIEW_BACKEND_COMMIT;
+    delete process.env.PULSE_RELEASE_COMMIT_SHA;
+    delete process.env.E2EE_V2_PILOT_SEND_ENABLED;
     process.env.E2EE_V2_ENABLED = 'true';
+    process.env.E2EE_V2_ROLLOUT_MODE = 'qa';
+    process.env.E2EE_V2_QA_MODE_ACKNOWLEDGED = 'true';
     delete process.env.E2EE_V2_WEB_PROVIDER_ENABLED;
     mockLifecycleService.registerDevice.mockResolvedValue({
       status: 'REGISTERED',
@@ -162,7 +171,16 @@ describe('pulse_e2ee_v2 routes', () => {
 
   afterAll(() => {
     delete process.env.E2EE_V2_ENABLED;
+    delete process.env.E2EE_V2_ROLLOUT_MODE;
+    delete process.env.E2EE_V2_QA_MODE_ACKNOWLEDGED;
     delete process.env.E2EE_V2_WEB_PROVIDER_ENABLED;
+    delete process.env.E2EE_V2_PILOT_USER_IDS;
+    delete process.env.E2EE_V2_PILOT_CONVERSATION_IDS;
+    delete process.env.E2EE_V2_REVIEW_ATTESTATION_SHA256;
+    delete process.env.E2EE_V2_REVIEW_FRONTEND_COMMIT;
+    delete process.env.E2EE_V2_REVIEW_BACKEND_COMMIT;
+    delete process.env.PULSE_RELEASE_COMMIT_SHA;
+    delete process.env.E2EE_V2_PILOT_SEND_ENABLED;
   });
 
   test('keeps every v2 route disabled unless the server gate is enabled', async () => {
@@ -174,6 +192,126 @@ describe('pulse_e2ee_v2 routes', () => {
     expect(response.status).toBe(503);
     expect(response.body).toEqual({ error: 'v2_not_enabled' });
     expect(mockLifecycleService.registerDevice).not.toHaveBeenCalled();
+  });
+
+  test('keeps QA mode disabled without explicit acknowledgement', async () => {
+    delete process.env.E2EE_V2_QA_MODE_ACKNOWLEDGED;
+    const response = await request(buildApp())
+      .post('/v2/devices/register')
+      .send(validRegistration());
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: 'v2_qa_not_acknowledged' });
+    expect(mockLifecycleService.registerDevice).not.toHaveBeenCalled();
+  });
+
+  test('exposes pilot enrollment without exposing allowlists or review pins', async () => {
+    const response = await request(buildApp())
+      .get('/v2/pilot/status')
+      .set('x-test-uid', 'user-a');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      enabled: true, enrolled: true, mode: 'qa', sendingEnabled: true,
+    });
+    expect(JSON.stringify(response.body)).not.toContain('user-a');
+  });
+
+  test('blocks users and conversations outside the production pilot allowlists', async () => {
+    process.env.E2EE_V2_ROLLOUT_MODE = 'pilot';
+    process.env.E2EE_V2_PILOT_USER_IDS = 'user-a,user-b';
+    process.env.E2EE_V2_PILOT_CONVERSATION_IDS = 'conversation-1';
+    process.env.E2EE_V2_REVIEW_ATTESTATION_SHA256 = 'a'.repeat(64);
+    process.env.E2EE_V2_REVIEW_FRONTEND_COMMIT = 'b'.repeat(40);
+    process.env.E2EE_V2_REVIEW_BACKEND_COMMIT = 'c'.repeat(40);
+    process.env.PULSE_RELEASE_COMMIT_SHA = 'c'.repeat(40);
+
+    const deniedUser = await request(buildApp())
+      .get('/v2/devices')
+      .set('x-test-uid', 'user-c');
+    expect(deniedUser.status).toBe(403);
+    expect(deniedUser.body).toEqual({ error: 'v2_pilot_user_not_allowed' });
+
+    const deniedConversation = await request(buildApp())
+      .get('/v2/conversations/conversation-2/messages?deviceId=device-a1')
+      .set('x-test-uid', 'user-a');
+    expect(deniedConversation.status).toBe(403);
+    expect(deniedConversation.body).toEqual({ error: 'v2_pilot_conversation_not_allowed' });
+
+    const allowedConversation = await request(buildApp())
+      .get('/v2/conversations/conversation-1/messages?deviceId=device-a1')
+      .set('x-test-uid', 'user-a');
+    expect(allowedConversation.status).toBe(200);
+  });
+
+  test('blocks a send when any recipient account is outside the pilot cohort', async () => {
+    process.env.E2EE_V2_ROLLOUT_MODE = 'pilot';
+    process.env.E2EE_V2_PILOT_USER_IDS = 'user-a';
+    process.env.E2EE_V2_PILOT_CONVERSATION_IDS = 'conversation-1';
+    process.env.E2EE_V2_REVIEW_ATTESTATION_SHA256 = 'a'.repeat(64);
+    process.env.E2EE_V2_REVIEW_FRONTEND_COMMIT = 'b'.repeat(40);
+    process.env.E2EE_V2_REVIEW_BACKEND_COMMIT = 'c'.repeat(40);
+    process.env.PULSE_RELEASE_COMMIT_SHA = 'c'.repeat(40);
+    process.env.E2EE_V2_PILOT_SEND_ENABLED = 'true';
+
+    const response = await request(buildApp())
+      .post('/v2/messages/send')
+      .set('x-test-uid', 'user-a')
+      .send({
+        protocol: 'pulse_e2ee_v2',
+        protocolVersion: 2,
+        conversationId: 'conversation-1',
+        clientMessageId: '123e4567-e89b-42d3-a456-426614174000',
+        senderDeviceId: 'device-a1',
+        messageType: 'text',
+        recipientEnvelopes: [{
+          recipientUserId: 'user-b',
+          recipientDeviceId: 'device-b1',
+          envelopeType: 'prekey',
+          ciphertext: 'ZW5jcnlwdGVk',
+        }],
+      });
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: 'v2_pilot_user_not_allowed' });
+    expect(mockMessageService.sendMessage).not.toHaveBeenCalled();
+  });
+
+  test('pauses new sends while keeping message recovery available', async () => {
+    process.env.E2EE_V2_ROLLOUT_MODE = 'pilot';
+    process.env.E2EE_V2_PILOT_USER_IDS = 'user-a,user-b';
+    process.env.E2EE_V2_PILOT_CONVERSATION_IDS = 'conversation-1';
+    process.env.E2EE_V2_REVIEW_ATTESTATION_SHA256 = 'a'.repeat(64);
+    process.env.E2EE_V2_REVIEW_FRONTEND_COMMIT = 'b'.repeat(40);
+    process.env.E2EE_V2_REVIEW_BACKEND_COMMIT = 'c'.repeat(40);
+    process.env.PULSE_RELEASE_COMMIT_SHA = 'c'.repeat(40);
+
+    const send = await request(buildApp())
+      .post('/v2/messages/send')
+      .set('x-test-uid', 'user-a')
+      .send({
+        protocol: 'pulse_e2ee_v2',
+        protocolVersion: 2,
+        conversationId: 'conversation-1',
+        clientMessageId: '123e4567-e89b-42d3-a456-426614174000',
+        senderDeviceId: 'device-a1',
+        messageType: 'text',
+        recipientEnvelopes: [{
+          recipientUserId: 'user-b',
+          recipientDeviceId: 'device-b1',
+          envelopeType: 'message',
+          ciphertext: 'ZW5jcnlwdGVk',
+        }],
+      });
+    expect(send.status).toBe(503);
+    expect(send.body).toEqual({ error: 'v2_pilot_sends_paused' });
+    expect(mockMessageService.sendMessage).not.toHaveBeenCalled();
+
+    const feed = await request(buildApp())
+      .get('/v2/conversations/conversation-1/messages?deviceId=device-a1')
+      .set('x-test-uid', 'user-a');
+    expect(feed.status).toBe(200);
+    expect(mockMessageService.listMessageFeed).toHaveBeenCalled();
   });
 
   test('registers a valid v2 device for the authenticated user', async () => {
