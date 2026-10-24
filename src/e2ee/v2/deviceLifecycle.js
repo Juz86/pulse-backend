@@ -337,13 +337,15 @@ function createDeviceLifecycleService({ database, firebaseAdmin }) {
       const claimedAt = new Date().toISOString();
       const timestamp = serverTimestamp();
       const targetDeviceSnapshots = devicesSnapshot.docs.filter((snapshot) => (
-        !isOwnDeviceClaim || snapshot.id !== requesterDeviceId
+        snapshot.data()?.protocol === PROTOCOL
+        && snapshot.data()?.protocolVersion === PROTOCOL_VERSION
+        && (!isOwnDeviceClaim || snapshot.id !== requesterDeviceId)
       ));
+      if (!isOwnDeviceClaim && targetDeviceSnapshots.length === 0) {
+        throw new E2EEV2Error(409, 'v2_no_active_recipient_devices');
+      }
       const devices = targetDeviceSnapshots.map((snapshot) => {
         const device = snapshot.data() || {};
-        if (device.protocol !== PROTOCOL || device.protocolVersion !== PROTOCOL_VERSION) {
-          throw new E2EEV2Error(409, 'v2_recipient_device_not_capable');
-        }
         const preKeys = Array.isArray(device.oneTimePreKeys) ? device.oneTimePreKeys : [];
         if (preKeys.length === 0) {
           throw new E2EEV2Error(409, 'v2_prekeys_unavailable');

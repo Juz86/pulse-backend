@@ -270,10 +270,23 @@ describe('pulse_e2ee_v2 per-device storage', () => {
     await expectError(service.sendMessage('user-a', changed), 409, 'v2_message_id_conflict');
   });
 
-  test('rejects fan-out while any active target device is not v2 capable', async () => {
+  test('ignores legacy active devices when validating the v2 fan-out set', async () => {
+    const { database, service } = fixture();
+    database.store.set('users/user-b/devices/legacy-device', {
+      status: 'active',
+      protocol: 'signal_v1',
+      protocolVersion: 1,
+    });
+
+    await expect(service.sendMessage('user-a', validMessage())).resolves.toMatchObject({
+      idempotent: false,
+    });
+  });
+
+  test('rejects fan-out when the recipient has no active v2 device', async () => {
     const { database, service } = fixture();
     database.store.get('users/user-b/devices/device-b1').protocol = 'signal_v1';
-    await expectError(service.sendMessage('user-a', validMessage()), 409, 'v2_recipient_device_not_capable');
+    await expectError(service.sendMessage('user-a', validMessage()), 409, 'v2_no_active_recipient_devices');
   });
 
   test('returns only the authenticated recipient device envelope', async () => {

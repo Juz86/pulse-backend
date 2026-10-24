@@ -142,23 +142,23 @@ function createMessageDeliveryService({ database, firebaseAdmin }) {
       if (!Number.isInteger(senderIdentityVersion) || senderIdentityVersion < 1) {
         throw new E2EEV2Error(409, 'v2_sender_device_not_capable');
       }
-      if (recipientDevices.empty) {
+      const activeSenderV2Devices = senderDevices.docs.filter((snapshot) => (
+        isActiveV2Device(snapshot.data())
+      ));
+      const activeRecipientV2Devices = recipientDevices.docs.filter((snapshot) => (
+        isActiveV2Device(snapshot.data())
+      ));
+      if (activeRecipientV2Devices.length === 0) {
         throw new E2EEV2Error(409, 'v2_no_active_recipient_devices');
       }
 
       const expectedRecipients = [];
-      senderDevices.docs.forEach((snapshot) => {
-        if (!isActiveV2Device(snapshot.data())) {
-          throw new E2EEV2Error(409, 'v2_recipient_device_not_capable');
-        }
+      activeSenderV2Devices.forEach((snapshot) => {
         if (snapshot.id !== message.senderDeviceId) {
           expectedRecipients.push({ userId: senderUserId, deviceId: snapshot.id });
         }
       });
-      recipientDevices.docs.forEach((snapshot) => {
-        if (!isActiveV2Device(snapshot.data())) {
-          throw new E2EEV2Error(409, 'v2_recipient_device_not_capable');
-        }
+      activeRecipientV2Devices.forEach((snapshot) => {
         expectedRecipients.push({ userId: recipientUserId, deviceId: snapshot.id });
       });
       assertExpectedEnvelopes(message.recipientEnvelopes, expectedRecipients);

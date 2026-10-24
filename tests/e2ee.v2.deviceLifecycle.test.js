@@ -496,7 +496,7 @@ describe('pulse_e2ee_v2 transactional prekey claim', () => {
     expect(state.devices['user-b']['device-b1'].oneTimePreKeyCount).toBe(2);
   });
 
-  test('rejects a non-v2 active recipient device without consuming v2 stock', async () => {
+  test('ignores legacy active devices while claiming every active v2 device', async () => {
     const { state, service } = createFixture();
     state.devices['user-b']['legacy-device'] = {
       status: 'active',
@@ -505,18 +505,33 @@ describe('pulse_e2ee_v2 transactional prekey claim', () => {
       oneTimePreKeys: [{ keyId: 99, publicKey: BASE64_KEY }],
     };
 
-    await expectServiceError(
-      service.claimKeyBundles({
-        requesterId: 'user-a',
-        requesterDeviceId: 'device-requester',
-        claimId: '123e4567-e89b-42d3-a456-426614174000',
-        conversationId: 'conversation-1',
-        recipientId: 'user-b',
-      }),
-      409,
-      'v2_recipient_device_not_capable',
-    );
-    expect(state.devices['user-b']['device-b1'].oneTimePreKeyCount).toBe(2);
+    const claim = await service.claimKeyBundles({
+      requesterId: 'user-a',
+      requesterDeviceId: 'device-requester',
+      claimId: '123e4567-e89b-42d3-a456-426614174000',
+      conversationId: 'conversation-1',
+      recipientId: 'user-b',
+    });
+
+    expect(claim.devices.map((device) => device.deviceId)).toEqual(['device-b1']);
+    expect(state.devices['user-b']['device-b1'].oneTimePreKeyCount).toBe(1);
+    expect(state.devices['user-b']['legacy-device'].oneTimePreKeys).toEqual([
+      { keyId: 99, publicKey: BASE64_KEY },
+    ]);
+  });
+
+  test('rejects a claim when the recipient has no active v2 devices', async () => {
+    const { state, service } = createFixture();
+    state.devices['user-b']['device-b1'].protocol = 'signal_v1';
+    state.devices['user-b']['device-b1'].protocolVersion = 1;
+
+    await expectServiceError(service.claimKeyBundles({
+      requesterId: 'user-a',
+      requesterDeviceId: 'device-requester',
+      claimId: '123e4567-e89b-42d3-a456-426614174000',
+      conversationId: 'conversation-1',
+      recipientId: 'user-b',
+    }), 409, 'v2_no_active_recipient_devices');
   });
 
   test('rejects group and unrelated conversation claims', async () => {
