@@ -8,6 +8,7 @@ const {
 } = require('../push');
 const { traceCall } = require('../calling/v2/diagnostics');
 const { recordCallHistory: defaultRecordCallHistory } = require('../calling/v2/callHistory');
+const { callIdentitySchema } = require('../calling/v2/e2eeIdentity');
 
 const id = z.string().trim().min(8).max(128);
 const uid = z.string().trim().min(1).max(128);
@@ -38,11 +39,13 @@ const mediaSchema = z.discriminatedUnion('type', [
     ...mediaBase,
     type: z.literal('offer'),
     description: z.string().min(1).max(100000),
+    identity: callIdentitySchema.optional(),
   }).strict(),
   z.object({
     ...mediaBase,
     type: z.literal('answer'),
     description: z.string().min(1).max(100000),
+    identity: callIdentitySchema.optional(),
   }).strict(),
   z.object({
     ...mediaBase,
@@ -94,6 +97,8 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
   const sendCallTakenElsewherePush = options.sendCallTakenElsewherePush || defaultSendCallTakenElsewherePush;
   const recordCallHistory = options.recordCallHistory || defaultRecordCallHistory;
   const hasBrowserCallReceiver = options.hasBrowserCallReceiver || defaultHasBrowserCallReceiver;
+  const requireE2eeIdentity = options.requireE2eeIdentity === true;
+  const authorizeCallE2eeIdentity = options.authorizeCallE2eeIdentity;
   socket.join(callerUid);
 
   socket.on('call:v2:client-ready', (payload, callback = () => {}) => {
@@ -259,6 +264,23 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
       if (route.status !== 'FOUND') {
         callback(response(route));
         return;
+      }
+      if (['offer', 'answer'].includes(input.type) && requireE2eeIdentity) {
+        if (typeof authorizeCallE2eeIdentity !== 'function') {
+          callback({ ok: false, status: 'SERVICE_UNAVAILABLE' });
+          return;
+        }
+        const authorization = await authorizeCallE2eeIdentity({
+          actorUid: callerUid,
+          session: route.session,
+          type: input.type,
+          description: input.description,
+          identity: input.identity,
+        });
+        if (!authorization.ok) {
+          callback({ ok: false, status: authorization.status });
+          return;
+        }
       }
       const envelope = {
         protocolVersion: 2,

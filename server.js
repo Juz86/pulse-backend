@@ -45,11 +45,13 @@ const {
   getPreparingTimeoutSeconds,
   getRingingTimeoutSeconds,
   isCallingV2Enabled,
+  isCallingV2E2eeRequired,
 } = require('./src/calling/v2/config');
 const { startCallV2TimeoutSweeper } = require('./src/calling/v2/timeouts');
 const { createCloudflareTurnCredentialsProvider } = require('./src/calling/v2/turnCredentials');
 const { sendTerminalCallPush } = require('./src/push');
 const { recordCallHistory } = require('./src/calling/v2/callHistory');
+const { createCallE2eeIdentityAuthorizer } = require('./src/calling/v2/e2eeIdentity');
 const { verifySocketDevice } = require('./src/e2ee/v2/deviceAudience');
 
 const callV2Service = new CallV2Service(new RedisCallV2Store(getRedis), {
@@ -58,6 +60,7 @@ const callV2Service = new CallV2Service(new RedisCallV2Store(getRedis), {
   connectingTimeoutMs: getConnectingTimeoutSeconds() * 1000,
 });
 const getCallV2TurnCredentials = createCloudflareTurnCredentialsProvider();
+const authorizeCallE2eeIdentity = createCallE2eeIdentityAuthorizer({ database: db });
 
 // ─── App URL ──────────────────────────────────────────────────────────────────
 const APP_URL = process.env.APP_URL || '';
@@ -418,6 +421,8 @@ io.on('connection', (socket) => {
     registerCallingV2(io, socket, uid, {
       service: callV2Service,
       getTurnCredentials: getCallV2TurnCredentials,
+      requireE2eeIdentity: isCallingV2E2eeRequired(),
+      authorizeCallE2eeIdentity,
     });
   }
 

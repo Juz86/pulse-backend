@@ -10,6 +10,8 @@ function harness({
   sendCallTakenElsewherePush = jest.fn(),
   recordCallHistory = jest.fn(),
   hasBrowserCallReceiver = jest.fn().mockResolvedValue(false),
+  requireE2eeIdentity = false,
+  authorizeCallE2eeIdentity,
 } = {}) {
   const handlers = {};
   const socket = {
@@ -23,6 +25,8 @@ function harness({
     service, authorizeStart, emitToUser, getTurnCredentials,
     sendIncomingCallPush, sendTerminalCallPush, sendCallTakenElsewherePush, recordCallHistory,
     hasBrowserCallReceiver,
+    requireE2eeIdentity,
+    authorizeCallE2eeIdentity,
   });
   return {
     handlers, emitToUser, roomEmit, io, socket,
@@ -407,6 +411,32 @@ describe('Calling v2 socket contract', () => {
       candidate: { mediaStreamId: null, mediaLineIndex: -1, value: 'candidate' },
     }, callback);
     expect(service.mediaRoute).not.toHaveBeenCalled();
+    expect(callback).toHaveBeenCalledWith({ ok: false, status: 'INVALID_REQUEST' });
+  });
+
+  test('requires an authorized identity envelope when call E2EE enforcement is enabled', async () => {
+    const session = {
+      sessionId: 'session-123', callerUid: 'caller', calleeUid: 'callee',
+      mediaType: 'video', revision: 3,
+    };
+    const service = {
+      mediaRoute: jest.fn().mockResolvedValue({ status: 'FOUND', targetUid: 'callee', session }),
+    };
+    const authorizeCallE2eeIdentity = jest.fn().mockResolvedValue({
+      ok: false, status: 'INVALID_REQUEST',
+    });
+    const { handlers, emitToUser } = harness({
+      service, requireE2eeIdentity: true, authorizeCallE2eeIdentity,
+    });
+    const callback = jest.fn();
+    await handlers['call:v2:media']({
+      sessionId: 'session-123', messageId: 'message-123', type: 'offer', description: 'v=0',
+    }, callback);
+
+    expect(authorizeCallE2eeIdentity).toHaveBeenCalledWith(expect.objectContaining({
+      actorUid: 'caller', session, type: 'offer', identity: undefined,
+    }));
+    expect(emitToUser).not.toHaveBeenCalled();
     expect(callback).toHaveBeenCalledWith({ ok: false, status: 'INVALID_REQUEST' });
   });
 

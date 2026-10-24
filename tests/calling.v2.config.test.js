@@ -3,6 +3,7 @@ const {
   getPreparingTimeoutSeconds,
   getRingingTimeoutSeconds,
   isCallingV2Enabled,
+  isCallingV2E2eeRequired,
 } = require('../src/calling/v2/config');
 
 describe('Calling v2 rollout guard', () => {
@@ -10,6 +11,7 @@ describe('Calling v2 rollout guard', () => {
   const originalRingingTimeout = process.env.PULSE_CALLING_V2_RINGING_TIMEOUT_SECONDS;
   const originalConnectingTimeout = process.env.PULSE_CALLING_V2_CONNECTING_TIMEOUT_SECONDS;
   const originalPreparingTimeout = process.env.PULSE_CALLING_V2_PREPARING_TIMEOUT_SECONDS;
+  const originalE2eeRequired = process.env.PULSE_CALLING_V2_E2EE_REQUIRED;
 
   afterEach(() => {
     if (original === undefined) delete process.env.PULSE_CALLING_V2_ENABLED;
@@ -20,6 +22,8 @@ describe('Calling v2 rollout guard', () => {
     else process.env.PULSE_CALLING_V2_CONNECTING_TIMEOUT_SECONDS = originalConnectingTimeout;
     if (originalPreparingTimeout === undefined) delete process.env.PULSE_CALLING_V2_PREPARING_TIMEOUT_SECONDS;
     else process.env.PULSE_CALLING_V2_PREPARING_TIMEOUT_SECONDS = originalPreparingTimeout;
+    if (originalE2eeRequired === undefined) delete process.env.PULSE_CALLING_V2_E2EE_REQUIRED;
+    else process.env.PULSE_CALLING_V2_E2EE_REQUIRED = originalE2eeRequired;
   });
 
   test('defaults to disabled', () => {
@@ -32,6 +36,13 @@ describe('Calling v2 rollout guard', () => {
     expect(isCallingV2Enabled()).toBe(true);
     process.env.PULSE_CALLING_V2_ENABLED = 'false';
     expect(isCallingV2Enabled()).toBe(false);
+  });
+
+  test('keeps call E2EE enforcement disabled until explicitly enabled', () => {
+    delete process.env.PULSE_CALLING_V2_E2EE_REQUIRED;
+    expect(isCallingV2E2eeRequired()).toBe(false);
+    process.env.PULSE_CALLING_V2_E2EE_REQUIRED = 'true';
+    expect(isCallingV2E2eeRequired()).toBe(true);
   });
 
   test('uses a bounded ringing timeout with a 45 second default', () => {
