@@ -6,6 +6,9 @@ const { E2EEV2Error, createDeviceLifecycleService } = require('./deviceLifecycle
 const { deviceRoomName } = require('./deviceAudience');
 const { createMessageDeliveryService } = require('./messageDelivery');
 const { createE2EEV2TelemetryMiddleware } = require('./pilotTelemetry');
+const { schemas: groupSchemas } = require('../group/contracts');
+const { isGroupE2eeEnabled } = require('../group/config');
+const { createGroupDistributionDeliveryService } = require('../group/distributionDelivery');
 const {
   evaluateE2EEV2Access,
   evaluateE2EEV2SendAccess,
@@ -123,9 +126,39 @@ function requireE2EEV2SendAccess(req, res, next) {
   return next();
 }
 
+function requireGroupE2eeRuntime(_req, res, next) {
+  if (!isGroupE2eeEnabled()) {
+    return res.status(503).json({ error: 'group_e2ee_not_enabled' });
+  }
+  return next();
+}
+
+function parseGroupRouteIdentity(req, res) {
+  const epoch = Number(req.params.epoch);
+  const distributionId = String(req.params.distributionId || '');
+  const deviceId = String(req.query.deviceId || req.body?.deviceId || '');
+  if (!Number.isSafeInteger(epoch) || epoch < 1) {
+    res.status(400).json({ error: 'group_e2ee_epoch_invalid' });
+    return null;
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(distributionId)) {
+    res.status(400).json({ error: 'group_e2ee_distribution_id_invalid' });
+    return null;
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deviceId)) {
+    res.status(400).json({ error: 'v2_device_id_invalid' });
+    return null;
+  }
+  return { deviceId, distributionId, epoch };
+}
+
 function registerE2EEV2Routes(router, io) {
   const service = createDeviceLifecycleService({ database: db, firebaseAdmin: admin });
   const messageService = createMessageDeliveryService({ database: db, firebaseAdmin: admin });
+  const groupDistributionService = createGroupDistributionDeliveryService({
+    database: db,
+    firebaseAdmin: admin,
+  });
 
   router.use('/v2', createE2EEV2TelemetryMiddleware(
     () => readE2EEV2RolloutPolicy().mode,
@@ -269,6 +302,113 @@ function registerE2EEV2Routes(router, io) {
   );
 
   router.post(
+    '/v2/groups/sender-key-distributions',
+    verifyAuth,
+    requireGroupE2eeRuntime,
+    requirePilotMessageParticipants,
+    requireE2EEV2SendAccess,
+    async (req, res) => {
+      const distribution = parseBody(groupSchemas.senderKeyDistribution, req.body, res);
+      if (!distribution) return;
+      try {
+        const result = await groupDistributionService.storeDistribution(req.uid, distribution);
+        if (!result.idempotent) {
+          result.deliveries.forEach(({ recipientUserId, recipientDeviceId }) => {
+            io.to(deviceRoomName(recipientUserId, recipientDeviceId)).emit(
+              'e2ee:group:distribution-available',
+              {
+                protocol: distribution.protocol,
+                protocolVersion: distribution.protocolVersion,
+                conversationId: distribution.conversationId,
+                epoch: distribution.epoch,
+                distributionId: distribution.distributionId,
+              },
+            );
+          });
+        }
+        res.status(result.idempotent ? 200 : 201).json({ ok: true, ...result, deliveries: undefined });
+      } catch (error) {
+        sendError(res, error, 'group E2EE distributie opslaan fout:');
+      }
+    },
+  );
+
+  router.get(
+    '/v2/groups/conversations/:conversationId/epochs/:epoch/distributions',
+    verifyAuth,
+    requireGroupE2eeRuntime,
+    requirePilotConversation,
+    async (req, res) => {
+      const epoch = Number(req.params.epoch);
+      const deviceId = String(req.query.deviceId || '');
+      const limit = Number(req.query.limit || 50);
+      if (!Number.isSafeInteger(epoch) || epoch < 1) {
+        return res.status(400).json({ error: 'group_e2ee_epoch_invalid' });
+      }
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deviceId)) {
+        return res.status(400).json({ error: 'v2_device_id_invalid' });
+      }
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return res.status(400).json({ error: 'v2_limit_invalid' });
+      }
+      try {
+        const distributions = await groupDistributionService.listPending({
+          userId: req.uid,
+          deviceId,
+          conversationId: req.params.conversationId,
+          epoch,
+          limit,
+        });
+        res.json({ distributions });
+      } catch (error) {
+        sendError(res, error, 'group E2EE distributiefeed ophalen fout:');
+      }
+    },
+  );
+
+  router.get(
+    '/v2/groups/conversations/:conversationId/epochs/:epoch/distributions/:distributionId/envelope',
+    verifyAuth,
+    requireGroupE2eeRuntime,
+    requirePilotConversation,
+    async (req, res) => {
+      const identity = parseGroupRouteIdentity(req, res);
+      if (!identity) return;
+      try {
+        const envelope = await groupDistributionService.getEnvelope({
+          userId: req.uid,
+          conversationId: req.params.conversationId,
+          ...identity,
+        });
+        res.json(envelope);
+      } catch (error) {
+        sendError(res, error, 'group E2EE distributie-envelope ophalen fout:');
+      }
+    },
+  );
+
+  router.post(
+    '/v2/groups/conversations/:conversationId/epochs/:epoch/distributions/:distributionId/ack',
+    verifyAuth,
+    requireGroupE2eeRuntime,
+    requirePilotConversation,
+    async (req, res) => {
+      const identity = parseGroupRouteIdentity(req, res);
+      if (!identity) return;
+      try {
+        const result = await groupDistributionService.acknowledgeEnvelope({
+          userId: req.uid,
+          conversationId: req.params.conversationId,
+          ...identity,
+        });
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        sendError(res, error, 'group E2EE distributie bevestigen fout:');
+      }
+    },
+  );
+
+  router.post(
     '/v2/messages/send',
     verifyAuth,
     requirePilotMessageParticipants,
@@ -392,5 +532,6 @@ module.exports = {
   isE2EEV2Enabled,
   isE2EEV2PlatformEnabled,
   requireE2EEV2Access,
+  requireGroupE2eeRuntime,
   registerE2EEV2Routes,
 };

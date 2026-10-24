@@ -124,7 +124,9 @@ function authorizeGroupMessage({
   });
   if (
     !distribution
-    || distribution.status !== 'active'
+    || distribution.status !== 'ready'
+    || !Array.isArray(distribution.pendingRecipientAudiences)
+    || distribution.pendingRecipientAudiences.length !== 0
     || distribution.conversationId !== payload.conversationId
     || distribution.epoch !== payload.epoch
     || distribution.distributionId !== payload.distributionId

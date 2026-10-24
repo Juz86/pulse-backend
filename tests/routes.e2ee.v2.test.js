@@ -14,6 +14,12 @@ const mockMessageService = {
   listMessageFeed: jest.fn(),
   sendMessage: jest.fn(),
 };
+const mockGroupDistributionService = {
+  acknowledgeEnvelope: jest.fn(),
+  getEnvelope: jest.fn(),
+  listPending: jest.fn(),
+  storeDistribution: jest.fn(),
+};
 const mockIoEmit = jest.fn();
 const mockIoTo = jest.fn(() => ({ emit: mockIoEmit }));
 
@@ -71,6 +77,9 @@ jest.mock('../src/e2ee/v2/deviceLifecycle', () => {
 jest.mock('../src/e2ee/v2/messageDelivery', () => ({
   createMessageDeliveryService: () => mockMessageService,
 }));
+jest.mock('../src/e2ee/group/distributionDelivery', () => ({
+  createGroupDistributionDeliveryService: () => mockGroupDistributionService,
+}));
 
 const { E2EEV2Error } = require('../src/e2ee/v2/deviceLifecycle');
 const { registerE2EEV2Routes } = require('../src/e2ee/v2/routes');
@@ -119,6 +128,7 @@ describe('pulse_e2ee_v2 routes', () => {
     process.env.E2EE_V2_ROLLOUT_MODE = 'qa';
     process.env.E2EE_V2_QA_MODE_ACKNOWLEDGED = 'true';
     delete process.env.E2EE_V2_WEB_PROVIDER_ENABLED;
+    delete process.env.E2EE_V2_GROUPS_ENABLED;
     mockLifecycleService.registerDevice.mockResolvedValue({
       status: 'REGISTERED',
       deviceId: 'device-a1',
@@ -167,6 +177,12 @@ describe('pulse_e2ee_v2 routes', () => {
       messageId: 'message-1',
       idempotent: false,
     });
+    mockGroupDistributionService.storeDistribution.mockResolvedValue({
+      distributionId: 'bc263346-f24c-4550-8484-6ef56dd301a6',
+      epoch: 4,
+      idempotent: false,
+      deliveries: [{ recipientUserId: 'user-b', recipientDeviceId: 'device-b1' }],
+    });
   });
 
   afterAll(() => {
@@ -174,6 +190,7 @@ describe('pulse_e2ee_v2 routes', () => {
     delete process.env.E2EE_V2_ROLLOUT_MODE;
     delete process.env.E2EE_V2_QA_MODE_ACKNOWLEDGED;
     delete process.env.E2EE_V2_WEB_PROVIDER_ENABLED;
+    delete process.env.E2EE_V2_GROUPS_ENABLED;
     delete process.env.E2EE_V2_PILOT_USER_IDS;
     delete process.env.E2EE_V2_PILOT_CONVERSATION_IDS;
     delete process.env.E2EE_V2_REVIEW_ATTESTATION_SHA256;
@@ -192,6 +209,51 @@ describe('pulse_e2ee_v2 routes', () => {
     expect(response.status).toBe(503);
     expect(response.body).toEqual({ error: 'v2_not_enabled' });
     expect(mockLifecycleService.registerDevice).not.toHaveBeenCalled();
+  });
+
+  test('keeps group distribution routes disabled behind their own gate', async () => {
+    const response = await request(buildApp())
+      .post('/v2/groups/sender-key-distributions')
+      .send({});
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: 'group_e2ee_not_enabled' });
+    expect(mockGroupDistributionService.storeDistribution).not.toHaveBeenCalled();
+  });
+
+  test('relays only a contentless availability event for an accepted group distribution', async () => {
+    process.env.E2EE_V2_GROUPS_ENABLED = 'true';
+    const distribution = {
+      protocol: 'pulse_group_e2ee_v1',
+      protocolVersion: 1,
+      conversationId: 'group-123',
+      senderDeviceId: 'device-a1',
+      senderSignalDeviceId: 1,
+      senderIdentityVersion: 1,
+      epoch: 4,
+      distributionId: 'bc263346-f24c-4550-8484-6ef56dd301a6',
+      recipientEnvelopes: [{
+        recipientUserId: 'user-b',
+        recipientDeviceId: 'device-b1',
+        envelopeType: 'prekey',
+        ciphertext: 'Y2lwaGVydGV4dA==',
+      }],
+    };
+    const response = await request(buildApp())
+      .post('/v2/groups/sender-key-distributions')
+      .send(distribution);
+
+    expect(response.status).toBe(201);
+    expect(mockGroupDistributionService.storeDistribution).toHaveBeenCalledWith('user-a', distribution);
+    expect(mockIoEmit).toHaveBeenCalledWith(
+      'e2ee:group:distribution-available',
+      expect.objectContaining({
+        conversationId: 'group-123',
+        epoch: 4,
+        distributionId: distribution.distributionId,
+      }),
+    );
+    expect(JSON.stringify(mockIoEmit.mock.calls)).not.toContain('Y2lwaGVydGV4dA==');
   });
 
   test('keeps QA mode disabled without explicit acknowledgement', async () => {

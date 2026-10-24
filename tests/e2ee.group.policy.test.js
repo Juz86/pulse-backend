@@ -104,7 +104,8 @@ test('group message requires the current sender distribution and membership hash
     authenticatedDevice: devicesByUser['user-a'][0],
     payload: value,
     distribution: {
-      status: 'active',
+      status: 'ready',
+      pendingRecipientAudiences: [],
       conversationId: 'group-123',
       epoch: 4,
       distributionId: value.distributionId,
@@ -124,7 +125,8 @@ test('group message rejects a distribution from the old membership', () => {
     authenticatedDevice: devicesByUser['user-a'][0],
     payload: value,
     distribution: {
-      status: 'active',
+      status: 'ready',
+      pendingRecipientAudiences: [],
       conversationId: 'group-123',
       epoch: 4,
       distributionId: value.distributionId,
