@@ -280,6 +280,14 @@ test('group message remains blocked until distribution acknowledgements complete
     authenticatedUserId: 'user-a',
     authenticatedDevice: { deviceId: 'device-a1', ...activeDevice(1) },
     payload: message,
+    devicesByUser: {
+      'user-a': [
+        { deviceId: 'device-a1', ...activeDevice(1) },
+        { deviceId: 'device-a2', ...activeDevice(2) },
+      ],
+      'user-b': [{ deviceId: 'device-b1', ...activeDevice(1) }],
+      'user-c': [{ deviceId: 'device-c1', ...activeDevice(1) }],
+    },
     distribution: database.store.get(distributionPath),
   });
   expect(authorize).toThrow(expect.objectContaining({ code: 'group_e2ee_distribution_required' }));

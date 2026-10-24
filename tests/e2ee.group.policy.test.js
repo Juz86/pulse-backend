@@ -103,6 +103,7 @@ test('group message requires the current sender distribution and membership hash
     authenticatedUserId: 'user-a',
     authenticatedDevice: devicesByUser['user-a'][0],
     payload: value,
+    devicesByUser,
     distribution: {
       status: 'ready',
       pendingRecipientAudiences: [],
@@ -112,6 +113,11 @@ test('group message requires the current sender distribution and membership hash
       senderUserId: 'user-a',
       senderDeviceId: 'device-a1',
       membershipHash: groupMembershipHash(members),
+      recipientAudiences: value.recipientEnvelopes || [
+        { recipientUserId: 'user-a', recipientDeviceId: 'device-a2' },
+        { recipientUserId: 'user-b', recipientDeviceId: 'device-b1' },
+        { recipientUserId: 'user-c', recipientDeviceId: 'device-c1' },
+      ],
     },
   }).epoch).toBe(4);
 });
@@ -124,6 +130,7 @@ test('group message rejects a distribution from the old membership', () => {
     authenticatedUserId: 'user-a',
     authenticatedDevice: devicesByUser['user-a'][0],
     payload: value,
+    devicesByUser,
     distribution: {
       status: 'ready',
       pendingRecipientAudiences: [],
@@ -133,6 +140,7 @@ test('group message rejects a distribution from the old membership', () => {
       senderUserId: 'user-a',
       senderDeviceId: 'device-a1',
       membershipHash: groupMembershipHash(['user-a', 'user-b']),
+      recipientAudiences: [],
     },
   })).toThrow(expect.objectContaining({ code: 'group_e2ee_distribution_required' }));
 });

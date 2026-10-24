@@ -115,6 +115,7 @@ function authorizeGroupMessage({
   authenticatedDevice,
   payload,
   distribution,
+  devicesByUser,
 }) {
   const context = assertGroupContext({
     conversation,
@@ -136,7 +137,24 @@ function authorizeGroupMessage({
   ) {
     throw new E2EEV2Error(409, 'group_e2ee_distribution_required');
   }
-  return context;
+  const recipients = expectedGroupRecipientDevices({
+    members: context.members,
+    senderUserId: authenticatedUserId,
+    senderDeviceId: payload.senderDeviceId,
+    devicesByUser,
+  });
+  try {
+    assertExactGroupRecipients(
+      (distribution.recipientAudiences || []).map(value => ({
+        recipientUserId: value.recipientUserId,
+        recipientDeviceId: value.recipientDeviceId,
+      })),
+      recipients,
+    );
+  } catch {
+    throw new E2EEV2Error(409, 'group_e2ee_distribution_required');
+  }
+  return { ...context, recipients };
 }
 
 module.exports = {

@@ -9,6 +9,7 @@ const { createE2EEV2TelemetryMiddleware } = require('./pilotTelemetry');
 const { schemas: groupSchemas } = require('../group/contracts');
 const { isGroupE2eeEnabled } = require('../group/config');
 const { createGroupDistributionDeliveryService } = require('../group/distributionDelivery');
+const { createGroupMessageDeliveryService } = require('../group/messageDelivery');
 const {
   evaluateE2EEV2Access,
   evaluateE2EEV2SendAccess,
@@ -152,10 +153,28 @@ function parseGroupRouteIdentity(req, res) {
   return { deviceId, distributionId, epoch };
 }
 
+function parseGroupMessageRouteIdentity(req, res) {
+  const deviceId = String(req.query.deviceId || req.body?.deviceId || '');
+  const messageId = String(req.params.messageId || '');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deviceId)) {
+    res.status(400).json({ error: 'v2_device_id_invalid' });
+    return null;
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(messageId)) {
+    res.status(400).json({ error: 'group_e2ee_message_id_invalid' });
+    return null;
+  }
+  return { deviceId, messageId };
+}
+
 function registerE2EEV2Routes(router, io) {
   const service = createDeviceLifecycleService({ database: db, firebaseAdmin: admin });
   const messageService = createMessageDeliveryService({ database: db, firebaseAdmin: admin });
   const groupDistributionService = createGroupDistributionDeliveryService({
+    database: db,
+    firebaseAdmin: admin,
+  });
+  const groupMessageService = createGroupMessageDeliveryService({
     database: db,
     firebaseAdmin: admin,
   });
@@ -404,6 +423,111 @@ function registerE2EEV2Routes(router, io) {
         res.json({ ok: true, ...result });
       } catch (error) {
         sendError(res, error, 'group E2EE distributie bevestigen fout:');
+      }
+    },
+  );
+
+  router.post(
+    '/v2/groups/messages/send',
+    verifyAuth,
+    requireGroupE2eeRuntime,
+    requirePilotMessageParticipants,
+    requireE2EEV2SendAccess,
+    async (req, res) => {
+      const message = parseBody(groupSchemas.groupMessage, req.body, res);
+      if (!message) return;
+      try {
+        const result = await groupMessageService.sendMessage(req.uid, message);
+        if (!result.idempotent) {
+          result.deliveries.forEach(({ recipientUserId, recipientDeviceId }) => {
+            io.to(deviceRoomName(recipientUserId, recipientDeviceId)).emit(
+              'e2ee:group:message-available',
+              {
+                protocol: message.protocol,
+                protocolVersion: message.protocolVersion,
+                conversationId: message.conversationId,
+                messageId: result.messageId,
+              },
+            );
+          });
+        }
+        res.status(result.idempotent ? 200 : 201).json({
+          ok: true,
+          ...result,
+          deliveries: undefined,
+        });
+      } catch (error) {
+        sendError(res, error, 'group E2EE bericht opslaan fout:');
+      }
+    },
+  );
+
+  router.get(
+    '/v2/groups/conversations/:conversationId/messages',
+    verifyAuth,
+    requireGroupE2eeRuntime,
+    requirePilotConversation,
+    async (req, res) => {
+      const deviceId = String(req.query.deviceId || '');
+      const limit = Number(req.query.limit || 50);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deviceId)) {
+        return res.status(400).json({ error: 'v2_device_id_invalid' });
+      }
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return res.status(400).json({ error: 'v2_limit_invalid' });
+      }
+      try {
+        const messages = await groupMessageService.listPending({
+          userId: req.uid,
+          deviceId,
+          conversationId: req.params.conversationId,
+          limit,
+        });
+        res.json({ messages });
+      } catch (error) {
+        sendError(res, error, 'group E2EE berichtenfeed ophalen fout:');
+      }
+    },
+  );
+
+  router.get(
+    '/v2/groups/conversations/:conversationId/messages/:messageId',
+    verifyAuth,
+    requireGroupE2eeRuntime,
+    requirePilotConversation,
+    async (req, res) => {
+      const identity = parseGroupMessageRouteIdentity(req, res);
+      if (!identity) return;
+      try {
+        const message = await groupMessageService.getMessage({
+          userId: req.uid,
+          conversationId: req.params.conversationId,
+          ...identity,
+        });
+        res.json(message);
+      } catch (error) {
+        sendError(res, error, 'group E2EE bericht ophalen fout:');
+      }
+    },
+  );
+
+  router.post(
+    '/v2/groups/conversations/:conversationId/messages/:messageId/ack',
+    verifyAuth,
+    requireGroupE2eeRuntime,
+    requirePilotConversation,
+    async (req, res) => {
+      const identity = parseGroupMessageRouteIdentity(req, res);
+      if (!identity) return;
+      try {
+        const result = await groupMessageService.acknowledgeMessage({
+          userId: req.uid,
+          conversationId: req.params.conversationId,
+          ...identity,
+        });
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        sendError(res, error, 'group E2EE bericht bevestigen fout:');
       }
     },
   );

@@ -1,6 +1,10 @@
 const { admin, db } = require('../firebase');
 const { schemas, validate } = require('../validate');
 const { sendPush } = require('../push');
+const {
+  initialGroupEpochFields,
+  rotateGroupEpochFields,
+} = require('../e2ee/group/epochLifecycle');
 
 function isGroupAdmin(conversation, uid) {
   return Array.isArray(conversation?.adminIds)
@@ -54,6 +58,7 @@ module.exports = function registerConversations(io, socket, uid) {
         }
       }
 
+      const groupEpochFields = isGroup ? initialGroupEpochFields(members) : {};
       const convRef = await db.collection('conversations').add({
         members,
         memberNames,
@@ -64,6 +69,7 @@ module.exports = function registerConversations(io, socket, uid) {
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         lastMessage: null,
+        ...groupEpochFields,
       });
 
       const convId = convRef.id;
@@ -76,6 +82,7 @@ module.exports = function registerConversations(io, socket, uid) {
         groupName: groupName || null,
         creatorId: isGroup ? uid : null,
         lastMessage: null,
+        ...groupEpochFields,
       };
 
       // Notificeer alle andere leden zodat zij de conversation:join kunnen uitvoeren
@@ -96,18 +103,39 @@ module.exports = function registerConversations(io, socket, uid) {
   // ── Groepslid toevoegen ──
   socket.on('conversation:addMember', async ({ convId, uid: targetUid, displayName }, cb) => {
     try {
-      const convDoc = await db.collection('conversations').doc(convId).get();
-      if (!convDoc.exists || !(convDoc.data().members || []).includes(uid)) { cb?.({ error: 'Geen toegang.' }); return; }
-      if (convDoc.data().isGroup && convDoc.data().creatorId && convDoc.data().creatorId !== uid) { cb?.({ error: 'Alleen de groepsbeheerder kan leden toevoegen.' }); return; }
-      await db.collection('conversations').doc(convId).update({
-        members: admin.firestore.FieldValue.arrayUnion(targetUid),
-        [`memberNames.${targetUid}`]: displayName,
+      const convRef = db.collection('conversations').doc(convId);
+      const result = await db.runTransaction(async (transaction) => {
+        const convDoc = await transaction.get(convRef);
+        if (!convDoc.exists || !(convDoc.data().members || []).includes(uid)) {
+          throw new Error('Geen toegang.');
+        }
+        const convData = convDoc.data() || {};
+        if (!convData.isGroup) throw new Error('Dit is geen groepsgesprek.');
+        if (!isGroupAdmin(convData, uid)) {
+          throw new Error('Alleen de groepsbeheerder kan leden toevoegen.');
+        }
+        const nextMembers = [...new Set([...(convData.members || []), targetUid])];
+        const membershipChanged = nextMembers.length !== (convData.members || []).length;
+        const epochFields = membershipChanged
+          ? rotateGroupEpochFields(
+            convData,
+            nextMembers,
+            admin.firestore.FieldValue.serverTimestamp(),
+          )
+          : {};
+        transaction.update(convRef, {
+          members: nextMembers,
+          [`memberNames.${targetUid}`]: displayName,
+          ...epochFields,
+        });
+        return { convData, nextMembers, epochFields };
       });
       const conversation = {
         id: convId,
-        ...convDoc.data(),
-        members: [...new Set([...(convDoc.data().members || []), targetUid])],
-        memberNames: { ...(convDoc.data().memberNames || {}), [targetUid]: displayName },
+        ...result.convData,
+        members: result.nextMembers,
+        memberNames: { ...(result.convData.memberNames || {}), [targetUid]: displayName },
+        ...result.epochFields,
       };
       const payload = { convId, uid: targetUid, conversation };
       // Snake_case en het conversation-object vormen het gedeelde realtime
@@ -122,31 +150,52 @@ module.exports = function registerConversations(io, socket, uid) {
   // ── Groepslid verwijderen ──
   socket.on('conversation:removeMember', async ({ convId, uid: targetUid }, cb) => {
     try {
-      const convDoc = await db.collection('conversations').doc(convId).get();
-      if (!convDoc.exists || !(convDoc.data().members || []).includes(uid)) { cb?.({ error: 'Geen toegang.' }); return; }
-      const convData = convDoc.data() || {};
-      const members = convData.members || [];
-      const isSelfLeave = targetUid === uid;
-      if (!members.includes(targetUid)) { cb?.({ error: 'Geen toegang.' }); return; }
-      if (!convData.isGroup) { cb?.({ error: 'Dit is geen groepsgesprek.' }); return; }
-      if (!isSelfLeave && !isGroupAdmin(convData, uid)) { cb?.({ error: 'Alleen beheerders kunnen leden verwijderen.' }); return; }
-      if (!isSelfLeave && isGroupAdmin(convData, targetUid)) { cb?.({ error: 'Een beheerder kan een andere beheerder niet verwijderen.' }); return; }
-      const update = { members: admin.firestore.FieldValue.arrayRemove(targetUid) };
-      update[`memberNames.${targetUid}`] = admin.firestore.FieldValue.delete();
-      if (convData.isGroup && convData.creatorId === targetUid) {
-        const nextCreatorId = members.find(memberUid => memberUid !== targetUid);
-        if (nextCreatorId) update.creatorId = nextCreatorId;
-        else update.creatorId = admin.firestore.FieldValue.delete();
-      }
-      await db.collection('conversations').doc(convId).update(update);
+      const convRef = db.collection('conversations').doc(convId);
+      const result = await db.runTransaction(async (transaction) => {
+        const convDoc = await transaction.get(convRef);
+        if (!convDoc.exists || !(convDoc.data().members || []).includes(uid)) {
+          throw new Error('Geen toegang.');
+        }
+        const convData = convDoc.data() || {};
+        const members = convData.members || [];
+        const isSelfLeave = targetUid === uid;
+        if (!members.includes(targetUid)) throw new Error('Geen toegang.');
+        if (!convData.isGroup) throw new Error('Dit is geen groepsgesprek.');
+        if (!isSelfLeave && !isGroupAdmin(convData, uid)) {
+          throw new Error('Alleen beheerders kunnen leden verwijderen.');
+        }
+        if (!isSelfLeave && isGroupAdmin(convData, targetUid)) {
+          throw new Error('Een beheerder kan een andere beheerder niet verwijderen.');
+        }
+        const nextMembers = members.filter(memberUid => memberUid !== targetUid);
+        const epochFields = rotateGroupEpochFields(
+          convData,
+          nextMembers,
+          admin.firestore.FieldValue.serverTimestamp(),
+        );
+        const update = {
+          members: nextMembers,
+          [`memberNames.${targetUid}`]: admin.firestore.FieldValue.delete(),
+          ...epochFields,
+        };
+        if (convData.creatorId === targetUid) {
+          const nextCreatorId = nextMembers[0];
+          if (nextCreatorId) update.creatorId = nextCreatorId;
+          else update.creatorId = admin.firestore.FieldValue.delete();
+        }
+        transaction.update(convRef, update);
+        return { convData, nextMembers, epochFields };
+      });
+      const { convData, nextMembers, epochFields } = result;
       const memberNames = { ...(convData.memberNames || {}) };
       delete memberNames[targetUid];
       const conversation = {
         id: convId,
         ...convData,
-        members: members.filter((memberUid) => memberUid !== targetUid),
+        members: nextMembers,
         memberNames,
-        ...(convData.creatorId === targetUid ? { creatorId: members.find((memberUid) => memberUid !== targetUid) || null } : {}),
+        ...epochFields,
+        ...(convData.creatorId === targetUid ? { creatorId: nextMembers[0] || null } : {}),
       };
       const payload = { convId, uid: targetUid, removedSelf: false, conversation };
       io.to(convId).emit('conversation:member_removed', payload);

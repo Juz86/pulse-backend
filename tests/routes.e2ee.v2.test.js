@@ -20,6 +20,12 @@ const mockGroupDistributionService = {
   listPending: jest.fn(),
   storeDistribution: jest.fn(),
 };
+const mockGroupMessageService = {
+  acknowledgeMessage: jest.fn(),
+  getMessage: jest.fn(),
+  listPending: jest.fn(),
+  sendMessage: jest.fn(),
+};
 const mockIoEmit = jest.fn();
 const mockIoTo = jest.fn(() => ({ emit: mockIoEmit }));
 
@@ -79,6 +85,9 @@ jest.mock('../src/e2ee/v2/messageDelivery', () => ({
 }));
 jest.mock('../src/e2ee/group/distributionDelivery', () => ({
   createGroupDistributionDeliveryService: () => mockGroupDistributionService,
+}));
+jest.mock('../src/e2ee/group/messageDelivery', () => ({
+  createGroupMessageDeliveryService: () => mockGroupMessageService,
 }));
 
 const { E2EEV2Error } = require('../src/e2ee/v2/deviceLifecycle');
@@ -183,6 +192,29 @@ describe('pulse_e2ee_v2 routes', () => {
       idempotent: false,
       deliveries: [{ recipientUserId: 'user-b', recipientDeviceId: 'device-b1' }],
     });
+    mockGroupMessageService.sendMessage.mockResolvedValue({
+      messageId: '123e4567-e89b-42d3-a456-426614174001',
+      clientMessageId: '123e4567-e89b-42d3-a456-426614174001',
+      idempotent: false,
+      deliveries: [{ recipientUserId: 'user-b', recipientDeviceId: 'device-b1' }],
+    });
+    mockGroupMessageService.listPending.mockResolvedValue([{
+      protocol: 'pulse_group_e2ee_v1',
+      protocolVersion: 1,
+      conversationId: 'group-123',
+      messageId: '123e4567-e89b-42d3-a456-426614174001',
+    }]);
+    mockGroupMessageService.getMessage.mockResolvedValue({
+      protocol: 'pulse_group_e2ee_v1',
+      protocolVersion: 1,
+      conversationId: 'group-123',
+      messageId: '123e4567-e89b-42d3-a456-426614174001',
+      ciphertext: 'Y2lwaGVydGV4dA==',
+    });
+    mockGroupMessageService.acknowledgeMessage.mockResolvedValue({
+      messageId: '123e4567-e89b-42d3-a456-426614174001',
+      idempotent: false,
+    });
   });
 
   afterAll(() => {
@@ -251,6 +283,37 @@ describe('pulse_e2ee_v2 routes', () => {
         conversationId: 'group-123',
         epoch: 4,
         distributionId: distribution.distributionId,
+      }),
+    );
+    expect(JSON.stringify(mockIoEmit.mock.calls)).not.toContain('Y2lwaGVydGV4dA==');
+  });
+
+  test('relays only a contentless availability event for an accepted group message', async () => {
+    process.env.E2EE_V2_GROUPS_ENABLED = 'true';
+    const message = {
+      protocol: 'pulse_group_e2ee_v1',
+      protocolVersion: 1,
+      conversationId: 'group-123',
+      senderDeviceId: 'device-a1',
+      senderSignalDeviceId: 1,
+      senderIdentityVersion: 1,
+      epoch: 4,
+      distributionId: 'bc263346-f24c-4550-8484-6ef56dd301a6',
+      clientMessageId: '123e4567-e89b-42d3-a456-426614174001',
+      messageType: 'text',
+      ciphertext: 'Y2lwaGVydGV4dA==',
+    };
+    const response = await request(buildApp())
+      .post('/v2/groups/messages/send')
+      .send(message);
+
+    expect(response.status).toBe(201);
+    expect(mockGroupMessageService.sendMessage).toHaveBeenCalledWith('user-a', message);
+    expect(mockIoEmit).toHaveBeenCalledWith(
+      'e2ee:group:message-available',
+      expect.objectContaining({
+        conversationId: 'group-123',
+        messageId: message.clientMessageId,
       }),
     );
     expect(JSON.stringify(mockIoEmit.mock.calls)).not.toContain('Y2lwaGVydGV4dA==');
