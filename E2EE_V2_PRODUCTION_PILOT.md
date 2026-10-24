@@ -45,6 +45,23 @@ E2EE_V2_QA_MODE_ACKNOWLEDGED=true
 
 Gebruik `qa` nooit op een productieomgeving.
 
+Een via Play intern verspreide, nog niet onafhankelijk beoordeelde testbuild
+gebruikt uitsluitend tijdelijk de volgende begrensde modus:
+
+```text
+E2EE_V2_ENABLED=true
+E2EE_V2_ROLLOUT_MODE=internal_play_test
+E2EE_V2_INTERNAL_PLAY_TEST_ACK=UNREVIEWED_INTERNAL_PLAY_TEST
+E2EE_V2_PILOT_SEND_ENABLED=false
+E2EE_V2_PILOT_USER_IDS=<exact twee testaccount-IDs>
+E2EE_V2_PILOT_CONVERSATION_IDS=<exact een testgesprek-ID>
+```
+
+Deze modus omzeilt alleen het reviewbewijs voor de interne test. Dezelfde
+allowlists en send-kill-switch als de productiepilot blijven verplicht. Gebruik
+hem niet voor een openbare track, zet hem na de test terug op `disabled` en
+vervang hem voor iedere productiepilot door `pilot` met echt reviewbewijs.
+
 ## Activering
 
 1. Deploy met `E2EE_V2_PILOT_SEND_ENABLED=false`.

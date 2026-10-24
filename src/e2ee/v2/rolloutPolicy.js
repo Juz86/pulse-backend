@@ -1,6 +1,7 @@
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const INTERNAL_PLAY_TEST_ACK = 'UNREVIEWED_INTERNAL_PLAY_TEST';
 
 function isTrue(value) {
   return String(value || '').toLowerCase() === 'true';
@@ -30,6 +31,15 @@ function readE2EEV2RolloutPolicy(env = process.env) {
   if (globallyEnabled && mode === 'qa') {
     configured = isTrue(env.E2EE_V2_QA_MODE_ACKNOWLEDGED);
     reason = configured ? null : 'v2_qa_not_acknowledged';
+  } else if (globallyEnabled && mode === 'internal_play_test') {
+    configured = Boolean(
+      userIds
+      && conversationIds
+      && userIds.size > 0
+      && conversationIds.size > 0
+      && env.E2EE_V2_INTERNAL_PLAY_TEST_ACK === INTERNAL_PLAY_TEST_ACK
+    );
+    reason = configured ? null : 'v2_internal_play_test_not_configured';
   } else if (globallyEnabled && mode === 'pilot') {
     configured = Boolean(
       userIds

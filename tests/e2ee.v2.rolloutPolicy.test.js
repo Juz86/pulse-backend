@@ -53,6 +53,63 @@ describe('E2EE v2 rollout policy', () => {
     })).toEqual({ allowed: true, mode: 'pilot' });
   });
 
+  test('allows a bounded unreviewed internal Play test without weakening pilot mode', () => {
+    const env = {
+      E2EE_V2_ENABLED: 'true',
+      E2EE_V2_ROLLOUT_MODE: 'internal_play_test',
+      E2EE_V2_INTERNAL_PLAY_TEST_ACK: 'UNREVIEWED_INTERNAL_PLAY_TEST',
+      E2EE_V2_PILOT_USER_IDS: 'user-a,user-b',
+      E2EE_V2_PILOT_CONVERSATION_IDS: 'conversation-1',
+    };
+
+    expect(readE2EEV2RolloutPolicy(env)).toMatchObject({
+      configured: true,
+      mode: 'internal_play_test',
+      sendEnabled: false,
+    });
+    expect(evaluateE2EEV2Access({
+      userId: 'user-a', conversationId: 'conversation-1', env,
+    })).toEqual({ allowed: true, mode: 'internal_play_test' });
+    expect(evaluateE2EEV2SendAccess({
+      userId: 'user-a', conversationId: 'conversation-1', env,
+    })).toMatchObject({ allowed: false, error: 'v2_pilot_sends_paused', status: 503 });
+
+    expect(readE2EEV2RolloutPolicy({
+      ...env,
+      E2EE_V2_INTERNAL_PLAY_TEST_ACK: 'true',
+    })).toMatchObject({
+      configured: false,
+      reason: 'v2_internal_play_test_not_configured',
+    });
+    expect(readE2EEV2RolloutPolicy({
+      ...env,
+      E2EE_V2_ROLLOUT_MODE: 'pilot',
+    })).toMatchObject({ configured: false, reason: 'v2_pilot_not_configured' });
+  });
+
+  test('keeps the internal Play test restricted to exact allowlists', () => {
+    const env = {
+      E2EE_V2_ENABLED: 'true',
+      E2EE_V2_ROLLOUT_MODE: 'internal_play_test',
+      E2EE_V2_INTERNAL_PLAY_TEST_ACK: 'UNREVIEWED_INTERNAL_PLAY_TEST',
+      E2EE_V2_PILOT_USER_IDS: 'user-a,user-b',
+      E2EE_V2_PILOT_CONVERSATION_IDS: 'conversation-1',
+      E2EE_V2_PILOT_SEND_ENABLED: 'true',
+    };
+
+    expect(evaluateE2EEV2Access({ userId: 'user-c', env })).toMatchObject({
+      allowed: false, error: 'v2_pilot_user_not_allowed', status: 403,
+    });
+    expect(evaluateE2EEV2Access({
+      userId: 'user-a', conversationId: 'conversation-2', env,
+    })).toMatchObject({
+      allowed: false, error: 'v2_pilot_conversation_not_allowed', status: 403,
+    });
+    expect(evaluateE2EEV2SendAccess({
+      userId: 'user-a', conversationId: 'conversation-1', env,
+    })).toEqual({ allowed: true, mode: 'internal_play_test' });
+  });
+
   test('rejects a deployed backend commit that differs from the reviewed commit', () => {
     const policy = readE2EEV2RolloutPolicy({
       E2EE_V2_ENABLED: 'true',
