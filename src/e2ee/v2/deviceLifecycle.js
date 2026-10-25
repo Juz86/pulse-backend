@@ -45,9 +45,17 @@ function isChatPaused(user) {
 
 function assertClaimPolicy({ requesterId, recipientId, conversation, requester, recipient }) {
   const members = Array.isArray(conversation?.members) ? conversation.members : [];
-  if (
-    conversation?.isGroup
-    || members.length !== 2
+  if (conversation?.isGroup) {
+    if (
+      members.length < 2
+      || !members.includes(requesterId)
+      || !members.includes(recipientId)
+      || requesterId === recipientId
+    ) {
+      throw new E2EEV2Error(403, 'group_e2ee_membership_denied');
+    }
+  } else if (
+    members.length !== 2
     || !members.includes(requesterId)
     || !members.includes(recipientId)
     || requesterId === recipientId
@@ -292,7 +300,10 @@ function createDeviceLifecycleService({ database, firebaseAdmin }) {
       const isOwnDeviceClaim = requesterId === recipientId;
       if (isOwnDeviceClaim) {
         const members = Array.isArray(conversation.members) ? conversation.members : [];
-        if (!allowOwnDevices || conversation.isGroup || members.length !== 2 || !members.includes(requesterId)) {
+        const validConversation = conversation.isGroup
+          ? members.length >= 2 && members.includes(requesterId)
+          : members.length === 2 && members.includes(requesterId);
+        if (!allowOwnDevices || !validConversation) {
           throw new E2EEV2Error(403, 'v2_direct_conversation_required');
         }
       } else {

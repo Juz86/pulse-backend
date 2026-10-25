@@ -534,21 +534,63 @@ describe('pulse_e2ee_v2 transactional prekey claim', () => {
     }), 409, 'v2_no_active_recipient_devices');
   });
 
-  test('rejects group and unrelated conversation claims', async () => {
+  test('allows group members to claim recipient bundles', async () => {
     const { state, service } = createFixture();
     state.conversations['conversation-1'].isGroup = true;
 
-    await expectServiceError(
-      service.claimKeyBundles({
-        requesterId: 'user-a',
-        requesterDeviceId: 'device-requester',
-        claimId: '123e4567-e89b-42d3-a456-426614174000',
-        conversationId: 'conversation-1',
-        recipientId: 'user-b',
-      }),
-      403,
-      'v2_direct_conversation_required',
-    );
+    const claim = await service.claimKeyBundles({
+      requesterId: 'user-a',
+      requesterDeviceId: 'device-requester',
+      claimId: '123e4567-e89b-42d3-a456-426614174000',
+      conversationId: 'conversation-1',
+      recipientId: 'user-b',
+    });
+
+    expect(claim.recipientUserId).toBe('user-b');
+    expect(claim.devices).toEqual([
+      expect.objectContaining({ deviceId: 'device-b1' }),
+    ]);
+  });
+
+  test('allows group members to claim their own sibling-device bundles', async () => {
+    const { state, service } = createFixture();
+    state.conversations['conversation-1'].isGroup = true;
+    state.devices['user-a']['device-sibling'] = {
+      ...clone(state.devices['user-a']['device-requester']),
+      registrationId: 44,
+      oneTimePreKeys: [{ keyId: 12, publicKey: BASE64_KEY }],
+      oneTimePreKeyCount: 1,
+    };
+
+    const claim = await service.claimKeyBundles({
+      requesterId: 'user-a',
+      requesterDeviceId: 'device-requester',
+      claimId: '123e4567-e89b-42d3-a456-426614174001',
+      conversationId: 'conversation-1',
+      recipientId: 'user-a',
+      allowOwnDevices: true,
+    });
+
+    expect(claim.devices).toEqual([
+      expect.objectContaining({ deviceId: 'device-sibling' }),
+    ]);
+  });
+
+  test('rejects group bundle claims from a non-member', async () => {
+    const { state, service } = createFixture();
+    state.conversations['conversation-1'] = {
+      isGroup: true,
+      members: ['user-b', 'user-c'],
+    };
+
+    await expectServiceError(service.claimKeyBundles({
+      requesterId: 'user-a',
+      requesterDeviceId: 'device-requester',
+      claimId: '123e4567-e89b-42d3-a456-426614174002',
+      conversationId: 'conversation-1',
+      recipientId: 'user-b',
+    }), 403, 'group_e2ee_membership_denied');
+    expect(state.devices['user-b']['device-b1'].oneTimePreKeyCount).toBe(2);
   });
 });
 
