@@ -2,6 +2,7 @@ const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const INTERNAL_PLAY_TEST_ACK = 'UNREVIEWED_INTERNAL_PLAY_TEST';
+const GENERAL_AVAILABILITY_ACK = 'UNREVIEWED_GENERAL_AVAILABILITY';
 
 function isTrue(value) {
   return String(value || '').toLowerCase() === 'true';
@@ -40,6 +41,9 @@ function readE2EEV2RolloutPolicy(env = process.env) {
       && env.E2EE_V2_INTERNAL_PLAY_TEST_ACK === INTERNAL_PLAY_TEST_ACK
     );
     reason = configured ? null : 'v2_internal_play_test_not_configured';
+  } else if (globallyEnabled && mode === 'general_availability') {
+    configured = env.E2EE_V2_GENERAL_AVAILABILITY_ACK === GENERAL_AVAILABILITY_ACK;
+    reason = configured ? null : 'v2_general_availability_not_configured';
   } else if (globallyEnabled && mode === 'pilot') {
     configured = Boolean(
       userIds
@@ -66,7 +70,10 @@ function readE2EEV2RolloutPolicy(env = process.env) {
     reason,
     review,
     sendEnabled: configured && (
-      mode === 'qa' || isTrue(env.E2EE_V2_PILOT_SEND_ENABLED)
+      mode === 'qa'
+      || (mode === 'general_availability'
+        ? isTrue(env.E2EE_V2_GENERAL_AVAILABILITY_SEND_ENABLED)
+        : isTrue(env.E2EE_V2_PILOT_SEND_ENABLED))
     ),
     userIds: userIds || new Set(),
   };
@@ -77,7 +84,9 @@ function evaluateE2EEV2Access({ userId, conversationId = null, env = process.env
   if (!policy.configured) {
     return { allowed: false, mode: policy.mode, status: 503, error: policy.reason };
   }
-  if (policy.mode === 'qa') return { allowed: true, mode: policy.mode };
+  if (policy.mode === 'qa' || policy.mode === 'general_availability') {
+    return { allowed: true, mode: policy.mode };
+  }
   if (!policy.userIds.has(String(userId || ''))) {
     return { allowed: false, mode: policy.mode, status: 403, error: 'v2_pilot_user_not_allowed' };
   }
@@ -97,7 +106,9 @@ function getE2EEV2PilotStatus(userId, env = process.env) {
   return {
     enabled: policy.configured,
     enrolled: policy.configured && (
-      policy.mode === 'qa' || policy.userIds.has(String(userId || ''))
+      policy.mode === 'qa'
+      || policy.mode === 'general_availability'
+      || policy.userIds.has(String(userId || ''))
     ),
     mode: policy.mode,
     sendingEnabled: policy.sendEnabled,

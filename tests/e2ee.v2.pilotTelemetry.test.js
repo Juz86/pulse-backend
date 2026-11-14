@@ -45,4 +45,19 @@ describe('E2EE v2 pilot telemetry', () => {
     expect(JSON.stringify(log.mock.calls)).not.toContain('must-not-appear');
     log.mockRestore();
   });
+
+  test('keeps general availability as a non-identifying rollout dimension', () => {
+    const log = jest.spyOn(console, 'info').mockImplementation(() => {});
+    expect(recordE2EEV2Request({
+      method: 'GET',
+      routePath: '/v2/pilot/status',
+      rolloutMode: 'general_availability',
+      statusCode: 200,
+      durationMs: 5,
+    })).toMatchObject({
+      operation: 'pilot_status',
+      rolloutMode: 'general_availability',
+    });
+    log.mockRestore();
+  });
 });

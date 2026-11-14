@@ -62,6 +62,25 @@ allowlists en send-kill-switch als de productiepilot blijven verplicht. Gebruik
 hem niet voor een openbare track, zet hem na de test terug op `disabled` en
 vervang hem voor iedere productiepilot door `pilot` met echt reviewbewijs.
 
+## Algemene beschikbaarheid zonder onafhankelijke review
+
+Alleen na een expliciete productbeslissing kan E2EE voor alle accounts worden
+ingeschakeld zonder reviewattest. Dit is geen geauditeerde status en mag niet
+als zodanig in productcommunicatie worden aangeduid. Gebruik uitsluitend:
+
+```text
+E2EE_V2_ENABLED=true
+E2EE_V2_ROLLOUT_MODE=general_availability
+E2EE_V2_GENERAL_AVAILABILITY_ACK=UNREVIEWED_GENERAL_AVAILABILITY
+E2EE_V2_GENERAL_AVAILABILITY_SEND_ENABLED=true
+```
+
+Deze modus laat alle geauthenticeerde accounts en gesprekken toe. De laatste
+variabele is de serverzijdige kill-switch: zet hem op `false` om nieuwe
+versleutelde verzendingen direct te pauzeren zonder de app of bestaande
+ciphertext-ophaling uit te schakelen. Laat deze waarden uitsluitend als
+deploymentsecrets buiten Git staan.
+
 ## Activering
 
 1. Deploy met `E2EE_V2_PILOT_SEND_ENABLED=false`.

@@ -110,6 +110,49 @@ describe('E2EE v2 rollout policy', () => {
     })).toEqual({ allowed: true, mode: 'internal_play_test' });
   });
 
+  test('requires an explicit acknowledgement for general availability and then enrolls all accounts', () => {
+    const env = {
+      E2EE_V2_ENABLED: 'true',
+      E2EE_V2_ROLLOUT_MODE: 'general_availability',
+    };
+
+    expect(readE2EEV2RolloutPolicy(env)).toMatchObject({
+      configured: false,
+      reason: 'v2_general_availability_not_configured',
+    });
+
+    const acknowledgedButPaused = {
+      ...env,
+      E2EE_V2_GENERAL_AVAILABILITY_ACK: 'UNREVIEWED_GENERAL_AVAILABILITY',
+    };
+    expect(evaluateE2EEV2SendAccess({
+      userId: 'new-user', conversationId: 'new-conversation', env: acknowledgedButPaused,
+    })).toEqual({
+      allowed: false,
+      mode: 'general_availability',
+      status: 503,
+      error: 'v2_pilot_sends_paused',
+    });
+
+    const enabled = {
+      ...env,
+      E2EE_V2_GENERAL_AVAILABILITY_ACK: 'UNREVIEWED_GENERAL_AVAILABILITY',
+      E2EE_V2_GENERAL_AVAILABILITY_SEND_ENABLED: 'true',
+    };
+    expect(evaluateE2EEV2Access({
+      userId: 'new-user', conversationId: 'new-conversation', env: enabled,
+    })).toEqual({ allowed: true, mode: 'general_availability' });
+    expect(evaluateE2EEV2SendAccess({
+      userId: 'new-user', conversationId: 'new-conversation', env: enabled,
+    })).toEqual({ allowed: true, mode: 'general_availability' });
+    expect(getE2EEV2PilotStatus('new-user', enabled)).toEqual({
+      enabled: true,
+      enrolled: true,
+      mode: 'general_availability',
+      sendingEnabled: true,
+    });
+  });
+
   test('rejects a deployed backend commit that differs from the reviewed commit', () => {
     const policy = readE2EEV2RolloutPolicy({
       E2EE_V2_ENABLED: 'true',

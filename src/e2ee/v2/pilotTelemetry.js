@@ -53,7 +53,7 @@ function recordE2EEV2Request({ method, routePath, rolloutMode, statusCode, durat
     operation: OPERATIONS.has(operation) ? operation : 'unknown',
     outcome: outcomeForStatus(statusCode),
     statusCode: Number(statusCode),
-    rolloutMode: ['qa', 'internal_play_test', 'pilot'].includes(rolloutMode)
+    rolloutMode: ['qa', 'internal_play_test', 'pilot', 'general_availability'].includes(rolloutMode)
       ? rolloutMode
       : 'disabled',
     durationBucket: durationBucket(Math.max(0, Number(durationMs) || 0)),
