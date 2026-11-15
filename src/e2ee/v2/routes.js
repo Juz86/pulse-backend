@@ -6,6 +6,7 @@ const { E2EEV2Error, createDeviceLifecycleService } = require('./deviceLifecycle
 const { deviceRoomName } = require('./deviceAudience');
 const { createMessageDeliveryService } = require('./messageDelivery');
 const { createE2EEV2TelemetryMiddleware } = require('./pilotTelemetry');
+const { sendPush } = require('../../push');
 const { schemas: groupSchemas } = require('../group/contracts');
 const { isGroupE2eeEnabled } = require('../group/config');
 const { createGroupDistributionDeliveryService } = require('../group/distributionDelivery');
@@ -85,6 +86,44 @@ function scheduleSecurityEvent(io, event) {
   broadcastSecurityEvent(io, event).catch((error) => {
     console.warn('v2 security event broadcast mislukt:', error.message);
   });
+}
+
+function parentIdsForUser(user = {}) {
+  return [...new Set([
+    user.parentId,
+    user.parentUid,
+    user.managedByParentId,
+    ...(Array.isArray(user.parentIds) ? user.parentIds : []),
+  ].filter((value) => typeof value === 'string' && value.length > 0))];
+}
+
+async function notifyParentsAboutPendingDevice(userId, deviceId, deviceLabel) {
+  const snapshot = await db.collection('users').doc(userId).get();
+  if (!snapshot.exists) return;
+  const user = snapshot.data() || {};
+  if (user.role !== 'child') return;
+  const childName = String(user.displayName || user.username || 'Je kind').slice(0, 160);
+  const description = `${childName} is ingelogd op een nieuw apparaat (${deviceLabel}).`;
+  await Promise.allSettled(parentIdsForUser(user).map(async (parentId) => {
+    await db.collection('parentActivities').add({
+      parentId,
+      childUid: userId,
+      childName,
+      type: 'e2ee_device_approval_required',
+      description,
+      deviceId,
+      deviceLabel,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    await sendPush(parentId, {
+      title: `Nieuw apparaat voor ${childName}`,
+      body: 'Controleer dit apparaat voordat beveiligde functies worden ingeschakeld.',
+    }, {
+      type: 'e2ee_device_approval_required',
+      childUid: userId,
+      deviceId,
+    });
+  }));
 }
 
 function requireE2EEV2Access(conversationIdFromRequest = null, userIdsFromRequest = null) {
@@ -230,6 +269,15 @@ function registerE2EEV2Routes(router, io) {
     }
     try {
       const result = await service.registerDevice(req.uid, registration);
+      if (result.status === 'PENDING_APPROVAL') {
+        notifyParentsAboutPendingDevice(
+          req.uid,
+          result.deviceId,
+          registration.deviceLabel || 'Onbekend apparaat',
+        ).catch((error) => {
+          console.warn('v2 device-goedkeuring melden mislukt:', error.message);
+        });
+      }
       res.status(result.status === 'REGISTERED' ? 201 : 200).json({ ok: true, ...result });
     } catch (error) {
       sendError(res, error, 'v2 device register fout:');
