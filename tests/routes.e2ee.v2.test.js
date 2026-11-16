@@ -342,6 +342,27 @@ describe('pulse_e2ee_v2 routes', () => {
     expect(JSON.stringify(response.body)).not.toContain('user-a');
   });
 
+  test('keeps the legacy rollout label for v2 clients that predate general availability', async () => {
+    process.env.E2EE_V2_ROLLOUT_MODE = 'general_availability';
+    process.env.E2EE_V2_GENERAL_AVAILABILITY_ACK = 'UNREVIEWED_GENERAL_AVAILABILITY';
+    process.env.E2EE_V2_GENERAL_AVAILABILITY_SEND_ENABLED = 'true';
+
+    const legacy = await request(buildApp())
+      .get('/v2/pilot/status')
+      .set('x-test-uid', 'user-a');
+    const current = await request(buildApp())
+      .get('/v2/pilot/status')
+      .set('x-test-uid', 'user-a')
+      .set('X-Pulse-E2EE-Status-Version', '2');
+
+    expect(legacy.body).toEqual({
+      enabled: true, enrolled: true, mode: 'pilot', sendingEnabled: true,
+    });
+    expect(current.body).toEqual({
+      enabled: true, enrolled: true, mode: 'general_availability', sendingEnabled: true,
+    });
+  });
+
   test('blocks users and conversations outside the production pilot allowlists', async () => {
     process.env.E2EE_V2_ROLLOUT_MODE = 'pilot';
     process.env.E2EE_V2_PILOT_USER_IDS = 'user-a,user-b';

@@ -231,7 +231,16 @@ function registerE2EEV2Routes(router, io) {
   });
 
   router.get('/v2/pilot/status', verifyAuth, (req, res) => {
-    res.json(getE2EEV2PilotStatus(req.uid));
+    const status = getE2EEV2PilotStatus(req.uid);
+    // Earlier Pulse releases already implement the v2 cryptographic protocol,
+    // but validate the rollout label against a fixed list that predates
+    // `general_availability`. Returning their known `pilot` label preserves
+    // that secure protocol path; it does not weaken E2EE or alter access.
+    const statusVersion = Number(req.get('X-Pulse-E2EE-Status-Version') || 1);
+    if (status.mode === 'general_availability' && statusVersion < 2) {
+      status.mode = 'pilot';
+    }
+    res.json(status);
   });
 
   router.get('/v2/devices', verifyAuth, requirePilotUser, async (req, res) => {
