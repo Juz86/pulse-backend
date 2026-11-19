@@ -173,6 +173,59 @@ describe('Calling v2 protocol', () => {
     });
   });
 
+  test('requires the remote participant to accept an audio-to-video upgrade', () => {
+    const active = {
+      ...initial(),
+      state: CALL_STATES.ACTIVE,
+      mediaReadyUids: ['caller', 'callee'],
+    };
+
+    const requested = apply(active, 'REQUEST_VIDEO_UPGRADE', 'caller');
+    expect(requested.session).toMatchObject({
+      mediaType: 'audio',
+      videoUpgradeRequestedByUid: 'caller',
+    });
+    expect(apply(requested.session, 'ACCEPT_VIDEO_UPGRADE', 'caller')).toEqual({
+      ok: false,
+      code: 'INVALID_TRANSITION',
+    });
+
+    const accepted = apply(requested.session, 'ACCEPT_VIDEO_UPGRADE', 'callee');
+    expect(accepted.session).toMatchObject({
+      state: CALL_STATES.ACTIVE,
+      mediaType: 'video',
+      videoUpgradeRequestedByUid: null,
+    });
+  });
+
+  test('keeps an audio call unchanged when its video upgrade is rejected', () => {
+    const active = {
+      ...initial(),
+      state: CALL_STATES.ACTIVE,
+      mediaReadyUids: ['caller', 'callee'],
+    };
+    const requested = apply(active, 'REQUEST_VIDEO_UPGRADE', 'callee').session;
+    const rejected = apply(requested, 'REJECT_VIDEO_UPGRADE', 'caller');
+
+    expect(rejected.session).toMatchObject({
+      state: CALL_STATES.ACTIVE,
+      mediaType: 'audio',
+      videoUpgradeRequestedByUid: null,
+    });
+  });
+
+  test('rejects video upgrades outside an active audio call', () => {
+    expect(apply(initial(), 'REQUEST_VIDEO_UPGRADE', 'caller')).toEqual({
+      ok: false,
+      code: 'INVALID_TRANSITION',
+    });
+    const video = { ...initial(), state: CALL_STATES.ACTIVE, mediaType: 'video' };
+    expect(apply(video, 'REQUEST_VIDEO_UPGRADE', 'caller')).toEqual({
+      ok: false,
+      code: 'INVALID_TRANSITION',
+    });
+  });
+
   test('rejects unsupported failure reasons', () => {
     expect(apply(initial(), 'FAIL', 'caller', 'made_up')).toEqual({ ok: false, code: 'INVALID_REASON' });
     expect(apply(initial(), 'FAIL', 'caller', 'declined')).toEqual({ ok: false, code: 'INVALID_REASON' });

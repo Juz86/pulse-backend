@@ -1,7 +1,7 @@
 const CALL_PROTOCOL_VERSION = 2;
 
 const CALL_STATES = Object.freeze({ PREPARING: 'PREPARING', RINGING: 'RINGING', CONNECTING: 'CONNECTING', ACTIVE: 'ACTIVE', ENDED: 'ENDED' });
-const CALL_COMMANDS = Object.freeze({ INVITE_READY: 'INVITE_READY', ACCEPT: 'ACCEPT', MEDIA_CONNECTED: 'MEDIA_CONNECTED', NETWORK_LOST: 'NETWORK_LOST', DECLINE: 'DECLINE', END: 'END', FAIL: 'FAIL' });
+const CALL_COMMANDS = Object.freeze({ INVITE_READY: 'INVITE_READY', ACCEPT: 'ACCEPT', MEDIA_CONNECTED: 'MEDIA_CONNECTED', NETWORK_LOST: 'NETWORK_LOST', REQUEST_VIDEO_UPGRADE: 'REQUEST_VIDEO_UPGRADE', ACCEPT_VIDEO_UPGRADE: 'ACCEPT_VIDEO_UPGRADE', REJECT_VIDEO_UPGRADE: 'REJECT_VIDEO_UPGRADE', DECLINE: 'DECLINE', END: 'END', FAIL: 'FAIL' });
 const TERMINAL_REASONS = Object.freeze(['declined', 'hangup', 'cancelled', 'missed', 'invite_timeout', 'connect_timeout', 'media_error', 'signaling_error']);
 const CLIENT_FAILURE_REASONS = Object.freeze(['invite_timeout', 'connect_timeout', 'media_error', 'signaling_error']);
 
@@ -21,6 +21,7 @@ function createSession({ sessionId, requestId, callerUid, calleeUid, mediaType, 
     revision: 1,
     mediaReadyUids: [],
     iceRestartSequence: 0,
+    videoUpgradeRequestedByUid: null,
     preparingDeadlineAt,
     ringingDeadlineAt: null,
     connectingDeadlineAt: null,
@@ -88,6 +89,34 @@ function applyCommand(session, {
       if (session.state === CALL_STATES.ACTIVE || !Number.isFinite(Date.parse(session.connectingDeadlineAt))) {
         next.connectingDeadlineAt = connectingDeadlineAt;
       }
+      break;
+    case CALL_COMMANDS.REQUEST_VIDEO_UPGRADE:
+      if (session.state !== CALL_STATES.ACTIVE || session.mediaType !== 'audio' || session.videoUpgradeRequestedByUid) {
+        return reject('INVALID_TRANSITION');
+      }
+      next.videoUpgradeRequestedByUid = actorUid;
+      break;
+    case CALL_COMMANDS.ACCEPT_VIDEO_UPGRADE:
+      if (
+        session.state !== CALL_STATES.ACTIVE ||
+        session.mediaType !== 'audio' ||
+        !session.videoUpgradeRequestedByUid ||
+        session.videoUpgradeRequestedByUid === actorUid
+      ) {
+        return reject('INVALID_TRANSITION');
+      }
+      next.mediaType = 'video';
+      next.videoUpgradeRequestedByUid = null;
+      break;
+    case CALL_COMMANDS.REJECT_VIDEO_UPGRADE:
+      if (
+        session.state !== CALL_STATES.ACTIVE ||
+        !session.videoUpgradeRequestedByUid ||
+        session.videoUpgradeRequestedByUid === actorUid
+      ) {
+        return reject('INVALID_TRANSITION');
+      }
+      next.videoUpgradeRequestedByUid = null;
       break;
     case CALL_COMMANDS.DECLINE:
       if (actorUid !== session.calleeUid || session.state !== CALL_STATES.RINGING) return reject('INVALID_TRANSITION');
