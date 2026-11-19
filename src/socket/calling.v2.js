@@ -27,6 +27,13 @@ const commandSchema = z.object({
 }).strict();
 const snapshotSchema = z.object({ sessionId: id }).strict();
 const iceConfigSchema = snapshotSchema;
+const identityPreflightSchema = z.object({
+  sessionId: id,
+  senderDeviceId: id,
+  senderSignalDeviceId: z.number().int().min(1).max(127),
+  senderIdentityVersion: z.number().int().positive(),
+  identityKey: z.string().min(4).max(4096),
+}).strict();
 const browserClientSchema = z.object({
   platform: z.literal('web'),
   capability: z.literal('audio'),
@@ -99,6 +106,7 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
   const hasBrowserCallReceiver = options.hasBrowserCallReceiver || defaultHasBrowserCallReceiver;
   const requireE2eeIdentity = options.requireE2eeIdentity === true;
   const authorizeCallE2eeIdentity = options.authorizeCallE2eeIdentity;
+  const preauthorizedIdentities = new Map();
   socket.join(callerUid);
 
   socket.on('call:v2:client-ready', (payload, callback = () => {}) => {
@@ -228,7 +236,7 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
     if (!input) return;
     traceCall('ICE_CONFIG_REQUESTED', { sessionId: input.sessionId });
     try {
-      const access = await service.mediaAccess({ ...input, actorUid: callerUid });
+      const access = await service.iceConfigurationAccess({ ...input, actorUid: callerUid });
       if (access.status !== 'FOUND') {
         callback(response(access));
         return;
@@ -248,6 +256,35 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
       callback({ ok: true, status: 'FOUND', ...configuration });
     } catch {
       console.error('[Calling v2] TURN-configuratie ophalen mislukt');
+      callback({ ok: false, status: 'SERVICE_UNAVAILABLE' });
+    }
+  });
+
+  socket.on('call:v2:identity-preflight', async (payload, callback = () => {}) => {
+    const input = parse(identityPreflightSchema, payload, callback);
+    if (!input) return;
+    try {
+      const access = await service.iceConfigurationAccess({
+        sessionId: input.sessionId,
+        actorUid: callerUid,
+      });
+      if (access.status !== 'FOUND') {
+        callback(response(access));
+        return;
+      }
+      if (!requireE2eeIdentity || typeof authorizeCallE2eeIdentity?.preauthorize !== 'function') {
+        callback({ ok: false, status: 'SERVICE_UNAVAILABLE' });
+        return;
+      }
+      const { sessionId, ...binding } = input;
+      const authorization = await authorizeCallE2eeIdentity.preauthorize(callerUid, binding);
+      if (!authorization.ok) {
+        callback({ ok: false, status: authorization.status });
+        return;
+      }
+      preauthorizedIdentities.set(sessionId, authorization.binding);
+      callback({ ok: true, status: 'AUTHORIZED' });
+    } catch {
       callback({ ok: false, status: 'SERVICE_UNAVAILABLE' });
     }
   });
@@ -276,6 +313,7 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
           type: input.type,
           description: input.description,
           identity: input.identity,
+          preauthorizedBinding: preauthorizedIdentities.get(input.sessionId),
         });
         if (!authorization.ok) {
           callback({ ok: false, status: authorization.status });
@@ -300,6 +338,7 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
 };
 
 module.exports.schemas = {
-  startSchema, commandSchema, snapshotSchema, iceConfigSchema, mediaSchema, browserClientSchema,
+  startSchema, commandSchema, snapshotSchema, iceConfigSchema, identityPreflightSchema,
+  mediaSchema, browserClientSchema,
 };
 module.exports.defaultHasBrowserCallReceiver = defaultHasBrowserCallReceiver;

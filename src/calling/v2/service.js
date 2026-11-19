@@ -68,6 +68,15 @@ class CallV2Service {
     };
   }
 
+  async iceConfigurationAccess({ sessionId, actorUid }) {
+    const snapshot = await this.snapshot({ sessionId, actorUid });
+    if (snapshot.status !== 'FOUND') return snapshot;
+    if (![CALL_STATES.RINGING, CALL_STATES.CONNECTING, CALL_STATES.ACTIVE].includes(snapshot.session.state)) {
+      return { status: 'INVALID_TRANSITION', session: snapshot.session };
+    }
+    return { status: 'FOUND', session: snapshot.session };
+  }
+
   async mediaRoute({ sessionId, actorUid, type }) {
     const access = await this.mediaAccess({ sessionId, actorUid });
     if (access.status !== 'FOUND') return access;

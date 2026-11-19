@@ -33,6 +33,13 @@ const callIdentitySchema = z.object({
   }
 });
 
+const callDeviceBindingSchema = z.object({
+  senderDeviceId: deviceId,
+  senderSignalDeviceId: z.number().int().min(1).max(127),
+  senderIdentityVersion: z.number().int().positive(),
+  identityKey: base64,
+}).strict();
+
 function extractSha256Fingerprint(description) {
   if (typeof description !== 'string') return null;
   const fingerprints = Array.from(
@@ -55,7 +62,27 @@ function activeV2Device(value) {
 }
 
 function createCallE2eeIdentityAuthorizer({ database }) {
-  return async function authorizeCallE2eeIdentity({ actorUid, session, type, description, identity }) {
+  async function authorizeRegisteredDevice(actorUid, binding) {
+    const parsed = callDeviceBindingSchema.safeParse(binding);
+    if (!parsed.success) return { ok: false, status: 'INVALID_REQUEST' };
+    const value = parsed.data;
+    const snapshot = await database.collection('users').doc(actorUid)
+      .collection('devices').doc(value.senderDeviceId).get();
+    const registered = snapshot.exists ? snapshot.data() : null;
+    if (
+      !activeV2Device(registered)
+      || registered.signalDeviceId !== value.senderSignalDeviceId
+      || Number(registered.identityVersion || 0) !== value.senderIdentityVersion
+      || registered.identityKey !== value.identityKey
+    ) {
+      return { ok: false, status: 'FORBIDDEN' };
+    }
+    return { ok: true, binding: value };
+  }
+
+  const authorizeCallE2eeIdentity = async function authorizeCallE2eeIdentity({
+    actorUid, session, type, description, identity, preauthorizedBinding,
+  }) {
     const parsed = callIdentitySchema.safeParse(identity);
     if (!parsed.success) return { ok: false, status: 'INVALID_REQUEST' };
     const value = parsed.data;
@@ -75,25 +102,30 @@ function createCallE2eeIdentityAuthorizer({ database }) {
     ) {
       return { ok: false, status: 'FORBIDDEN' };
     }
-    const snapshot = await database.collection('users').doc(actorUid)
-      .collection('devices').doc(value.senderDeviceId).get();
-    const registered = snapshot.exists ? snapshot.data() : null;
-    if (
-      !activeV2Device(registered)
-      || registered.signalDeviceId !== value.senderSignalDeviceId
-      || Number(registered.identityVersion || 0) !== value.senderIdentityVersion
-      || registered.identityKey !== value.identityKey
-    ) {
-      return { ok: false, status: 'FORBIDDEN' };
+    const presentedBinding = {
+      senderDeviceId: value.senderDeviceId,
+      senderSignalDeviceId: value.senderSignalDeviceId,
+      senderIdentityVersion: value.senderIdentityVersion,
+      identityKey: value.identityKey,
+    };
+    const preauthorized = callDeviceBindingSchema.safeParse(preauthorizedBinding);
+    if (!preauthorized.success || Object.keys(presentedBinding).some(
+      key => presentedBinding[key] !== preauthorized.data[key],
+    )) {
+      const registered = await authorizeRegisteredDevice(actorUid, presentedBinding);
+      if (!registered.ok) return registered;
     }
     return { ok: true, identity: value };
   };
+  authorizeCallE2eeIdentity.preauthorize = authorizeRegisteredDevice;
+  return authorizeCallE2eeIdentity;
 }
 
 module.exports = {
   CALL_E2EE_PROTOCOL,
   CALL_E2EE_VERSION,
   callIdentitySchema,
+  callDeviceBindingSchema,
   extractSha256Fingerprint,
   createCallE2eeIdentityAuthorizer,
 };

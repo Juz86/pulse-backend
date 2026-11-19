@@ -347,7 +347,7 @@ describe('Calling v2 socket contract', () => {
   });
 
   test('returns TURN configuration only after media access is authorized', async () => {
-    const service = { mediaAccess: jest.fn().mockResolvedValue({ status: 'FOUND' }) };
+    const service = { iceConfigurationAccess: jest.fn().mockResolvedValue({ status: 'FOUND' }) };
     const getTurnCredentials = jest.fn().mockResolvedValue({
       iceServers: [{ urls: ['turns:turn.cloudflare.com:443?transport=tcp'], username: 'u', credential: 'c' }],
       expiresInSeconds: 7200,
@@ -355,7 +355,7 @@ describe('Calling v2 socket contract', () => {
     const { handlers } = harness({ service, getTurnCredentials });
     const callback = jest.fn();
     await handlers['call:v2:ice-config']({ sessionId: 'session-123' }, callback);
-    expect(service.mediaAccess).toHaveBeenCalledWith({ sessionId: 'session-123', actorUid: 'caller' });
+    expect(service.iceConfigurationAccess).toHaveBeenCalledWith({ sessionId: 'session-123', actorUid: 'caller' });
     expect(getTurnCredentials).toHaveBeenCalledTimes(1);
     expect(callback).toHaveBeenCalledWith(expect.objectContaining({
       ok: true,
@@ -365,13 +365,44 @@ describe('Calling v2 socket contract', () => {
   });
 
   test('does not request TURN credentials for an unauthorized session', async () => {
-    const service = { mediaAccess: jest.fn().mockResolvedValue({ status: 'FORBIDDEN' }) };
+    const service = { iceConfigurationAccess: jest.fn().mockResolvedValue({ status: 'FORBIDDEN' }) };
     const getTurnCredentials = jest.fn();
     const { handlers } = harness({ service, getTurnCredentials });
     const callback = jest.fn();
     await handlers['call:v2:ice-config']({ sessionId: 'session-123' }, callback);
     expect(getTurnCredentials).not.toHaveBeenCalled();
     expect(callback).toHaveBeenCalledWith({ ok: false, status: 'FORBIDDEN' });
+  });
+
+  test('preauthorizes an exact E2EE device binding during ringing', async () => {
+    const service = {
+      iceConfigurationAccess: jest.fn().mockResolvedValue({
+        status: 'FOUND',
+        session: { sessionId: 'session-123', state: 'RINGING' },
+      }),
+    };
+    const binding = {
+      senderDeviceId: 'device-a1',
+      senderSignalDeviceId: 1,
+      senderIdentityVersion: 2,
+      identityKey: 'aWRlbnRpdHk=',
+    };
+    const authorizeCallE2eeIdentity = jest.fn();
+    authorizeCallE2eeIdentity.preauthorize = jest.fn().mockResolvedValue({
+      ok: true,
+      binding,
+    });
+    const { handlers } = harness({
+      service,
+      requireE2eeIdentity: true,
+      authorizeCallE2eeIdentity,
+    });
+    const callback = jest.fn();
+
+    await handlers['call:v2:identity-preflight']({ sessionId: 'session-123', ...binding }, callback);
+
+    expect(authorizeCallE2eeIdentity.preauthorize).toHaveBeenCalledWith('caller', binding);
+    expect(callback).toHaveBeenCalledWith({ ok: true, status: 'AUTHORIZED' });
   });
 
   test('relays validated media only to the authorized peer', async () => {

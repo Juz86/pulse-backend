@@ -78,6 +78,27 @@ describe('Calling v2 E2EE identity authorization', () => {
     expect(deviceDoc).toHaveBeenCalledWith('device-a1');
   });
 
+  test('reuses an exact preauthorized device binding without a second database read', async () => {
+    const { database, get } = databaseWithDevice(registeredDevice());
+    const authorize = createCallE2eeIdentityAuthorizer({ database });
+    const binding = {
+      senderDeviceId: identity.senderDeviceId,
+      senderSignalDeviceId: identity.senderSignalDeviceId,
+      senderIdentityVersion: identity.senderIdentityVersion,
+      identityKey: identity.identityKey,
+    };
+
+    await expect(authorize.preauthorize('caller', binding)).resolves.toEqual({
+      ok: true,
+      binding,
+    });
+    await expect(authorize({
+      actorUid: 'caller', session, type: 'offer', description, identity,
+      preauthorizedBinding: binding,
+    })).resolves.toEqual({ ok: true, identity });
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
   test.each([
     ['fingerprint mutation', { description: description.replace(colonFingerprint, 'CD'.repeat(32)) }],
     ['session swap', { identity: { ...identity, sessionId: 'session-999' } }],

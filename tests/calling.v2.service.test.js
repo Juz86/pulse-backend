@@ -424,6 +424,49 @@ describe('Calling v2 service', () => {
       .resolves.toMatchObject({ status: 'FOUND', targetUid: 'a' });
   });
 
+  test('allows participants to prefetch ICE while ringing without allowing media routing', async () => {
+    const { service, store } = makeService();
+    const started = await service.start({
+      requestId: 'request-123',
+      callerUid: 'a',
+      calleeUid: 'b',
+      mediaType: 'audio',
+    });
+    store.sessions.set(started.session.sessionId, { ...started.session, state: 'RINGING' });
+
+    await expect(service.iceConfigurationAccess({
+      sessionId: started.session.sessionId,
+      actorUid: 'a',
+    })).resolves.toMatchObject({ status: 'FOUND' });
+    await expect(service.iceConfigurationAccess({
+      sessionId: started.session.sessionId,
+      actorUid: 'b',
+    })).resolves.toMatchObject({ status: 'FOUND' });
+    await expect(service.mediaAccess({
+      sessionId: started.session.sessionId,
+      actorUid: 'a',
+    })).resolves.toMatchObject({ status: 'INVALID_TRANSITION' });
+  });
+
+  test('rejects ICE prefetch before ringing and for non-participants', async () => {
+    const { service } = makeService();
+    const started = await service.start({
+      requestId: 'request-123',
+      callerUid: 'a',
+      calleeUid: 'b',
+      mediaType: 'audio',
+    });
+
+    await expect(service.iceConfigurationAccess({
+      sessionId: started.session.sessionId,
+      actorUid: 'a',
+    })).resolves.toMatchObject({ status: 'INVALID_TRANSITION' });
+    await expect(service.iceConfigurationAccess({
+      sessionId: started.session.sessionId,
+      actorUid: 'stranger',
+    })).resolves.toMatchObject({ status: 'FORBIDDEN' });
+  });
+
   test('enforces offer and answer roles while allowing candidates from both peers', async () => {
     const { service, store } = makeService();
     const started = await service.start({
