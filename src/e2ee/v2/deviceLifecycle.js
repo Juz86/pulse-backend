@@ -43,19 +43,6 @@ function isChatPaused(user) {
   return Boolean(user?.pausedFeatures?.chat || user?.paused);
 }
 
-function parentIdsForUser(user = {}) {
-  return [...new Set([
-    user.parentId,
-    user.parentUid,
-    user.managedByParentId,
-    ...(Array.isArray(user.parentIds) ? user.parentIds : []),
-  ].filter((value) => typeof value === 'string' && value.length > 0))];
-}
-
-function requiresParentDeviceApproval(user = {}) {
-  return user.role === 'child' && parentIdsForUser(user).length > 0;
-}
-
 function assertClaimPolicy({ requesterId, recipientId, conversation, requester, recipient }) {
   const members = Array.isArray(conversation?.members) ? conversation.members : [];
   if (conversation?.isGroup) {
@@ -91,13 +78,11 @@ function createDeviceLifecycleService({ database, firebaseAdmin }) {
 
   async function registerDevice(userId, registration) {
     const ref = deviceRef(database, userId, registration.deviceId);
-    const userRef = database.collection('users').doc(userId);
     const signalIdQuery = signalDeviceQuery(database, userId, registration.signalDeviceId);
 
     return database.runTransaction(async (transaction) => {
-      const [existing, userSnapshot, signalIdMatches] = await Promise.all([
+      const [existing, signalIdMatches] = await Promise.all([
         transaction.get(ref),
-        transaction.get(userRef),
         transaction.get(signalIdQuery),
       ]);
       assertSignalDeviceIdAvailable(signalIdMatches, registration.deviceId);
@@ -109,17 +94,25 @@ function createDeviceLifecycleService({ database, firebaseAdmin }) {
         if (current.identityKey !== registration.identityKey) {
           throw new E2EEV2Error(409, 'v2_identity_change_requires_rotation');
         }
+        if (current.status === 'pending_approval') {
+          transaction.update(ref, {
+            status: 'active',
+            approvalRequired: false,
+            approvalRequestedAt: deleteField(),
+            updatedAt: serverTimestamp(),
+          });
+          return {
+            status: 'REGISTERED',
+            deviceId: registration.deviceId,
+            identityVersion: Number(current.identityVersion || 1),
+          };
+        }
         return {
-          status: current.status === 'pending_approval'
-            ? 'PENDING_APPROVAL'
-            : 'ALREADY_REGISTERED',
+          status: 'ALREADY_REGISTERED',
           deviceId: registration.deviceId,
           identityVersion: Number(current.identityVersion || 1),
         };
       }
-
-      const requiresApproval = userSnapshot.exists
-        && requiresParentDeviceApproval(userSnapshot.data() || {});
 
       transaction.set(ref, {
         deviceLabel: registration.deviceLabel || 'Onbekend apparaat',
@@ -135,15 +128,14 @@ function createDeviceLifecycleService({ database, firebaseAdmin }) {
         oneTimePreKeyCount: registration.oneTimePreKeys.length,
         protocol: PROTOCOL,
         protocolVersion: PROTOCOL_VERSION,
-        status: requiresApproval ? 'pending_approval' : 'active',
-        approvalRequired: requiresApproval,
-        ...(requiresApproval ? { approvalRequestedAt: serverTimestamp() } : {}),
+        status: 'active',
+        approvalRequired: false,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
 
       return {
-        status: requiresApproval ? 'PENDING_APPROVAL' : 'REGISTERED',
+        status: 'REGISTERED',
         deviceId: registration.deviceId,
         identityVersion: 1,
       };
@@ -279,32 +271,6 @@ function createDeviceLifecycleService({ database, firebaseAdmin }) {
         deviceId,
         event: { ...event, createdAt: new Date().toISOString() },
       };
-    });
-  }
-
-  async function approvePendingDevice(userId, deviceId) {
-    const ref = deviceRef(database, userId, deviceId);
-
-    return database.runTransaction(async (transaction) => {
-      const snapshot = await transaction.get(ref);
-      if (!snapshot.exists) throw new E2EEV2Error(404, 'v2_device_not_found');
-      const current = snapshot.data() || {};
-      if (current.protocol !== PROTOCOL || current.protocolVersion !== PROTOCOL_VERSION) {
-        throw new E2EEV2Error(409, 'v2_device_protocol_mismatch');
-      }
-      if (current.status === 'active') {
-        return { status: 'ALREADY_ACTIVE', deviceId };
-      }
-      if (current.status !== 'pending_approval') {
-        throw new E2EEV2Error(409, 'v2_device_not_pending_approval');
-      }
-
-      transaction.update(ref, {
-        status: 'active',
-        approvedAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      return { status: 'APPROVED', deviceId };
     });
   }
 
@@ -454,7 +420,6 @@ function createDeviceLifecycleService({ database, firebaseAdmin }) {
 
   return {
     claimKeyBundles,
-    approvePendingDevice,
     refillPreKeys,
     registerDevice,
     revokeDevice,
@@ -466,6 +431,4 @@ module.exports = {
   E2EEV2Error,
   assertClaimPolicy,
   createDeviceLifecycleService,
-  parentIdsForUser,
-  requiresParentDeviceApproval,
 };

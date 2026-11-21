@@ -289,7 +289,7 @@ describe('pulse_e2ee_v2 device lifecycle', () => {
     });
   });
 
-  test('holds a new child device until a parent explicitly approves it', async () => {
+  test('registers a new child device immediately without parent approval', async () => {
     const { state, service } = createFixture();
     state.users['user-a'] = {
       uid: 'user-a',
@@ -298,16 +298,26 @@ describe('pulse_e2ee_v2 device lifecycle', () => {
     };
 
     await expect(service.registerDevice('user-a', validRegistration())).resolves.toMatchObject({
-      status: 'PENDING_APPROVAL',
-      deviceId: 'device-a1',
-    });
-    expect(state.devices['user-a']['device-a1'].status).toBe('pending_approval');
-
-    await expect(service.approvePendingDevice('user-a', 'device-a1')).resolves.toEqual({
-      status: 'APPROVED',
+      status: 'REGISTERED',
       deviceId: 'device-a1',
     });
     expect(state.devices['user-a']['device-a1'].status).toBe('active');
+  });
+
+  test('activates a legacy pending device on its next registration', async () => {
+    const { state, service } = createFixture();
+    await service.registerDevice('user-a', validRegistration());
+    state.devices['user-a']['device-a1'].status = 'pending_approval';
+    state.devices['user-a']['device-a1'].approvalRequired = true;
+
+    await expect(service.registerDevice('user-a', validRegistration())).resolves.toMatchObject({
+      status: 'REGISTERED',
+      deviceId: 'device-a1',
+    });
+    expect(state.devices['user-a']['device-a1']).toMatchObject({
+      status: 'active',
+      approvalRequired: false,
+    });
   });
 
   test('requires the rotation endpoint for an identity change', async () => {

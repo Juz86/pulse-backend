@@ -1,8 +1,6 @@
 const { admin, db, storage } = require('../firebase');
 const { verifyAuth } = require('../middleware');
 const { sendPush } = require('../push');
-const { PROTOCOL } = require('../e2ee/v2/contracts');
-const { createDeviceLifecycleService } = require('../e2ee/v2/deviceLifecycle');
 const { transporter } = require('../email');
 const {
   cleanupCommunicationsForUser,
@@ -69,7 +67,6 @@ async function setChildHistorySettings(childUid, historyRules, parentUid) {
 
 module.exports = (io, onlineUsers) => {
   const router = require('express').Router();
-  const e2eeDevices = createDeviceLifecycleService({ database: db, firebaseAdmin: admin });
 
   // ─── Helper: controleer of uid een ouder is van dit kind ─────────────────────
   function isParentOf(uid, childData) {
@@ -103,17 +100,6 @@ module.exports = (io, onlineUsers) => {
     });
   }
 
-  async function requireManagedChild(parentUid, childUid) {
-    const childDoc = await db.collection('users').doc(childUid).get();
-    if (!childDoc.exists) return null;
-    return isParentOf(parentUid, childDoc.data() || {}) ? childDoc : null;
-  }
-
-  function notifyChildDeviceApproval(childUid, payload) {
-    const sockets = onlineUsers[childUid];
-    sockets?.forEach((socketId) => io.to(socketId).emit('e2ee:device-approval', payload));
-  }
-
   // GET /api/parent/children — haal gekoppelde kinderen op
   router.get('/api/parent/children', verifyAuth, async (req, res) => {
     try {
@@ -141,83 +127,6 @@ module.exports = (io, onlineUsers) => {
       });
       res.json(children);
     } catch (err) { console.error(err); res.status(500).json({ error: 'Serverfout' }); }
-  });
-
-  router.get('/api/parent/child/:childUid/e2ee-devices', verifyAuth, async (req, res) => {
-    try {
-      const parentDoc = await db.collection('users').doc(req.uid).get();
-      if (!parentDoc.exists || parentDoc.data()?.role !== 'parent') {
-        return res.status(403).json({ error: 'Geen ouderaccount.' });
-      }
-      const childDoc = await requireManagedChild(req.uid, req.params.childUid);
-      if (!childDoc) return res.status(403).json({ error: 'Geen toegang.' });
-      const snapshot = await db.collection('users').doc(req.params.childUid).collection('devices').get();
-      const devices = snapshot.docs
-        .map((device) => ({ deviceId: device.id, ...device.data() }))
-        .filter((device) => device.protocol === PROTOCOL)
-        .map((device) => ({
-          deviceId: device.deviceId,
-          deviceLabel: device.deviceLabel || 'Onbekend apparaat',
-          platform: device.platform,
-          status: device.status,
-          createdAt: device.createdAt || null,
-          approvalRequestedAt: device.approvalRequestedAt || null,
-        }));
-      return res.json({ devices });
-    } catch (error) {
-      console.error('E2EE-apparaten ophalen mislukt:', error);
-      return res.status(500).json({ error: 'Serverfout' });
-    }
-  });
-
-  router.post('/api/parent/child/:childUid/e2ee-devices/:deviceId/approve', verifyAuth, async (req, res) => {
-    try {
-      const parentDoc = await db.collection('users').doc(req.uid).get();
-      if (!parentDoc.exists || parentDoc.data()?.role !== 'parent') {
-        return res.status(403).json({ error: 'Geen ouderaccount.' });
-      }
-      const childDoc = await requireManagedChild(req.uid, req.params.childUid);
-      if (!childDoc) return res.status(403).json({ error: 'Geen toegang.' });
-      const result = await e2eeDevices.approvePendingDevice(req.params.childUid, req.params.deviceId);
-      notifyChildDeviceApproval(req.params.childUid, {
-        deviceId: req.params.deviceId,
-        status: 'approved',
-      });
-      await sendPush(req.params.childUid, null, {
-        type: 'e2ee_device_approval',
-        deviceId: req.params.deviceId,
-        status: 'approved',
-      }, { androidPriority: 'high', nativeAndroidOnly: true });
-      return res.json({ ok: true, ...result });
-    } catch (error) {
-      console.error('E2EE-apparaat goedkeuren mislukt:', error);
-      return res.status(error?.status || 500).json({ error: error?.code || 'Serverfout' });
-    }
-  });
-
-  router.post('/api/parent/child/:childUid/e2ee-devices/:deviceId/block', verifyAuth, async (req, res) => {
-    try {
-      const parentDoc = await db.collection('users').doc(req.uid).get();
-      if (!parentDoc.exists || parentDoc.data()?.role !== 'parent') {
-        return res.status(403).json({ error: 'Geen ouderaccount.' });
-      }
-      const childDoc = await requireManagedChild(req.uid, req.params.childUid);
-      if (!childDoc) return res.status(403).json({ error: 'Geen toegang.' });
-      const result = await e2eeDevices.revokeDevice(req.params.childUid, req.params.deviceId);
-      notifyChildDeviceApproval(req.params.childUid, {
-        deviceId: req.params.deviceId,
-        status: 'blocked',
-      });
-      await sendPush(req.params.childUid, null, {
-        type: 'e2ee_device_approval',
-        deviceId: req.params.deviceId,
-        status: 'blocked',
-      }, { androidPriority: 'high', nativeAndroidOnly: true });
-      return res.json({ ok: true, ...result });
-    } catch (error) {
-      console.error('E2EE-apparaat blokkeren mislukt:', error);
-      return res.status(error?.status || 500).json({ error: error?.code || 'Serverfout' });
-    }
   });
 
   router.get('/api/parent/settings', verifyAuth, async (req, res) => {
