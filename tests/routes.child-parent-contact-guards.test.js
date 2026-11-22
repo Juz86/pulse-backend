@@ -210,6 +210,18 @@ describe('child-parent contact guards', () => {
     expect(mockState.contacts['child-1']['parent-1']).toBeDefined();
   });
 
+  test('child cannot delete its own account', async () => {
+    const app = buildApp();
+
+    const response = await request(app)
+      .delete('/api/account/child-1')
+      .set('x-test-uid', 'child-1');
+
+    expect(response.status).toBe(403);
+    expect(response.body.error).toBe('Een kindaccount kan niet zelf worden verwijderd. Alleen een ouder kan een kindaccount verwijderen.');
+    expect(mockState.users['child-1']).toBeDefined();
+  });
+
   test('contacts endpoint marks parent contacts as protected for children', async () => {
     const app = buildApp();
 

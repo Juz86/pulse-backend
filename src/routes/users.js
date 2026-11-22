@@ -678,7 +678,14 @@ module.exports = (io, onlineUsers) => {
       if (req.uid !== uid) return res.status(403).json({ error: 'Geen toegang.' });
 
       const userDoc = await db.collection('users').doc(uid).get();
-      const isParent = userDoc.exists && userDoc.data()?.role === 'parent';
+      if (!userDoc.exists) return res.status(404).json({ error: 'Account niet gevonden.' });
+
+      const isParent = userDoc.data()?.role === 'parent';
+      if (!isParent) {
+        return res.status(403).json({
+          error: 'Een kindaccount kan niet zelf worden verwijderd. Alleen een ouder kan een kindaccount verwijderen.',
+        });
+      }
 
       // 1. Als ouder: verwijder gekoppelde kindaccounts eerst (cascade)
       // Auth-verwijdering van elk kind eerst — als dat mislukt stoppen we.
