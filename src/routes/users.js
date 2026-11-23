@@ -23,6 +23,80 @@ function toMillis(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function isMessageAuthoredBy(data = {}, uid) {
+  return data.senderId === uid
+    || data.senderUserId === uid
+    || data.callerUid === uid;
+}
+
+function summarizeConversationMessage(data = {}) {
+  if (data.type === 'contact') return `Contactpersoon: ${data.sharedContact?.name || ''}`;
+  if (data.type === 'call' || data.messageType === 'call') {
+    return data.terminalReason === 'declined' ? 'Oproep geweigerd' : 'Gemiste spraakoproep';
+  }
+  return data.text || '';
+}
+
+function buildConversationSummaryUpdate(messages = []) {
+  const latest = [...messages].sort((left, right) => (
+    toMillis(right.data().createdAt) - toMillis(left.data().createdAt)
+  ))[0];
+
+  if (!latest) {
+    return {
+      lastMessage: null,
+      lastMessageAt: null,
+      lastMessageType: null,
+      lastCallEvent: admin.firestore.FieldValue.delete(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+  }
+
+  const data = latest.data() || {};
+  const isCall = data.type === 'call' || data.messageType === 'call';
+  return {
+    lastMessage: summarizeConversationMessage(data),
+    lastMessageAt: data.createdAt || admin.firestore.FieldValue.serverTimestamp(),
+    lastMessageType: data.type || data.messageType || 'text',
+    lastCallEvent: isCall
+      ? {
+          sessionId: data.sessionId,
+          mediaType: data.mediaType || 'audio',
+          terminalReason: data.terminalReason || 'missed',
+          callerUid: data.callerUid,
+          calleeUid: data.calleeUid,
+          occurredAt: data.occurredAt,
+          presentations: data.presentations || {},
+        }
+      : admin.firestore.FieldValue.delete(),
+    updatedAt: data.createdAt || admin.firestore.FieldValue.serverTimestamp(),
+  };
+}
+
+async function removeAuthoredConversationItems(convRef, uid, { hideConversation = false } = {}) {
+  const messagesSnap = await convRef.collection('messages').get();
+  const ownMessages = messagesSnap.docs.filter((messageDoc) => (
+    isMessageAuthoredBy(messageDoc.data() || {}, uid)
+  ));
+  const remainingMessages = messagesSnap.docs.filter((messageDoc) => !ownMessages.includes(messageDoc));
+
+  for (let offset = 0; offset < ownMessages.length; offset += 500) {
+    const batch = db.batch();
+    ownMessages.slice(offset, offset + 500).forEach((messageDoc) => batch.delete(messageDoc.ref));
+    await batch.commit();
+  }
+
+  await convRef.update({
+    ...buildConversationSummaryUpdate(remainingMessages),
+    deletedFor: hideConversation
+      ? admin.firestore.FieldValue.arrayUnion(uid)
+      : admin.firestore.FieldValue.arrayRemove(uid),
+    [`clearedAt.${uid}`]: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  return ownMessages.map((messageDoc) => messageDoc.id);
+}
+
 function isFirestoreMissingIndexError(error) {
   const code = String(error?.code || '').toLowerCase();
   const message = String(error?.message || '').toLowerCase();
@@ -217,6 +291,17 @@ async function deleteAccountData(uid) {
 
 module.exports = (io, onlineUsers) => {
   const router = require('express').Router();
+
+  function emitDeletedMessages(convId, messageIds, members = []) {
+    messageIds.forEach((msgId) => {
+      const payload = { convId, msgId };
+      io.to(convId).emit('message:deleted', payload);
+      members.forEach((memberUid) => {
+        const sockets = onlineUsers[memberUid];
+        if (sockets) sockets.forEach((sid) => io.to(sid).emit('message:deleted', payload));
+      });
+    });
+  }
 
   // ─── REST: Gebruikersprofiel opslaan ─────────────────────────────────────────
   router.post('/api/users', verifyAuth, async (req, res) => {
@@ -566,23 +651,16 @@ module.exports = (io, onlineUsers) => {
       const convDoc = await convRef.get();
       if (!convDoc.exists) return res.status(404).json({ error: 'Niet gevonden' });
 
-      const { members = [], deletedFor = [] } = convDoc.data();
-      const newDeletedFor = [...new Set([...deletedFor, uid])];
+      const convData = convDoc.data() || {};
+      const members = convData.members || [];
+      if (!members.includes(uid)) return res.status(403).json({ error: 'Geen toegang tot dit gesprek.' });
 
-      if (members.every(m => newDeletedFor.includes(m))) {
-        // Iedereen heeft verwijderd → echt verwijderen uit database
-        const msgsSnap = await convRef.collection('messages').get();
-        const batch = db.batch();
-        msgsSnap.docs.forEach(doc => batch.delete(doc.ref));
-        batch.delete(convRef);
-        await batch.commit();
-      } else {
-        // Alleen voor deze gebruiker verbergen
-        await convRef.update({
-          deletedFor: admin.firestore.FieldValue.arrayUnion(uid),
-          [`clearedAt.${uid}`]: admin.firestore.FieldValue.serverTimestamp(),
-        });
-      }
+      // Een expliciete chatverwijdering wist onmiddellijk de eigen inhoud.
+      // Inhoud van andere deelnemers blijft voor hen beschikbaar.
+      const deletedMessageIds = await removeAuthoredConversationItems(convRef, uid, {
+        hideConversation: true,
+      });
+      emitDeletedMessages(convId, deletedMessageIds, members);
 
       res.json({ success: true });
     } catch (err) {
@@ -604,13 +682,10 @@ module.exports = (io, onlineUsers) => {
       const members = convData.members || [];
       if (!members.includes(uid)) return res.status(403).json({ error: 'Geen toegang.' });
 
-      await convRef.set({
-        lastMessage: '',
-        lastMessageAt: null,
-        lastMessageType: null,
-        deletedFor: admin.firestore.FieldValue.arrayRemove(uid),
-        [`clearedAt.${uid}`]: admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
+      // Ook wissen is een expliciete verwijderactie: eigen inhoud gaat direct
+      // uit de database, terwijl de chat beschikbaar blijft voor nieuwe inhoud.
+      const deletedMessageIds = await removeAuthoredConversationItems(convRef, uid);
+      emitDeletedMessages(convId, deletedMessageIds, members);
 
       io.to(convId).emit('conversation:cleared', { convId, uid });
       const sockets = onlineUsers[uid];
@@ -636,32 +711,10 @@ module.exports = (io, onlineUsers) => {
       const convData = convDoc.data() || {};
       const members = convData.members || [];
       if (!members.includes(uid)) return res.status(403).json({ error: 'Geen toegang.' });
-      if (convData.isGroup) {
-        return res.status(400).json({ error: 'Alleen 1-op-1 gesprekken kunnen volledig worden gewist.' });
-      }
-
-      const msgsSnap = await convRef.collection('messages').get();
-      const batch = db.batch();
-      msgsSnap.docs.forEach((doc) => batch.delete(doc.ref));
-
-      if (mode === 'delete') {
-        batch.delete(convRef);
-      } else {
-        batch.set(convRef, {
-          lastMessage: '',
-          lastMessageAt: null,
-          deletedFor: admin.firestore.FieldValue.delete(),
-          clearedAt: admin.firestore.FieldValue.delete(),
-        }, { merge: true });
-      }
-
-      await batch.commit();
-
-      io.to(convId).emit('conversation:hardCleared', { convId, mode });
-      members.forEach((memberUid) => {
-        const sockets = onlineUsers[memberUid];
-        if (sockets) sockets.forEach((sid) => io.to(sid).emit('conversation:hardCleared', { convId, mode }));
+      const deletedMessageIds = await removeAuthoredConversationItems(convRef, uid, {
+        hideConversation: mode === 'delete',
       });
+      emitDeletedMessages(convId, deletedMessageIds, members);
 
       res.json({ success: true, mode });
     } catch (err) {

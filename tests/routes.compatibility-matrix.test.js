@@ -43,6 +43,12 @@ function mockApplyPatch(target, patch) {
       mockSetNestedValue(target, key, 'ts');
       return;
     }
+    if (value && value.__op === 'delete') {
+      const parts = String(key).split('.');
+      const parent = parts.slice(0, -1).reduce((cursor, part) => cursor?.[part], target);
+      if (parent) delete parent[parts[parts.length - 1]];
+      return;
+    }
     mockSetNestedValue(target, key, value);
   });
 }
@@ -174,20 +180,29 @@ function mockMakeCollection(name, ownerId = null) {
           },
           collection(sub) {
             if (sub !== 'messages') throw new Error(`Unsupported subcollection ${sub}`);
+            const messageDocs = () => (mockState.messages[convId] || []).map((message) => ({
+              id: message.id,
+              data: () => message,
+              ref: {
+                delete() {
+                  mockState.messages[convId] = (mockState.messages[convId] || [])
+                    .filter((candidate) => candidate.id !== message.id);
+                },
+              },
+            }));
             return {
               where(field, op, value) {
                 if (field !== 'type' || op !== '==') throw new Error(`Unsupported message query ${field} ${op}`);
                 return {
                   async get() {
-                    const docs = (mockState.messages[convId] || [])
-                      .filter((message) => message.type === value)
-                      .map((message) => mockMakeDocSnapshot(message.id, message));
+                    const docs = messageDocs().filter((messageDoc) => messageDoc.data().type === value);
                     return { docs };
                   },
                 };
               },
               async get() {
-                return { docs: [] };
+                const docs = messageDocs();
+                return { docs, empty: docs.length === 0 };
               },
             };
           },
@@ -231,6 +246,14 @@ jest.mock('../src/firebase', () => ({
   db: {
     collection(name) {
       return mockMakeCollection(name);
+    },
+    batch() {
+      return {
+        delete(ref) {
+          ref.delete();
+        },
+        async commit() {},
+      };
     },
   },
 }));
@@ -408,12 +431,45 @@ describe('compatibility routes', () => {
     expect(response.status).toBe(200);
     expect(response.body.success).toBe(true);
     expect(mockState.conversations['conv-1']).toEqual(expect.objectContaining({
-      lastMessage: '',
+      lastMessage: null,
       lastMessageAt: null,
       lastMessageType: null,
       deletedFor: [],
     }));
     expect(mockState.conversations['conv-1'].clearedAt['user-1']).toBe('ts');
+  });
+
+  test("DELETE /api/conversations/:convId removes only the requester's own messages", async () => {
+    mockState.messages['conv-1'] = [
+      { id: 'message-a', senderId: 'user-1', text: 'Van gebruiker A', createdAt: 100 },
+      { id: 'message-b', senderId: 'user-2', text: 'Van gebruiker B', createdAt: 200 },
+    ];
+    mockState.conversations['conv-1'].deletedFor = [];
+    const app = buildApp();
+
+    const response = await request(app)
+      .delete('/api/conversations/conv-1')
+      .set('x-test-uid', 'user-1');
+
+    expect(response.status).toBe(200);
+    expect(mockState.messages['conv-1']).toEqual([
+      expect.objectContaining({ id: 'message-b', senderId: 'user-2' }),
+    ]);
+    expect(mockState.conversations['conv-1']).toEqual(expect.objectContaining({
+      lastMessage: 'Van gebruiker B',
+      deletedFor: ['user-1'],
+    }));
+  });
+
+  test('DELETE /api/conversations/:convId rejects a user who is not a participant', async () => {
+    mockState.users.outsider = { uid: 'outsider', displayName: 'Outsider' };
+    const app = buildApp();
+
+    const response = await request(app)
+      .delete('/api/conversations/conv-1')
+      .set('x-test-uid', 'outsider');
+
+    expect(response.status).toBe(403);
   });
 
 });
