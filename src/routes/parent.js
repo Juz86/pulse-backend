@@ -26,11 +26,12 @@ async function getChildHistorySettings(childUid) {
 function parseHistoryRulesFromBody(body = {}) {
   return normalizeHistoryRules({
     chatRetentionDays: body.chatRetentionDays,
+    callRetentionDays: body.callRetentionDays,
   });
 }
 
 function hasOnlySupportedHistoryRules(body = {}) {
-  return ['chatRetentionDays'].every((key) => {
+  return ['chatRetentionDays', 'callRetentionDays'].every((key) => {
     if (body[key] === undefined || body[key] === null || body[key] === '') return true;
     return HISTORY_RETENTION_OPTIONS_DAYS.includes(Number(body[key]));
   });

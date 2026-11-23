@@ -143,6 +143,87 @@ describe('cleanMessages — 30-dagenretentie', () => {
     // Geen deletes voor recente berichten
     expect(mockBatch.delete).not.toHaveBeenCalledWith(recentMsg.ref);
   });
+
+  it('hanteert in een groepschat de termijn van de afzender', async () => {
+    const parentMessage = makeDoc('parent-message', {
+      senderId: 'parent-1',
+      createdAt: { _seconds: Math.floor(daysAgo(2).getTime() / 1000) },
+    });
+    const childMessage = makeDoc('child-message', {
+      senderId: 'child-1',
+      createdAt: { _seconds: Math.floor(daysAgo(2).getTime() / 1000) },
+    });
+    const messagesCollection = {
+      get: jest.fn()
+        .mockResolvedValueOnce({ docs: [parentMessage, childMessage], empty: false })
+        .mockResolvedValueOnce({ docs: [parentMessage], empty: false }),
+      orderBy: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+    };
+    const conversationRef = {
+      collection: jest.fn().mockReturnValue(messagesCollection),
+      update: jest.fn().mockResolvedValue(undefined),
+    };
+    const conversation = {
+      id: 'group-1',
+      ref: conversationRef,
+      data: () => ({ members: ['parent-1', 'child-1'], isGroup: true }),
+    };
+    const userDocuments = {
+      'parent-1': { role: 'parent' },
+      'child-1': { role: 'child' },
+    };
+
+    mockDb.collection.mockImplementation((name) => {
+      if (name === 'conversations') {
+        return { get: jest.fn().mockResolvedValue({ docs: [conversation], empty: false }) };
+      }
+      if (name === 'users') {
+        return {
+          doc: jest.fn((uid) => ({
+            get: jest.fn().mockResolvedValue({
+              exists: !!userDocuments[uid],
+              data: () => userDocuments[uid] || {},
+            }),
+          })),
+        };
+      }
+      if (name === 'parent_settings') {
+        return {
+          doc: jest.fn(() => ({
+            get: jest.fn().mockResolvedValue({ exists: true, data: () => ({ historyRules: { chatRetentionDays: 30 } }) }),
+          })),
+        };
+      }
+      if (name === 'child_settings') {
+        return {
+          doc: jest.fn(() => ({
+            get: jest.fn().mockResolvedValue({ exists: true, data: () => ({ historyRules: { chatRetentionDays: 1 } }) }),
+          })),
+        };
+      }
+      return makeCollection(name);
+    });
+
+    jest.resetModules();
+    jest.mock('../src/firebase', () => ({
+      admin: {
+        firestore: {
+          Timestamp: { fromDate: jest.fn((d) => ({ _seconds: Math.floor(d.getTime() / 1000) })) },
+          FieldValue: { serverTimestamp: () => 'ts', arrayUnion: (...a) => a, arrayRemove: (...a) => a, delete: () => 'delete' },
+        },
+      },
+      db: mockDb,
+    }));
+
+    const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const { runCleanup } = require('../src/cleanup');
+    await runCleanup();
+    consoleSpy.mockRestore();
+
+    expect(mockBatch.delete).toHaveBeenCalledWith(childMessage.ref);
+    expect(mockBatch.delete).not.toHaveBeenCalledWith(parentMessage.ref);
+  });
 });
 
 describe('cleanParentActivities — 30-dagenretentie', () => {

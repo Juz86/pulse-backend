@@ -33,6 +33,7 @@ function normalizeRetentionDays(value) {
 function normalizeHistoryRules(rules = {}) {
   return {
     chatRetentionDays: normalizeRetentionDays(rules?.chatRetentionDays),
+    callRetentionDays: normalizeRetentionDays(rules?.callRetentionDays),
   };
 }
 
@@ -61,6 +62,7 @@ async function resolveConversationHistoryRules(members = []) {
   const rulesList = await Promise.all(uniqueMembers.map(uid => getUserHistoryRules(uid)));
   return rulesList.reduce((acc, rules) => ({
     chatRetentionDays: Math.min(acc.chatRetentionDays, normalizeRetentionDays(rules.chatRetentionDays)),
+    callRetentionDays: Math.min(acc.callRetentionDays, normalizeRetentionDays(rules.callRetentionDays)),
   }), normalizeHistoryRules());
 }
 
@@ -121,19 +123,41 @@ async function syncConversationSummary(convDoc, convData = {}) {
 
 async function cleanConversation(convDoc) {
   const convData = convDoc.data() || {};
-  const historyRules = await resolveConversationHistoryRules(convData.members || []);
   const messagesSnap = await convDoc.ref.collection('messages').get();
   if (messagesSnap.empty) return 0;
 
   const nowMs = Date.now();
-  const docsToDelete = messagesSnap.docs.filter((doc) => {
+  const rulesBySenderUid = new Map();
+  let fallbackHistoryRules = null;
+  const getSenderHistoryRules = async (senderUid) => {
+    if (!senderUid) {
+      fallbackHistoryRules ||= await resolveConversationHistoryRules(convData.members || []);
+      return fallbackHistoryRules;
+    }
+    if (!rulesBySenderUid.has(senderUid)) {
+      rulesBySenderUid.set(senderUid, getUserHistoryRules(senderUid));
+    }
+    return rulesBySenderUid.get(senderUid);
+  };
+  const docsToDelete = [];
+
+  for (const doc of messagesSnap.docs) {
     const data = doc.data() || {};
-    const days = normalizeRetentionDays(historyRules.chatRetentionDays);
-    if (days === 0) return true;
+    const senderUid = data.senderId || data.senderUserId || data.callerUid || null;
+    const historyRules = await getSenderHistoryRules(senderUid);
+    const isCallEvent = data.type === 'call' || data.messageType === 'call';
+    const days = normalizeRetentionDays(
+      isCallEvent ? historyRules.callRetentionDays : historyRules.chatRetentionDays,
+    );
+    if (days === 0) {
+      docsToDelete.push(doc);
+      continue;
+    }
     const createdAt = data.createdAt?.toDate ? data.createdAt.toDate().getTime() : data.createdAt?._seconds ? data.createdAt._seconds * 1000 : new Date(data.createdAt || 0).getTime();
-    if (!createdAt) return false;
-    return createdAt < (nowMs - days * 24 * 60 * 60 * 1000);
-  });
+    if (createdAt && createdAt < (nowMs - days * 24 * 60 * 60 * 1000)) {
+      docsToDelete.push(doc);
+    }
+  }
 
   if (docsToDelete.length === 0) return 0;
   const deleted = await deleteDocs(docsToDelete);
@@ -144,8 +168,8 @@ async function cleanConversation(convDoc) {
 // ─── 1. Berichten ─────────────────────────────────────────────────────────────
 // Collection: conversations/{convId}/messages
 // Veld: createdAt (Firestore serverTimestamp)
-// Alle berichttypen worden verwijderd volgens de
-// kortste bewaartermijn van de deelnemers: 24 uur, 7, 14 of standaard 30 dagen.
+// Chats en oproepgebeurtenissen volgen de bewaartermijn van de afzender.
+// Daardoor heeft ieder account in een groepschat controle over eigen historie.
 async function cleanMessages() {
   let totalDeleted = 0;
 
