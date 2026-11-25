@@ -10,6 +10,15 @@ const {
 } = require('../cleanup');
 
 const DEFAULT_HISTORY_RETENTION_DAYS = COMM_RETENTION_DAYS;
+const PAUSABLE_FEATURES = new Set(['chat', 'call', 'video']);
+
+function normalizePausedFeatures(pausedFeatures, legacyPaused = false) {
+  return {
+    chat: pausedFeatures?.chat ?? legacyPaused,
+    call: pausedFeatures?.call ?? legacyPaused,
+    video: pausedFeatures?.video ?? legacyPaused,
+  };
+}
 
 async function getParentHistorySettings(parentUid) {
   const doc = await db.collection('parent_settings').doc(parentUid).get();
@@ -112,7 +121,7 @@ module.exports = (io, onlineUsers) => {
       const children = allDocs.map(d => {
         const { uid, displayName, username, email, photoURL, online, lastSeen, paused, pausedFeatures } = d.data();
         const canManageHistory = isPrimaryParentOf(req.uid, d.data());
-        const pf = { chat: pausedFeatures?.chat ?? paused ?? false };
+        const pf = normalizePausedFeatures(pausedFeatures, paused ?? false);
         return {
           uid,
           displayName,
@@ -249,7 +258,7 @@ module.exports = (io, onlineUsers) => {
         parentIds:   [req.uid],
         parentEmail: parentData.email,
         online:         false,
-        pausedFeatures: { chat: false },
+        pausedFeatures: { chat: false, call: false, video: false },
         createdAt:      admin.firestore.FieldValue.serverTimestamp(),
       });
 
@@ -452,7 +461,7 @@ module.exports = (io, onlineUsers) => {
     } catch (err) { console.error('delete-child fout:', err); res.status(500).json({ error: 'Serverfout' }); }
   });
 
-  // POST /api/parent/pause/:childUid — pauzeer chat voor een kind
+  // POST /api/parent/pause/:childUid — pauzeer een functie voor een kind
   router.post('/api/parent/pause/:childUid', verifyAuth, async (req, res) => {
     try {
       const callerDoc = await db.collection('users').doc(req.uid).get();
@@ -463,14 +472,13 @@ module.exports = (io, onlineUsers) => {
       if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
 
       const { feature } = req.body;
-      let updated;
-      if (!feature || feature === 'all') {
-        updated = { chat: true };
-      } else if (feature === 'chat') {
-        updated = { chat: true };
-      } else {
+      if (!feature || feature === 'all' || !PAUSABLE_FEATURES.has(feature)) {
         return res.status(400).json({ error: 'Ongeldig kenmerk.' });
       }
+      const updated = {
+        ...normalizePausedFeatures(childDoc.data().pausedFeatures, childDoc.data().paused ?? false),
+        [feature]: true,
+      };
 
       await db.collection('users').doc(childUid).update({ pausedFeatures: updated });
       const s = onlineUsers[childUid];
@@ -480,7 +488,7 @@ module.exports = (io, onlineUsers) => {
 
       if (!onlineUsers[childUid]?.size) {
         sendPush(childUid,
-          { title: 'Pulse', body: 'Chatten is gepauzeerd door je ouder.' },
+          { title: 'Pulse', body: `${feature === 'chat' ? 'Chatten' : feature === 'call' ? 'Bellen' : 'Videobellen'} is gepauzeerd door je ouder.` },
           { type: 'paused' }
         );
       }
@@ -488,7 +496,7 @@ module.exports = (io, onlineUsers) => {
     } catch (err) { res.status(500).json({ error: 'Serverfout' }); }
   });
 
-  // POST /api/parent/resume/:childUid — hervat chat voor een kind
+  // POST /api/parent/resume/:childUid — hervat een functie voor een kind
   router.post('/api/parent/resume/:childUid', verifyAuth, async (req, res) => {
     try {
       const callerDoc = await db.collection('users').doc(req.uid).get();
@@ -499,14 +507,13 @@ module.exports = (io, onlineUsers) => {
       if (!isParentOf(req.uid, childDoc.data())) return res.status(403).json({ error: 'Geen toegang.' });
 
       const { feature } = req.body;
-      let updated;
-      if (!feature || feature === 'all') {
-        updated = { chat: false };
-      } else if (feature === 'chat') {
-        updated = { chat: false };
-      } else {
+      if (!feature || feature === 'all' || !PAUSABLE_FEATURES.has(feature)) {
         return res.status(400).json({ error: 'Ongeldig kenmerk.' });
       }
+      const updated = {
+        ...normalizePausedFeatures(childDoc.data().pausedFeatures, childDoc.data().paused ?? false),
+        [feature]: false,
+      };
 
       await db.collection('users').doc(childUid).update({ pausedFeatures: updated });
       const s = onlineUsers[childUid];

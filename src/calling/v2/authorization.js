@@ -19,7 +19,12 @@ function containsAny(values, uid) {
   return Array.isArray(values) && values.includes(uid);
 }
 
-async function isAuthorizedFirestoreContact(callerUid, calleeUid) {
+function isCallPaused(user, mediaType) {
+  const features = user?.pausedFeatures || (user?.paused ? { call: true, video: true } : {});
+  return mediaType === 'video' ? features.video === true : features.call === true;
+}
+
+async function isAuthorizedFirestoreContact(callerUid, calleeUid, mediaType) {
   const [contact, caller, callee] = await Promise.all([
     db.collection('users').doc(callerUid).collection('contacts').doc(calleeUid).get(),
     db.collection('users').doc(callerUid).get(),
@@ -28,7 +33,9 @@ async function isAuthorizedFirestoreContact(callerUid, calleeUid) {
   if (!contact.exists || !caller.exists || !callee.exists) return false;
   const callerData = caller.data() || {};
   const calleeData = callee.data() || {};
-  return !containsAny(callerData.blockedUsers, calleeUid)
+  return !isCallPaused(callerData, mediaType)
+    && !isCallPaused(calleeData, mediaType)
+    && !containsAny(callerData.blockedUsers, calleeUid)
     && !containsAny(callerData.blockedByParent, calleeUid)
     && !containsAny(callerData.removedByParent, calleeUid)
     && !containsAny(calleeData.blockedUsers, callerUid)
@@ -55,9 +62,9 @@ async function isAuthorizedNativeContact(callerUid, calleeUid) {
   return result.rows[0]?.is_contact === true && result.rows[0]?.is_blocked !== true;
 }
 
-async function authorizeCallStart(callerUid, calleeUid) {
+async function authorizeCallStart(callerUid, calleeUid, mediaType) {
   try {
-    if (await isAuthorizedFirestoreContact(callerUid, calleeUid)) return true;
+    if (await isAuthorizedFirestoreContact(callerUid, calleeUid, mediaType)) return true;
   } catch (error) {
     console.warn('[Calling v2] Firestore-contactcontrole mislukt:', error.message);
   }

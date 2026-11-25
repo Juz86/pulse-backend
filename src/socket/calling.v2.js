@@ -123,7 +123,7 @@ module.exports = function registerCallingV2(io, socket, callerUid, options) {
     const input = parse(startSchema, payload, callback);
     if (!input) return;
     try {
-      if (!(await authorizeStart(callerUid, input.calleeUid))) {
+      if (!(await authorizeStart(callerUid, input.calleeUid, input.mediaType))) {
         callback({ ok: false, status: 'NOT_AVAILABLE' });
         return;
       }
