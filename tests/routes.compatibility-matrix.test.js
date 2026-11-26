@@ -3,6 +3,8 @@ const request = require('supertest');
 
 let mockState;
 let mockSendPush;
+let mockSendFriendRequestPush;
+let mockSendFriendRequestOutcomePush;
 
 function mockMakeDocSnapshot(id, data) {
   return {
@@ -80,13 +82,16 @@ function mockMakeCollection(name, ownerId = null) {
           },
         };
       },
-      where() {
+      where(field, op, value) {
         return {
           limit() {
             return this;
           },
           async get() {
-            return { empty: true, docs: [] };
+            const docs = Object.entries(mockState.users)
+              .filter(([, data]) => op === '==' && data[field] === value)
+              .map(([id, data]) => mockMakeDocSnapshot(id, data));
+            return { empty: docs.length === 0, docs };
           },
         };
       },
@@ -118,6 +123,11 @@ function mockMakeCollection(name, ownerId = null) {
 
   if (name === 'friendRequests') {
     return {
+      async add(data) {
+        const id = `req-${Object.keys(mockState.friendRequests).length + 1}`;
+        mockState.friendRequests[id] = { ...data };
+        return { id };
+      },
       doc(requestId) {
         return {
           async get() {
@@ -220,8 +230,9 @@ function mockMakeCollection(name, ownerId = null) {
 
   if (name === 'parentActivities') {
     return {
-      async add() {
-        return { id: 'activity-1' };
+      async add(data) {
+        mockState.parentActivities.push(data);
+        return { id: `activity-${mockState.parentActivities.length}` };
       },
     };
   }
@@ -249,6 +260,12 @@ jest.mock('../src/firebase', () => ({
     },
     batch() {
       return {
+        set(ref, data) {
+          return ref.set(data);
+        },
+        update(ref, patch) {
+          return ref.update(patch);
+        },
         delete(ref) {
           ref.delete();
         },
@@ -275,6 +292,8 @@ jest.mock('../src/state', () => ({
 
 jest.mock('../src/push', () => ({
   sendPush: (...args) => mockSendPush(...args),
+  sendFriendRequestPush: (...args) => mockSendFriendRequestPush(...args),
+  sendFriendRequestOutcomePush: (...args) => mockSendFriendRequestOutcomePush(...args),
 }));
 
 jest.mock('../src/cleanup', () => ({
@@ -301,10 +320,14 @@ describe('compatibility routes', () => {
   beforeEach(() => {
     jest.resetModules();
     mockSendPush = jest.fn().mockResolvedValue(undefined);
+    mockSendFriendRequestPush = jest.fn().mockResolvedValue(undefined);
+    mockSendFriendRequestOutcomePush = jest.fn().mockResolvedValue(undefined);
     mockState = {
       users: {
-        'user-1': { uid: 'user-1', displayName: 'User One' },
-        'user-2': { uid: 'user-2', displayName: 'User Two' },
+        'user-1': { uid: 'user-1', displayName: 'User One', email: 'user1@example.com', parentId: 'parent-1' },
+        'user-2': { uid: 'user-2', displayName: 'User Two', parentId: 'parent-2' },
+        'parent-1': { uid: 'parent-1', displayName: 'Parent One' },
+        'parent-2': { uid: 'parent-2', displayName: 'Parent Two' },
       },
       contacts: {},
       friendRequests: {
@@ -313,6 +336,8 @@ describe('compatibility routes', () => {
           fromName: 'User One',
           fromEmail: 'user1@example.com',
           toUid: 'user-2',
+          toName: 'User Two',
+          toEmail: 'user2@example.com',
           status: 'pending',
         },
       },
@@ -325,6 +350,7 @@ describe('compatibility routes', () => {
         },
       },
       messages: {},
+      parentActivities: [],
     };
   });
 
@@ -406,6 +432,90 @@ describe('compatibility routes', () => {
       remindedAt: 'ts',
     }));
     expect(mockSendPush).toHaveBeenCalled();
+  });
+
+  test('sending a request notifies both involved child accounts parents', async () => {
+    mockState.users['user-2'].email = 'user2@example.com';
+    const app = buildApp();
+    const response = await request(app)
+      .post('/api/friend-requests')
+      .set('x-test-uid', 'user-1')
+      .send({
+        fromUid: 'user-1',
+        fromName: 'User One',
+        fromEmail: 'user1@example.com',
+        toEmail: 'user2@example.com',
+      });
+
+    expect(response.status).toBe(200);
+    expect(mockState.parentActivities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ parentId: 'parent-1', type: 'friend_request_sent' }),
+      expect.objectContaining({ parentId: 'parent-2', type: 'friend_request_received' }),
+    ]));
+    expect(mockSendPush).toHaveBeenCalledWith(
+      'parent-1',
+      expect.objectContaining({ title: 'Pulse - Ouderlijk toezicht' }),
+      expect.objectContaining({ action: 'friend_request_sent' }),
+    );
+    expect(mockSendPush).toHaveBeenCalledWith(
+      'parent-2',
+      expect.objectContaining({ title: 'Pulse - Ouderlijk toezicht' }),
+      expect.objectContaining({ action: 'friend_request_received' }),
+    );
+  });
+
+  test('accepting an offline friend request updates both lists and notifies the sender', async () => {
+    const app = buildApp();
+    const response = await request(app)
+      .post('/api/friend-requests/req-1/accept')
+      .set('x-test-uid', 'user-2');
+
+    expect(response.status).toBe(200);
+    expect(mockState.friendRequests['req-1'].status).toBe('accepted');
+    expect(mockState.contacts['user-1']['user-2']).toEqual(expect.objectContaining({ uid: 'user-2' }));
+    expect(mockState.contacts['user-2']['user-1']).toEqual(expect.objectContaining({ uid: 'user-1' }));
+    expect(mockSendFriendRequestOutcomePush).toHaveBeenCalledWith(expect.objectContaining({
+      recipientUid: 'user-1',
+      requestId: 'req-1',
+      actorDisplayName: 'User Two',
+      outcome: 'accepted',
+    }));
+    expect(mockState.parentActivities).toEqual([expect.objectContaining({
+      parentId: 'parent-2',
+      childUid: 'user-2',
+      type: 'friend_request_accepted',
+    })]);
+    expect(mockSendPush).toHaveBeenCalledWith(
+      'parent-2',
+      expect.objectContaining({ title: 'Pulse - Ouderlijk toezicht' }),
+      expect.objectContaining({ type: 'parent_friend_request_activity', action: 'friend_request_accepted' }),
+    );
+  });
+
+  test('declining an offline friend request notifies the sender', async () => {
+    const app = buildApp();
+    const response = await request(app)
+      .post('/api/friend-requests/req-1/decline')
+      .set('x-test-uid', 'user-2');
+
+    expect(response.status).toBe(200);
+    expect(mockState.friendRequests['req-1'].status).toBe('declined');
+    expect(mockSendFriendRequestOutcomePush).toHaveBeenCalledWith(expect.objectContaining({
+      recipientUid: 'user-1',
+      requestId: 'req-1',
+      actorDisplayName: 'User Two',
+      outcome: 'declined',
+    }));
+    expect(mockState.parentActivities).toEqual([expect.objectContaining({
+      parentId: 'parent-2',
+      childUid: 'user-2',
+      type: 'friend_request_declined',
+    })]);
+    expect(mockSendPush).toHaveBeenCalledWith(
+      'parent-2',
+      expect.objectContaining({ title: 'Pulse - Ouderlijk toezicht' }),
+      expect.objectContaining({ type: 'parent_friend_request_activity', action: 'friend_request_declined' }),
+    );
   });
 
   test('DELETE /api/friend-requests/:requestId/cancel marks request as cancelled', async () => {

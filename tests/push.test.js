@@ -138,6 +138,37 @@ describe('push notifications', () => {
     }]]));
   });
 
+  test('sends an interactive friend request to native Android and a compatible push elsewhere', async () => {
+    const { sendFriendRequestPush } = require('../src/push');
+
+    await sendFriendRequestPush({
+      recipientUid: 'recipient',
+      requestId: 'request-1',
+      senderUid: 'sender',
+      senderDisplayName: 'Yousef',
+    });
+
+    expect(mockSendEachForMulticast).toHaveBeenCalledTimes(2);
+    expect(mockSendEachForMulticast.mock.calls).toEqual(expect.arrayContaining([[expect.objectContaining({
+      tokens: ['native-token'],
+      data: expect.objectContaining({
+        type: 'friend_request',
+        recipientUid: 'recipient',
+        requestId: 'request-1',
+        senderUid: 'sender',
+        senderDisplayName: 'Yousef',
+      }),
+      android: { priority: 'high' },
+    })], [expect.objectContaining({
+      tokens: ['legacy-token'],
+      notification: {
+        title: 'Pulse - Nieuwe uitnodiging',
+        body: 'Yousef heeft je een vriendschapsverzoek gestuurd.',
+      },
+      data: { type: 'friend_request', requestId: 'request-1' },
+    })]]));
+  });
+
   test('sends incoming calls only to native Android device tokens', async () => {
     mockPushDevices.push({
       uid: 'recipient',

@@ -182,6 +182,83 @@ async function sendMessagePush({
   return { native: nativeResult, compatible: compatibleResult };
 }
 
+async function sendFriendRequestPush({
+  recipientUid,
+  requestId,
+  senderUid,
+  senderDisplayName,
+  senderPhotoUrl = '',
+}) {
+  if (!recipientUid || !requestId || !senderUid || !senderDisplayName) return;
+  const nativeDevices = await listPushDevices(recipientUid, {
+    transport: 'fcm_native',
+    platform: 'android',
+  });
+  const nativeTokens = [...new Set(nativeDevices.map((device) => device.token).filter(Boolean))];
+  const body = `${senderDisplayName} heeft je een vriendschapsverzoek gestuurd.`;
+  const nativeData = {
+    type: 'friend_request',
+    recipientUid,
+    requestId,
+    senderUid,
+    senderDisplayName,
+    senderPhotoURL: senderPhotoUrl,
+    body,
+  };
+
+  const [nativeResult, compatibleResult] = await Promise.all([
+    sendPush(recipientUid, null, nativeData, {
+      androidPriority: 'high',
+      nativeAndroidOnly: true,
+    }),
+    sendPush(
+      recipientUid,
+      { title: 'Pulse - Nieuwe uitnodiging', body },
+      { type: 'friend_request', requestId },
+      { excludeTokens: nativeTokens },
+    ),
+  ]);
+  return { native: nativeResult, compatible: compatibleResult };
+}
+
+async function sendFriendRequestOutcomePush({
+  recipientUid,
+  requestId,
+  actorDisplayName,
+  outcome,
+}) {
+  if (!recipientUid || !requestId || !actorDisplayName || !['accepted', 'declined'].includes(outcome)) return;
+  const nativeDevices = await listPushDevices(recipientUid, {
+    transport: 'fcm_native',
+    platform: 'android',
+  });
+  const nativeTokens = [...new Set(nativeDevices.map((device) => device.token).filter(Boolean))];
+  const verb = outcome === 'accepted' ? 'geaccepteerd' : 'geweigerd';
+  const body = `${actorDisplayName} heeft je vriendschapsverzoek ${verb}.`;
+  const nativeData = {
+    type: 'friend_request_result',
+    recipientUid,
+    requestId,
+    actorDisplayName,
+    outcome,
+    body,
+  };
+
+  const [nativeResult, compatibleResult] = await Promise.all([
+    sendPush(recipientUid, null, nativeData, {
+      androidPriority: 'high',
+      nativeAndroidOnly: true,
+    }),
+    sendPush(
+      recipientUid,
+      { title: 'Pulse', body },
+      { type: 'friend_request_result', requestId, outcome },
+      { excludeTokens: nativeTokens },
+    ),
+  ]);
+  return { native: nativeResult, compatible: compatibleResult };
+}
+
 async function sendIncomingCallPush(session) {
   if (!session?.sessionId || !session?.callerUid || !session?.calleeUid) return;
   traceCall('FCM_SEND_REQUESTED', {
@@ -270,6 +347,8 @@ async function sendCallTakenElsewherePush(session) {
 module.exports = {
   sendPush,
   sendMessagePush,
+  sendFriendRequestPush,
+  sendFriendRequestOutcomePush,
   sendIncomingCallPush,
   sendTerminalCallPush,
   sendCallTakenElsewherePush,

@@ -1,7 +1,11 @@
 const { admin, db } = require('../firebase');
 const { verifyAuth, friendReqLimiter } = require('../middleware');
 const { getSocketId } = require('../state');
-const { sendPush } = require('../push');
+const {
+  sendPush,
+  sendFriendRequestPush,
+  sendFriendRequestOutcomePush,
+} = require('../push');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
@@ -29,6 +33,51 @@ async function findUserByIdentifier(identifier) {
 
 module.exports = (io, onlineUsers) => {
   const router = require('express').Router();
+
+  async function notifyParentFriendActivity({
+    childUid,
+    childName,
+    parentId,
+    type,
+    description,
+    requestId,
+  }) {
+    try {
+      let resolvedParentId = parentId;
+      if (!resolvedParentId) {
+        const childDoc = await db.collection('users').doc(childUid).get();
+        resolvedParentId = childDoc.data()?.parentId;
+      }
+      if (!resolvedParentId) return;
+
+      const activity = {
+        parentId: resolvedParentId,
+        childUid,
+        childName,
+        type,
+        description,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+      await db.collection('parentActivities').add(activity);
+      io.to(resolvedParentId).emit('parent:activity', {
+        type,
+        description,
+        childName,
+        childUid,
+        requestId,
+      });
+
+      if (!getSocketId(resolvedParentId)) {
+        await sendPush(
+          resolvedParentId,
+          { title: 'Pulse - Ouderlijk toezicht', body: description },
+          { type: 'parent_friend_request_activity', childUid, requestId, action: type },
+        );
+      }
+    } catch (error) {
+      console.warn(`Oudermelding mislukt (${type}):`, error.message);
+    }
+  }
 
   // ─── REST: Vriendschapsverzoek sturen ────────────────────────────────────────
   router.post('/api/friend-requests', verifyAuth, friendReqLimiter, async (req, res) => {
@@ -112,24 +161,33 @@ module.exports = (io, onlineUsers) => {
 
       // Als ontvanger offline is: stuur push notificatie
       if (!targetSocket) {
-        sendPush(toUser.uid,
-          { title: 'Pulse — Nieuwe uitnodiging', body: `${fromName} wil je toevoegen als contact.` },
-          {}
-        ).catch(e => console.warn('[Pulse] Push bij vriendschapsverzoek mislukt:', e.message));
+        sendFriendRequestPush({
+          recipientUid: toUser.uid,
+          requestId: reqRef.id,
+          senderUid: fromUid,
+          senderDisplayName: fromName,
+          senderPhotoUrl: fromPhoto || '',
+        }).catch(e => console.warn('[Pulse] Push bij vriendschapsverzoek mislukt:', e.message));
       }
 
-      // Activiteit opslaan + ouder realtime notificeren als kind een verzoek stuurt
-      db.collection('users').doc(fromUid).get().then(senderDoc => {
-        const parentId = senderDoc.data()?.parentId;
-        if (!parentId) return;
-        const description = `${fromName} heeft een vriendschapsverzoek verstuurd naar ${toUser.displayName || toUser.email || identifier}.`;
-        db.collection('parentActivities').add({
-          parentId, childUid: fromUid, childName: fromName,
-          type: 'friend_request_sent', description,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        }).catch(e => console.warn('parentActivities opslaan mislukt (sent):', e.message));
-        io.to(parentId).emit('parent:activity', { type: 'friend_request_sent', description, childName: fromName });
-      }).catch(e => console.warn('Ouder ophalen mislukt (sent):', e.message));
+      await Promise.all([
+        notifyParentFriendActivity({
+          childUid: fromUid,
+          childName: fromName,
+          parentId: senderDoc.data()?.parentId,
+          type: 'friend_request_sent',
+          description: `${fromName} heeft een vriendschapsverzoek verstuurd naar ${toUser.displayName || toUser.email || identifier}.`,
+          requestId: reqRef.id,
+        }),
+        notifyParentFriendActivity({
+          childUid: toUser.uid,
+          childName: toUser.displayName || toUser.email || 'Je kind',
+          parentId: recipientDoc.data()?.parentId,
+          type: 'friend_request_received',
+          description: `${toUser.displayName || toUser.email || 'Je kind'} heeft een vriendschapsverzoek van ${fromName} ontvangen.`,
+          requestId: reqRef.id,
+        }),
+      ]);
       res.json({ success: true, requestId: reqRef.id, toUid: toUser.uid });
     } catch (err) {
       console.error(err);
@@ -211,25 +269,27 @@ module.exports = (io, onlineUsers) => {
       // Notificeer de verzender realtime via room, of via push als offline
       const senderSocket = getSocketId(fromUid);
       io.to(fromUid).emit('friend:accepted', { byUid: toUid, byName: toName, byEmail: toEmail });
+      io.to(toUid).emit('contacts:updated', { reason: 'friend_request_accepted' });
+      io.to(fromUid).emit('contacts:updated', { reason: 'friend_request_accepted' });
+      io.to(toUid).emit('contact-requests:updated', { reason: 'friend_request_accepted' });
+      io.to(fromUid).emit('contact-requests:updated', { reason: 'friend_request_accepted' });
       if (!senderSocket) {
-        sendPush(fromUid,
-          { title: 'Pulse — Verzoek geaccepteerd', body: `${toName} heeft jouw vriendschapsverzoek geaccepteerd.` },
-          {}
-        ).catch(e => console.warn('[Pulse] Push bij acceptatie mislukt:', e.message));
+        sendFriendRequestOutcomePush({
+          recipientUid: fromUid,
+          requestId,
+          actorDisplayName: toName,
+          outcome: 'accepted',
+        }).catch(e => console.warn('[Pulse] Push bij acceptatie mislukt:', e.message));
       }
 
-      // Activiteit opslaan + ouder realtime notificeren als kind een verzoek accepteert
-      db.collection('users').doc(toUid).get().then(acceptorDoc => {
-        const parentId = acceptorDoc.data()?.parentId;
-        if (!parentId) return;
-        const description = `${toName} heeft een vriendschapsverzoek van ${fromName} geaccepteerd.`;
-        db.collection('parentActivities').add({
-          parentId, childUid: toUid, childName: toName,
-          type: 'friend_request_accepted', description,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        }).catch(e => console.warn('parentActivities opslaan mislukt (accepted):', e.message));
-        io.to(parentId).emit('parent:activity', { type: 'friend_request_accepted', description, childName: toName });
-      }).catch(e => console.warn('Ouder ophalen mislukt (accepted):', e.message));
+      await notifyParentFriendActivity({
+        childUid: toUid,
+        childName: toName || toEmail || 'Je kind',
+        parentId: acceptorDoc.data()?.parentId,
+        type: 'friend_request_accepted',
+        description: `${toName || toEmail || 'Je kind'} heeft een vriendschapsverzoek van ${fromName} geaccepteerd.`,
+        requestId,
+      });
       res.json({ success: true });
     } catch (err) {
       console.error(err);
@@ -243,8 +303,29 @@ module.exports = (io, onlineUsers) => {
       const { requestId } = req.params;
       const reqDoc = await db.collection('friendRequests').doc(requestId).get();
       if (!reqDoc.exists) return res.status(404).json({ error: 'Verzoek niet gevonden' });
-      if (req.uid !== reqDoc.data().toUid) return res.status(403).json({ error: 'Geen toegang.' });
+      const { fromUid, fromName, toUid, toName, toEmail } = reqDoc.data();
+      if (req.uid !== toUid) return res.status(403).json({ error: 'Geen toegang.' });
       await db.collection('friendRequests').doc(requestId).update({ status: 'declined' });
+      const senderSocket = getSocketId(fromUid);
+      const declinedByName = toName || toEmail || 'Je contactpersoon';
+      io.to(fromUid).emit('friend:declined', { byUid: toUid, byName: declinedByName, requestId });
+      io.to(toUid).emit('contact-requests:updated', { reason: 'friend_request_declined' });
+      io.to(fromUid).emit('contact-requests:updated', { reason: 'friend_request_declined' });
+      if (!senderSocket) {
+        sendFriendRequestOutcomePush({
+          recipientUid: fromUid,
+          requestId,
+          actorDisplayName: declinedByName,
+          outcome: 'declined',
+        }).catch(e => console.warn('[Pulse] Push bij weigering mislukt:', e.message));
+      }
+      await notifyParentFriendActivity({
+        childUid: toUid,
+        childName: declinedByName,
+        type: 'friend_request_declined',
+        description: `${declinedByName} heeft een vriendschapsverzoek van ${fromName || 'een contactpersoon'} geweigerd.`,
+        requestId,
+      });
       res.json({ success: true });
     } catch (err) {
       console.error(err);
