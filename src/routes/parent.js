@@ -20,6 +20,64 @@ function normalizePausedFeatures(pausedFeatures, legacyPaused = false) {
   };
 }
 
+function messageBelongsToUser(message = {}, uid) {
+  return message.senderId === uid
+    || message.senderUserId === uid
+    || message.callerUid === uid
+    || message.calleeUid === uid;
+}
+
+function timestampMs(value) {
+  if (typeof value?.toDate === 'function') return value.toDate().getTime();
+  if (Number.isFinite(value?._seconds)) return value._seconds * 1000;
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function conversationSummaryUpdate(messages = []) {
+  const latest = [...messages].sort((left, right) => (
+    timestampMs(right.data().createdAt) - timestampMs(left.data().createdAt)
+  ))[0];
+
+  if (!latest) {
+    return {
+      lastMessage: null,
+      lastMessageAt: null,
+      lastMessageType: null,
+      lastCallEvent: admin.firestore.FieldValue.delete(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+  }
+
+  const message = latest.data() || {};
+  const isCall = message.type === 'call' || message.messageType === 'call';
+  return {
+    lastMessage: message.type === 'contact' ? `Contactpersoon: ${message.sharedContact?.name || ''}` : (message.text || ''),
+    lastMessageAt: message.createdAt || admin.firestore.FieldValue.serverTimestamp(),
+    lastMessageType: message.type || message.messageType || 'text',
+    lastCallEvent: isCall
+      ? {
+          sessionId: message.sessionId,
+          mediaType: message.mediaType || 'audio',
+          terminalReason: message.terminalReason || 'missed',
+          callerUid: message.callerUid,
+          calleeUid: message.calleeUid,
+          occurredAt: message.occurredAt,
+          presentations: message.presentations || {},
+        }
+      : admin.firestore.FieldValue.delete(),
+    updatedAt: message.createdAt || admin.firestore.FieldValue.serverTimestamp(),
+  };
+}
+
+async function deleteDocumentsInBatches(docs) {
+  for (let index = 0; index < docs.length; index += 500) {
+    const batch = db.batch();
+    docs.slice(index, index + 500).forEach((docSnap) => batch.delete(docSnap.ref));
+    await batch.commit();
+  }
+}
+
 async function getParentHistorySettings(parentUid) {
   const doc = await db.collection('parent_settings').doc(parentUid).get();
   const data = doc.exists ? doc.data() || {} : {};
@@ -374,30 +432,35 @@ module.exports = (io, onlineUsers) => {
         }
       }
 
-      // 2. Gesprekken + berichten
+      // 2. Gesprekken + berichten. Andere deelnemers behouden altijd hun eigen
+      // berichten; alleen communicatie waar het kind zelf bij betrokken is verdwijnt.
       const convsSnap = await db.collection('conversations').where('members', 'array-contains', childUid).get();
       for (const convDoc of convsSnap.docs) {
-        const convData = convDoc.data();
-        const { members = [], isGroup } = convData;
+        const convData = convDoc.data() || {};
+        const { members = [] } = convData;
         const msgsSnap = await convDoc.ref.collection('messages').get();
-        const batch = db.batch();
-        msgsSnap.docs.forEach(d => batch.delete(d.ref));
-        if (members.length <= 2) {
-          batch.delete(convDoc.ref);
-          if (isGroup) {
-            storage.bucket().file(`groups/${convDoc.id}/photo`).delete().catch(() => {});
-          }
-        } else {
-          batch.update(convDoc.ref, {
-            members: members.filter(m => m !== childUid),
-            [`memberNames.${childUid}`]: admin.firestore.FieldValue.delete(),
-          });
-        }
-        await batch.commit();
+        const childMessages = msgsSnap.docs.filter((messageDoc) => (
+          messageBelongsToUser(messageDoc.data() || {}, childUid)
+        ));
+        const remainingMessages = msgsSnap.docs.filter((messageDoc) => !childMessages.includes(messageDoc));
+        await deleteDocumentsInBatches(childMessages);
+
+        await convDoc.ref.update({
+          ...conversationSummaryUpdate(remainingMessages),
+          members: members.filter((memberUid) => memberUid !== childUid),
+          [`memberNames.${childUid}`]: admin.firestore.FieldValue.delete(),
+          deletedFor: admin.firestore.FieldValue.arrayUnion(childUid),
+          [`clearedAt.${childUid}`]: admin.firestore.FieldValue.serverTimestamp(),
+        });
       }
 
       // 3. Eigen contacts-subcollectie
       const contactsSnap = await db.collection('users').doc(childUid).collection('contacts').get();
+      const contactRecipientUids = new Set(
+        contactsSnap.docs
+          .map((contactDoc) => contactDoc.data()?.uid || contactDoc.id)
+          .filter((contactUid) => contactUid && contactUid !== childUid && contactUid !== req.uid),
+      );
       if (!contactsSnap.empty) {
         const batch = db.batch();
         contactsSnap.docs.forEach(d => batch.delete(d.ref));
@@ -409,7 +472,13 @@ module.exports = (io, onlineUsers) => {
       if (!reverseSnap.empty) {
         for (let i = 0; i < reverseSnap.docs.length; i += 500) {
           const batch = db.batch();
-          reverseSnap.docs.slice(i, i + 500).forEach(d => batch.delete(d.ref));
+          reverseSnap.docs.slice(i, i + 500).forEach(d => {
+            const contactOwnerUid = d.ref.parent.parent?.id;
+            if (contactOwnerUid && contactOwnerUid !== childUid && contactOwnerUid !== req.uid) {
+              contactRecipientUids.add(contactOwnerUid);
+            }
+            batch.delete(d.ref);
+          });
           await batch.commit();
         }
       }
@@ -447,6 +516,9 @@ module.exports = (io, onlineUsers) => {
       }
 
       // 8. Firestore gebruikersdocument
+      const devicesSnap = await db.collection('users').doc(childUid).collection('devices').get();
+      await deleteDocumentsInBatches(devicesSnap.docs);
+      await db.collection('child_settings').doc(childUid).delete();
       await db.collection('users').doc(childUid).delete();
 
       // 9. Firebase Storage: profielfoto + chatachtergrond
@@ -456,6 +528,21 @@ module.exports = (io, onlineUsers) => {
       };
       await deleteFile(`users/${childUid}/profilePhoto`);
       await deleteFile(`users/${childUid}/chatBackground`);
+
+      const deletedAccountMessage = `${childData.displayName || 'Dit kind'} account is door ouder verwijderd.`;
+      await Promise.all([...contactRecipientUids].map(async (contactUid) => {
+        const contactSockets = onlineUsers[contactUid];
+        if (contactSockets) {
+          contactSockets.forEach((socketId) => {
+            io.to(socketId).emit('contact:account-deleted', { childUid, message: deletedAccountMessage });
+          });
+        }
+        await sendPush(
+          contactUid,
+          { title: 'Pulse', body: deletedAccountMessage },
+          { type: 'child_account_deleted', childUid },
+        );
+      }));
 
       res.json({ success: true });
     } catch (err) { console.error('delete-child fout:', err); res.status(500).json({ error: 'Serverfout' }); }
